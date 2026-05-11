@@ -24,3 +24,42 @@ The pipeline follows:
 6. `get_ui_data`
 
 Rule/action/threshold definitions are stored under `ma_detector/config/`.
+
+## Ground-station Dashboard
+
+This branch also includes a FastAPI backend and a Next.js dashboard UI.
+
+### Backend
+
+```bash
+python3 -m pip install -r requirements.txt
+uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+Important API endpoints:
+
+- `GET /api/dashboard` - latest communications, recent threats, blueprint state, and MA codes
+- `GET /api/detections/{detect_id}` - selected MA code detail and triggered rule evidence
+- `POST /api/telemetry` - receive the satellite JSON and refresh dashboard state
+- `GET /api/rules` - current rule, action, and threshold settings
+- `POST /api/replay` - replay packets after rule/threshold edits
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Set `NEXT_PUBLIC_API_URL=http://localhost:8000` if the API runs on a different host.
+
+Dashboard features:
+
+- Left blueprint for OBC, TCS, EPS, ADCS, and COM
+- Recent 5-communication threat highlights by subsystem
+- Emphasis by phase and confidence
+- Right-side latest communication result and chronological MA code list
+- Search/select control for stored MA codes
+- Rule evidence details for selected codes
+- Rule/threshold panel with replay support

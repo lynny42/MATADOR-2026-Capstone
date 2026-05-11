@@ -1,0 +1,21 @@
+{
+  "name": "matador-ma-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "latest",
+    "postcss": "^8.5.14",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.14"
+    }
+  }
+}

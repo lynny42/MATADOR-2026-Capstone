@@ -127,6 +127,54 @@ class MAIntegratedDetector:
             logger.error("get replay buffer failed: %s", error)
             return []
 
+    def get_dashboard_records(self) -> list[dict[str, Any]]:
+        """Return persisted MA dashboard rows."""
+        try:
+            return [dict(row) for row in self._dashboard_rows]
+        except Exception as error:
+            logger.error("get dashboard records failed: %s", error)
+            return []
+
+    def get_history_records(self) -> list[dict[str, Any]]:
+        """Return ground-station telemetry history rows."""
+        try:
+            return [dict(row) for row in self._gs_tlm_history]
+        except Exception as error:
+            logger.error("get history records failed: %s", error)
+            return []
+
+    def get_discard_records(self) -> list[dict[str, Any]]:
+        """Return discarded detection reports."""
+        try:
+            return [dict(row) for row in self._discard_log]
+        except Exception as error:
+            logger.error("get discard records failed: %s", error)
+            return []
+
+    def get_rule_registry(self) -> dict[str, Any]:
+        """Return the active rule registry."""
+        try:
+            return dict(self._rule_registry)
+        except Exception as error:
+            logger.error("get rule registry failed: %s", error)
+            return {}
+
+    def get_action_registry(self) -> dict[str, Any]:
+        """Return the active action registry."""
+        try:
+            return dict(self._action_registry)
+        except Exception as error:
+            logger.error("get action registry failed: %s", error)
+            return {}
+
+    def get_threshold_config(self) -> dict[str, Any]:
+        """Return the active threshold configuration."""
+        try:
+            return dict(self._threshold_config)
+        except Exception as error:
+            logger.error("get threshold config failed: %s", error)
+            return {}
+
     def receive_telemetry(self, json_token: str) -> None:
         """Parse satellite JSON and execute the MA detection pipeline for attack-like events."""
         try:
