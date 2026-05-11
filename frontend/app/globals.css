@@ -36,10 +36,10 @@ button {
 }
 
 .page-shell {
+  width: min(1180px, calc(100vw - 32px));
   margin: 0 auto;
-  max-width: 1080px;
   min-height: 100vh;
-  padding: 12px;
+  padding: 16px 0;
 }
 
 .topbar,
@@ -82,12 +82,15 @@ button {
   border-radius: 18px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
   padding: 14px;
+  width: 100%;
 }
 
 .dashboard-grid {
   display: grid;
-  gap: 20px;
+  gap: 16px;
   grid-template-columns: 1fr;
+  justify-items: stretch;
+  width: 100%;
 }
 
 .rule-button,
@@ -109,6 +112,7 @@ button {
     "eps adcs com"
     "tcs adcs com";
   margin-top: 14px;
+  width: 100%;
 }
 
 .subsystem-card {
@@ -279,6 +283,7 @@ button {
   display: flex;
   flex: 1;
   gap: 10px;
+  min-width: 240px;
   padding: 10px 14px;
 }
 
@@ -295,7 +300,7 @@ button {
 }
 
 .communication-select {
-  flex: 1 1 380px;
+  flex: 1.2 1 360px;
 }
 
 .reset-button {
@@ -469,7 +474,8 @@ button {
 }
 
 .rule-grid {
-  grid-template-columns: 0.9fr 1.1fr 1.1fr 1fr;
+  align-items: start;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1fr) minmax(240px, 1fr) minmax(220px, 0.9fr);
   margin-top: 18px;
 }
 
@@ -538,6 +544,12 @@ pre {
   width: 100%;
 }
 
+.replay-layout {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+}
+
 .error-banner,
 .loading-card {
   background: rgba(248, 113, 113, 0.12);
@@ -547,12 +559,7 @@ pre {
   padding: 14px;
 }
 
-@media (max-width: 1100px) {
-  .dashboard-grid,
-  .rule-grid {
-    grid-template-columns: 1fr;
-  }
-
+@media (max-width: 820px) {
   .satellite-map {
     grid-template-areas: none;
     grid-template-columns: 1fr;
@@ -563,7 +570,10 @@ pre {
   }
 
   .filter-grid,
-  .column-grid {
+  .column-grid,
+  .comparison-grid,
+  .comparison-summary,
+  .rule-grid {
     grid-template-columns: 1fr;
   }
 
