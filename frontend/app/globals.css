@@ -37,10 +37,10 @@ button {
 }
 
 .page-shell {
-  width: min(1180px, calc(100vw - 32px));
+  width: min(1720px, calc(100vw - 64px));
   margin: 0 auto;
   min-height: 100vh;
-  padding: 16px 0;
+  padding: 24px 0;
 }
 
 .topbar,
@@ -89,7 +89,7 @@ button {
 
 .dashboard-grid {
   display: grid;
-  gap: 16px;
+  gap: 20px;
   grid-template-columns: 1fr;
   justify-items: stretch;
   width: 100%;
@@ -109,7 +109,10 @@ button {
 .satellite-map {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-areas:
+    "obc obc com"
+    "eps adcs com"
+    "tcs adcs com";
   margin-top: 14px;
   width: 100%;
 }
@@ -126,6 +129,26 @@ button {
 
 .subsystem-card:hover {
   transform: translateY(-2px);
+}
+
+.subsystem-card:nth-child(1) {
+  grid-area: obc;
+}
+
+.subsystem-card:nth-child(2) {
+  grid-area: tcs;
+}
+
+.subsystem-card:nth-child(3) {
+  grid-area: eps;
+}
+
+.subsystem-card:nth-child(4) {
+  grid-area: adcs;
+}
+
+.subsystem-card:nth-child(5) {
+  grid-area: com;
 }
 
 .severity-normal {
@@ -543,7 +566,12 @@ pre {
 
 @media (max-width: 1020px) {
   .satellite-map {
+    grid-template-areas: none;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .subsystem-card:nth-child(n) {
+    grid-area: auto;
   }
 
   .filter-grid,
@@ -562,6 +590,7 @@ pre {
   }
 
   .satellite-map {
+    grid-template-areas: none;
     grid-template-columns: 1fr;
   }
 }
