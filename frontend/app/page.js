@@ -31,6 +31,7 @@ export default function DashboardPage() {
   const [replayThresholdDraft, setReplayThresholdDraft] = useState("");
   const [replayBusy, setReplayBusy] = useState(false);
   const [replayUpdatedAt, setReplayUpdatedAt] = useState("");
+  const [replayDirty, setReplayDirty] = useState(false);
   const [error, setError] = useState("");
 
   async function loadDashboard(options = {}) {
@@ -120,9 +121,12 @@ export default function DashboardPage() {
       setReplayNewRuleId("");
       setReplayRuleEditor(JSON.stringify(rulesCopy[firstRule] || defaultRuleDefinition(), null, 2));
       setReplayThresholdDraft(JSON.stringify(thresholdCopy, null, 2));
+      setReplayDashboard(null);
+      setReplayResult(null);
+      setReplayUpdatedAt("");
+      setReplayDirty(false);
       setRulesOpen(false);
       setReplayMode(true);
-      await runReplayPreview(rulesCopy, thresholdCopy);
     } catch (replayError) {
       setError(replayError.message);
     } finally {
@@ -140,6 +144,7 @@ export default function DashboardPage() {
       setReplayResult(payload);
       setReplayDashboard(payload.dashboard);
       setReplayUpdatedAt(new Date().toLocaleTimeString());
+      setReplayDirty(false);
       setError("");
     } catch (replayError) {
       setError(replayError.message);
@@ -172,7 +177,7 @@ export default function DashboardPage() {
       setReplayRules(nextRules);
       setReplayRuleId(ruleId);
       setReplayNewRuleId("");
-      await runReplayPreview(nextRules, replayThresholds);
+      markReplayDirty();
     } catch (saveError) {
       setError(saveError.message);
     }
@@ -190,7 +195,7 @@ export default function DashboardPage() {
       setReplayRules(nextRules);
       setReplayRuleId(nextRuleId);
       setReplayRuleEditor(JSON.stringify(nextRules[nextRuleId] || defaultRuleDefinition(), null, 2));
-      await runReplayPreview(nextRules, replayThresholds);
+      markReplayDirty();
     } catch (deleteError) {
       setError(deleteError.message);
     }
@@ -200,10 +205,17 @@ export default function DashboardPage() {
     try {
       const nextThresholds = JSON.parse(replayThresholdDraft);
       setReplayThresholds(nextThresholds);
-      await runReplayPreview(replayRules, nextThresholds);
+      markReplayDirty();
     } catch (saveError) {
       setError(saveError.message);
     }
+  }
+
+  function markReplayDirty() {
+    setReplayDirty(true);
+    setReplayDashboard(null);
+    setReplayResult(null);
+    setReplayUpdatedAt("");
   }
 
   async function applyReplayConfig() {
@@ -277,6 +289,7 @@ export default function DashboardPage() {
           replayRuleEditor={replayRuleEditor}
           replayBusy={replayBusy}
           replayUpdatedAt={replayUpdatedAt}
+          replayDirty={replayDirty}
           onRuleSelect={selectReplayRule}
           onNewRuleIdChange={setReplayNewRuleId}
           onRuleEditorChange={setReplayRuleEditor}
@@ -627,6 +640,7 @@ function ReplayWorkspace({
   replayRuleEditor,
   replayBusy,
   replayUpdatedAt,
+  replayDirty,
   onRuleSelect,
   onNewRuleIdChange,
   onRuleEditorChange,
@@ -703,18 +717,33 @@ function ReplayWorkspace({
             <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
               {replayBusy ? "Replay 생성 중..." : `임시 대시보드 반영됨 ${replayUpdatedAt || ""}`}
             </div>
-            <p className="muted">아래 대시보드는 저장된 원시 수신 history 전체를 임시 Rule/Threshold로 다시 판단한 결과입니다.</p>
+            <p className="muted">저장된 원시 수신 history 전체를 임시 Rule/Threshold로 다시 판단합니다.</p>
           </div>
         </div>
       </section>
-      <ReplayComparison comparison={comparison} replayBusy={replayBusy} replayUpdatedAt={replayUpdatedAt} />
+      <ReplayComparison
+        comparison={comparison}
+        replayBusy={replayBusy}
+        replayDirty={replayDirty}
+        replayUpdatedAt={replayUpdatedAt}
+      />
     </section>
   );
 }
 
-function ReplayComparison({ comparison, replayBusy, replayUpdatedAt }) {
+function ReplayComparison({ comparison, replayBusy, replayDirty, replayUpdatedAt }) {
   if (!comparison) {
-    return <section className="panel">Replay 비교 결과를 생성하는 중입니다.</section>;
+    return (
+      <section className="panel replay-comparison empty">
+        <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
+          {replayBusy
+            ? "Replay 실행 중..."
+            : replayDirty
+              ? "임시 변경사항이 있습니다. Replay 실행을 눌러 비교 결과를 생성하세요."
+              : "Rule/Threshold를 임시로 수정한 뒤 Replay 실행을 누르세요."}
+        </div>
+      </section>
+    );
   }
 
   return (
