@@ -206,6 +206,20 @@ button {
   margin-top: 20px;
 }
 
+.recent-threat-track {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  scroll-snap-type: x proximity;
+}
+
+.recent-threat-track .threat-row {
+  flex: 0 0 320px;
+  scroll-snap-align: start;
+}
+
 .recent-threats h3,
 .timeline h3,
 .rule-panel h3 {

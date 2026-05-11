@@ -236,17 +236,19 @@ function BlueprintPanel({ blueprint, recentThreats, onSelect }) {
       <div className="recent-threats">
         <h3>최근 위협 탐지</h3>
         {recentThreats.length ? (
-          recentThreats.map((detection) => (
-            <button
-              key={detection.detect_id}
-              className="threat-row"
-              onClick={() => onSelect(detection.detect_id)}
-            >
-              <span>{detection.detect_time}</span>
-              <strong>{detection.ma_code}</strong>
-              <em>{detection.confidence}% / P{detection.phase}</em>
-            </button>
-          ))
+          <div className="recent-threat-track" aria-label="최근 위협 탐지 코드 슬라이더">
+            {recentThreats.map((detection) => (
+              <button
+                key={detection.detect_id}
+                className="threat-row"
+                onClick={() => onSelect(detection.detect_id)}
+              >
+                <span>{detection.detect_time}</span>
+                <strong>{detection.ma_code}</strong>
+                <em>{detection.confidence}% / P{detection.phase}</em>
+              </button>
+            ))}
+          </div>
         ) : (
           <p className="muted">최근 5회 통신 내 위협 탐지가 없습니다.</p>
         )}
@@ -268,7 +270,6 @@ function RightPanel({
   onResetLatest
 }) {
   const latest = dashboard.latest_communication;
-  const communicationDetections = selectedCommunication?.detections || [];
   return (
     <section className="panel right-panel">
       <div className="selector-row">
@@ -310,10 +311,7 @@ function RightPanel({
           <strong>{selectedLabel}</strong>
         </div>
         <button className="reset-button" onClick={onResetLatest}>
-          통신 초기화
-        </button>
-        <button className="reset-button" onClick={onResetLatest}>
-          MA 코드 초기화
+          초기화
         </button>
       </div>
 
@@ -325,25 +323,6 @@ function RightPanel({
             ? "정상 통신입니다."
             : `${latest.anomaly_count}개의 이상 코드가 감지되었습니다.`}
         </p>
-      </div>
-
-      <div className="timeline">
-        <h3>선택 통신의 MA 코드</h3>
-        {communicationDetections.length ? (
-          communicationDetections.map((detection, index) => (
-            <button
-              key={detection.detect_id}
-              className={`timeline-item severity-${detection.severity}`}
-              onClick={() => onSelect(detection.detect_id)}
-            >
-              <span>{index + 1}번째 발생 · {detection.detect_time}</span>
-              <strong>{detection.ma_code}</strong>
-              <em>신뢰도 {detection.confidence}% · Phase {detection.phase}</em>
-            </button>
-          ))
-        ) : (
-          <p className="muted">선택한 통신에서 발생한 MA 코드가 없습니다.</p>
-        )}
       </div>
 
       {selectedDetail ? (
