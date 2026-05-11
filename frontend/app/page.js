@@ -18,6 +18,9 @@ export default function DashboardPage() {
   const [rulesOpen, setRulesOpen] = useState(false);
   const [rules, setRules] = useState(null);
   const [ruleDraft, setRuleDraft] = useState("");
+  const [selectedRuleId, setSelectedRuleId] = useState("");
+  const [newRuleId, setNewRuleId] = useState("");
+  const [ruleEditor, setRuleEditor] = useState("");
   const [replayResult, setReplayResult] = useState(null);
   const [error, setError] = useState("");
 
@@ -74,13 +77,82 @@ export default function DashboardPage() {
     setSelectedDetail(null);
   }
 
-  async function loadRules() {
+  async function loadRules(preferredRuleId = selectedRuleId) {
     try {
       const payload = await apiGet("/api/rules");
       setRules(payload);
       setRuleDraft(JSON.stringify(payload.thresholds, null, 2));
+      const fallbackRuleId = preferredRuleId && payload.rules[preferredRuleId]
+        ? preferredRuleId
+        : Object.keys(payload.rules)[0] || "";
+      setSelectedRuleId(fallbackRuleId);
+      setRuleEditor(JSON.stringify(payload.rules[fallbackRuleId] || defaultRuleDefinition(), null, 2));
     } catch (loadError) {
       setError(loadError.message);
+    }
+  }
+
+  function selectRule(ruleId) {
+    setSelectedRuleId(ruleId);
+    setNewRuleId("");
+    setRuleEditor(JSON.stringify(rules?.rules?.[ruleId] || defaultRuleDefinition(), null, 2));
+  }
+
+  function startNewRule() {
+    setSelectedRuleId("");
+    setNewRuleId("E-NEW");
+    setRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
+  }
+
+  async function saveRule() {
+    try {
+      const ruleId = (newRuleId || selectedRuleId).trim();
+      if (!ruleId) {
+        setError("저장할 Rule ID가 필요합니다.");
+        return;
+      }
+      const definition = JSON.parse(ruleEditor);
+      await apiSend("/api/rules", "POST", { rule_id: ruleId, definition });
+      setSelectedRuleId(ruleId);
+      setNewRuleId("");
+      await loadRules(ruleId);
+      await runReplay();
+      setError("");
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+
+  async function deleteRule() {
+    try {
+      if (!selectedRuleId) {
+        setError("삭제할 Rule을 선택하세요.");
+        return;
+      }
+      await apiSend(`/api/rules/${selectedRuleId}`, "DELETE", {});
+      setSelectedRuleId("");
+      setNewRuleId("");
+      setRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
+      await loadRules();
+      await runReplay();
+      setError("");
+    } catch (deleteError) {
+      setError(deleteError.message);
+    }
+  }
+
+  async function saveThresholds() {
+    try {
+      const parsed = JSON.parse(ruleDraft);
+      const updates = flattenThresholds(parsed);
+      for (const update of updates) {
+        await apiSend("/api/thresholds", "PATCH", update);
+      }
+      await loadRules();
+      await runReplay();
+      setError("");
+    } catch (saveError) {
+      setError(saveError.message);
     }
   }
 
@@ -153,8 +225,18 @@ export default function DashboardPage() {
         <RulePanel
           rules={rules}
           ruleDraft={ruleDraft}
+          selectedRuleId={selectedRuleId}
+          newRuleId={newRuleId}
+          ruleEditor={ruleEditor}
           replayResult={replayResult}
           onDraftChange={setRuleDraft}
+          onRuleSelect={selectRule}
+          onNewRuleIdChange={setNewRuleId}
+          onRuleEditorChange={setRuleEditor}
+          onStartNewRule={startNewRule}
+          onSaveRule={saveRule}
+          onDeleteRule={deleteRule}
+          onSaveThresholds={saveThresholds}
           onReload={loadRules}
           onReplay={runReplay}
           onQuickThreshold={updateHardThreshold}
@@ -400,8 +482,18 @@ function DetailPanel({ selectedDetail }) {
 function RulePanel({
   rules,
   ruleDraft,
+  selectedRuleId,
+  newRuleId,
+  ruleEditor,
   replayResult,
   onDraftChange,
+  onRuleSelect,
+  onNewRuleIdChange,
+  onRuleEditorChange,
+  onStartNewRule,
+  onSaveRule,
+  onDeleteRule,
+  onSaveThresholds,
   onReload,
   onReplay,
   onQuickThreshold
@@ -415,6 +507,10 @@ function RulePanel({
         </div>
         <div className="rule-actions">
           <button onClick={onReload}>새로고침</button>
+          <button onClick={onStartNewRule}>Rule 추가</button>
+          <button onClick={onSaveRule}>Rule 저장</button>
+          <button onClick={onDeleteRule}>Rule 삭제</button>
+          <button onClick={onSaveThresholds}>Threshold 저장</button>
           <button onClick={onQuickThreshold}>HARD 임계치 2.8 적용</button>
           <button onClick={onReplay}>Replay 실행</button>
         </div>
@@ -426,10 +522,14 @@ function RulePanel({
           <div className="rule-list">
             {rules ? (
               Object.entries(rules.rules).map(([ruleId, rule]) => (
-                <article key={ruleId}>
+                <button
+                  key={ruleId}
+                  className={`rule-list-item ${selectedRuleId === ruleId ? "active" : ""}`}
+                  onClick={() => onRuleSelect(ruleId)}
+                >
                   <strong>{ruleId} · {rule.name}</strong>
                   <span>{rule.enabled ? "활성" : "비활성"} · {rule.subsystems.join(", ")}</span>
-                </article>
+                </button>
               ))
             ) : (
               <p className="muted">Rule을 불러오는 중입니다.</p>
@@ -437,11 +537,22 @@ function RulePanel({
           </div>
         </div>
         <div>
+          <h3>Rule JSON</h3>
+          <input
+            className="rule-id-input"
+            placeholder="새 Rule ID"
+            value={newRuleId}
+            onChange={(event) => onNewRuleIdChange(event.target.value)}
+          />
+          <textarea value={ruleEditor} onChange={(event) => onRuleEditorChange(event.target.value)} />
+          <p className="muted">
+            Rule을 선택하거나 새 Rule ID를 입력한 뒤 JSON을 수정하고 저장/삭제할 수 있습니다.
+          </p>
+        </div>
+        <div>
           <h3>Threshold JSON</h3>
           <textarea value={ruleDraft} onChange={(event) => onDraftChange(event.target.value)} />
-          <p className="muted">
-            현재 UI는 빠른 임계치 수정과 replay 실행을 제공합니다. 세부 Rule CRUD는 API로 연결되어 있습니다.
-          </p>
+          <p className="muted">수정 후 Threshold 저장을 누르면 replay로 결과를 확인합니다.</p>
         </div>
         <div>
           <h3>Replay 결과</h3>
@@ -450,4 +561,26 @@ function RulePanel({
       </div>
     </section>
   );
+}
+
+function defaultRuleDefinition() {
+  return {
+    name: "새 Rule",
+    subsystems: ["OBC"],
+    columns: [],
+    contributes_to: {},
+    single_sufficient: false,
+    enabled: true
+  };
+}
+
+function flattenThresholds(thresholds) {
+  return Object.entries(thresholds).flatMap(([category, values]) => {
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return [];
+    }
+    return Object.entries(values)
+      .filter(([, value]) => typeof value === "number")
+      .map(([key, value]) => ({ category, key, value }));
+  });
 }

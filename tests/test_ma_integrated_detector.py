@@ -6,6 +6,7 @@ import json
 import unittest
 
 from ma_detector import MAIntegratedDetector
+from ma_detector.ma_integrated_detector import DEFAULT_ANALYSIS_WINDOW_SEC
 
 
 def _normal_record() -> dict:
@@ -93,6 +94,12 @@ def _official_satellite_packet(result: str = "Y") -> dict:
 
 
 class MAIntegratedDetectorTest(unittest.TestCase):
+    def test_default_analysis_window_is_reduced(self) -> None:
+        detector = MAIntegratedDetector()
+
+        self.assertEqual(DEFAULT_ANALYSIS_WINDOW_SEC, 300)
+        self.assertEqual(detector._window_size_sec, DEFAULT_ANALYSIS_WINDOW_SEC)
+
     def test_rule_evaluation_and_ma_generation(self) -> None:
         detector = MAIntegratedDetector()
         detector.build_baseline([_normal_record() for _ in range(4)])

@@ -369,7 +369,7 @@ button {
 }
 
 .rule-grid {
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 0.9fr 1.1fr 1.1fr 1fr;
   margin-top: 18px;
 }
 
@@ -380,12 +380,30 @@ button {
   overflow: auto;
 }
 
-.rule-list article {
+.rule-list-item {
   background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
   border-radius: 12px;
+  color: var(--text);
   display: grid;
   gap: 4px;
   padding: 10px;
+  text-align: left;
+}
+
+.rule-list-item.active {
+  background: rgba(110, 231, 249, 0.12);
+  border-color: rgba(110, 231, 249, 0.45);
+}
+
+.rule-id-input {
+  background: #08111f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  margin-bottom: 10px;
+  padding: 12px;
+  width: 100%;
 }
 
 textarea,

@@ -15,6 +15,7 @@ from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.registry.registry_manager import RegistryManager
 
 logger = logging.getLogger(__name__)
+DEFAULT_ANALYSIS_WINDOW_SEC = 300
 
 
 @dataclass
@@ -56,7 +57,7 @@ class MAIntegratedDetector:
             self._known_patterns: set[str] = set()
             self._replay_buffer: list[dict[str, Any]] = []
             self._telemetry_window: list[dict[str, Any]] = []
-            self._window_size_sec = 600
+            self._window_size_sec = DEFAULT_ANALYSIS_WINDOW_SEC
 
             self._gs_tlm_history: list[dict[str, Any]] = []
             self._gs_pwr_meta: list[dict[str, Any]] = []
