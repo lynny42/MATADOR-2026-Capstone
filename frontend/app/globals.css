@@ -22,6 +22,7 @@ body {
     radial-gradient(circle at top left, rgba(110, 231, 249, 0.18), transparent 34rem),
     linear-gradient(135deg, #08101e 0%, #101b31 48%, #070b14 100%);
   color: var(--text);
+  font-size: 12px;
   font-family: Arial, Helvetica, sans-serif;
 }
 
@@ -37,9 +38,9 @@ button {
 
 .page-shell {
   margin: 0 auto;
-  max-width: 1080px;
+  max-width: 760px;
   min-height: 100vh;
-  padding: 12px;
+  padding: 8px;
 }
 
 .topbar,
@@ -54,7 +55,11 @@ button {
 }
 
 .topbar {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
+}
+
+.topbar h1 {
+  font-size: 20px;
 }
 
 .selector-row {
@@ -79,44 +84,48 @@ button {
 .panel {
   background: rgba(17, 28, 47, 0.88);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 14px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
-  padding: 14px;
+  padding: 10px;
 }
 
 .dashboard-grid {
   display: grid;
-  gap: 20px;
+  gap: 10px;
   grid-template-columns: 1fr;
 }
 
 .rule-button,
 .rule-actions button,
-.refresh-pill,
 .reset-button {
   background: rgba(110, 231, 249, 0.12);
   border: 1px solid rgba(110, 231, 249, 0.35);
   border-radius: 999px;
   color: var(--accent);
-  padding: 10px 16px;
+  padding: 7px 11px;
+}
+
+.rule-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .satellite-map {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   grid-template-areas:
     "obc obc com"
     "eps adcs com"
     "tcs adcs com";
-  margin-top: 14px;
+  margin-top: 8px;
 }
 
 .subsystem-card {
   background: var(--panel-strong);
   border: 1px solid var(--line);
   border-radius: 14px;
-  min-height: 104px;
-  padding: 10px;
+  min-height: 82px;
+  padding: 8px;
   position: relative;
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
@@ -177,8 +186,8 @@ button {
 .code-stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
+  gap: 5px;
+  margin-top: 8px;
 }
 
 .code-chip,
@@ -186,11 +195,11 @@ button {
 .timeline-item {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
+  border-radius: 10px;
   color: var(--text);
   display: grid;
   gap: 4px;
-  padding: 10px;
+  padding: 7px;
   text-align: left;
 }
 
@@ -205,7 +214,7 @@ button {
 .recent-threats,
 .timeline,
 .detail-card {
-  margin-top: 20px;
+  margin-top: 10px;
 }
 
 .recent-threats {
@@ -232,8 +241,8 @@ button {
 .recent-threat-track {
   display: flex;
   gap: 12px;
-  height: 92px;
-  margin-top: 8px;
+  height: 78px;
+  margin-top: 6px;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -244,15 +253,15 @@ button {
 }
 
 .recent-threat-track .threat-row {
-  flex: 0 0 280px;
-  min-height: 74px;
+  flex: 0 0 240px;
+  min-height: 62px;
   scroll-snap-align: start;
 }
 
 .recent-threats h3,
 .timeline h3,
 .rule-panel h3 {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
 }
 
 .latest-card {
@@ -279,7 +288,7 @@ button {
   display: flex;
   flex: 1;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 8px 10px;
 }
 
 .search-box select {
@@ -295,11 +304,11 @@ button {
 }
 
 .communication-select {
-  flex: 1 1 380px;
+  flex: 1 1 260px;
 }
 
 .reset-button {
-  min-width: 126px;
+  min-width: 86px;
 }
 
 .timeline {
@@ -311,12 +320,12 @@ button {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  padding: 14px;
+  padding: 10px;
 }
 
 .detail-heading strong {
   color: var(--accent);
-  font-size: 28px;
+  font-size: 20px;
 }
 
 .filter-grid,

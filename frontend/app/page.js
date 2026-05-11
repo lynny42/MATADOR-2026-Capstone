@@ -306,7 +306,7 @@ export default function DashboardPage() {
             }
           }}
         >
-          Rule
+          {rulesOpen ? "닫기" : "Rule"}
         </button>
       </header>
 
@@ -355,7 +355,6 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
           <p className="eyebrow">최근 5회 통신 기반</p>
           <h2>위성체 Blueprint</h2>
         </div>
-        <span className="refresh-pill">자동 새로고침 5초</span>
       </div>
 
       <div className="satellite-map">
@@ -574,7 +573,7 @@ function RulePanel({
         </div>
         <div className="rule-actions">
           <button onClick={onReload}>새로고침</button>
-          <button onClick={onReplay}>Replay 실행</button>
+          <button onClick={onReplay}>Replay</button>
         </div>
       </div>
 
@@ -660,7 +659,9 @@ function ReplayWorkspace({
             <button onClick={onSaveRule}>Rule 저장</button>
             <button onClick={onDeleteRule}>Rule 삭제</button>
             <button onClick={onSaveThresholds}>Threshold 저장</button>
-            <button onClick={onReplay}>Replay 실행</button>
+            <button onClick={onReplay} disabled={replayBusy}>
+              {replayBusy ? "Replay 실행 중..." : "Replay 실행"}
+            </button>
           </div>
         </div>
         <div className="rule-grid">
