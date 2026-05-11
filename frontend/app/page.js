@@ -19,9 +19,16 @@ export default function DashboardPage() {
   const [rules, setRules] = useState(null);
   const [ruleDraft, setRuleDraft] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState("");
-  const [newRuleId, setNewRuleId] = useState("");
   const [ruleEditor, setRuleEditor] = useState("");
   const [replayResult, setReplayResult] = useState(null);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replayDashboard, setReplayDashboard] = useState(null);
+  const [replayRules, setReplayRules] = useState(null);
+  const [replayThresholds, setReplayThresholds] = useState(null);
+  const [replayRuleId, setReplayRuleId] = useState("");
+  const [replayNewRuleId, setReplayNewRuleId] = useState("");
+  const [replayRuleEditor, setReplayRuleEditor] = useState("");
+  const [replayThresholdDraft, setReplayThresholdDraft] = useState("");
   const [error, setError] = useState("");
 
   async function loadDashboard(options = {}) {
@@ -94,77 +101,124 @@ export default function DashboardPage() {
 
   function selectRule(ruleId) {
     setSelectedRuleId(ruleId);
-    setNewRuleId("");
     setRuleEditor(JSON.stringify(rules?.rules?.[ruleId] || defaultRuleDefinition(), null, 2));
   }
 
-  function startNewRule() {
-    setSelectedRuleId("");
-    setNewRuleId("E-NEW");
-    setRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
+  async function openReplayMode() {
+    try {
+      const payload = rules || await apiGet("/api/rules");
+      setRules(payload);
+      const rulesCopy = structuredClone(payload.rules);
+      const thresholdCopy = structuredClone(payload.thresholds);
+      const firstRule = Object.keys(rulesCopy)[0] || "";
+      setReplayRules(rulesCopy);
+      setReplayThresholds(thresholdCopy);
+      setReplayRuleId(firstRule);
+      setReplayNewRuleId("");
+      setReplayRuleEditor(JSON.stringify(rulesCopy[firstRule] || defaultRuleDefinition(), null, 2));
+      setReplayThresholdDraft(JSON.stringify(thresholdCopy, null, 2));
+      setRulesOpen(false);
+      setReplayMode(true);
+      await runReplayPreview(rulesCopy, thresholdCopy);
+    } catch (replayError) {
+      setError(replayError.message);
+    }
   }
 
-  async function saveRule() {
+  async function runReplayPreview(nextRules = replayRules, nextThresholds = replayThresholds) {
     try {
-      const ruleId = (newRuleId || selectedRuleId).trim();
+      const payload = await apiSend("/api/replay/preview", "POST", {
+        rules: nextRules,
+        thresholds: nextThresholds
+      });
+      setReplayResult(payload);
+      setReplayDashboard(payload.dashboard);
+      setError("");
+    } catch (replayError) {
+      setError(replayError.message);
+    }
+  }
+
+  function selectReplayRule(ruleId) {
+    setReplayRuleId(ruleId);
+    setReplayNewRuleId("");
+    setReplayRuleEditor(JSON.stringify(replayRules?.[ruleId] || defaultRuleDefinition(), null, 2));
+  }
+
+  function startReplayNewRule() {
+    setReplayRuleId("");
+    setReplayNewRuleId("E-NEW");
+    setReplayRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
+  }
+
+  async function saveReplayRule() {
+    try {
+      const ruleId = (replayNewRuleId || replayRuleId).trim();
       if (!ruleId) {
-        setError("저장할 Rule ID가 필요합니다.");
+        setError("저장할 임시 Rule ID가 필요합니다.");
         return;
       }
-      const definition = JSON.parse(ruleEditor);
-      await apiSend("/api/rules", "POST", { rule_id: ruleId, definition });
-      setSelectedRuleId(ruleId);
-      setNewRuleId("");
-      await loadRules(ruleId);
-      await runReplay();
-      setError("");
+      const nextRules = { ...(replayRules || {}) };
+      nextRules[ruleId] = JSON.parse(replayRuleEditor);
+      setReplayRules(nextRules);
+      setReplayRuleId(ruleId);
+      setReplayNewRuleId("");
+      await runReplayPreview(nextRules, replayThresholds);
     } catch (saveError) {
       setError(saveError.message);
     }
   }
 
-  async function deleteRule() {
+  async function deleteReplayRule() {
     try {
-      if (!selectedRuleId) {
-        setError("삭제할 Rule을 선택하세요.");
+      if (!replayRuleId) {
+        setError("삭제할 임시 Rule을 선택하세요.");
         return;
       }
-      await apiSend(`/api/rules/${selectedRuleId}`, "DELETE", {});
-      setSelectedRuleId("");
-      setNewRuleId("");
-      setRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
-      await loadRules();
-      await runReplay();
-      setError("");
+      const nextRules = { ...(replayRules || {}) };
+      delete nextRules[replayRuleId];
+      const nextRuleId = Object.keys(nextRules)[0] || "";
+      setReplayRules(nextRules);
+      setReplayRuleId(nextRuleId);
+      setReplayRuleEditor(JSON.stringify(nextRules[nextRuleId] || defaultRuleDefinition(), null, 2));
+      await runReplayPreview(nextRules, replayThresholds);
     } catch (deleteError) {
       setError(deleteError.message);
     }
   }
 
-  async function saveThresholds() {
+  async function saveReplayThresholds() {
     try {
-      const parsed = JSON.parse(ruleDraft);
-      const updates = flattenThresholds(parsed);
-      for (const update of updates) {
-        await apiSend("/api/thresholds", "PATCH", update);
-      }
-      await loadRules();
-      await runReplay();
-      setError("");
+      const nextThresholds = JSON.parse(replayThresholdDraft);
+      setReplayThresholds(nextThresholds);
+      await runReplayPreview(replayRules, nextThresholds);
     } catch (saveError) {
       setError(saveError.message);
     }
   }
 
-  async function runReplay() {
+  async function applyReplayConfig() {
     try {
-      const payload = await apiSend("/api/replay", "POST", {});
-      setReplayResult(payload);
-      setRulesOpen(false);
+      const payload = await apiSend("/api/replay/apply", "POST", {
+        rules: replayRules,
+        thresholds: replayThresholds
+      });
+      setDashboard(payload.dashboard);
+      setReplayMode(false);
+      setReplayDashboard(null);
+      setReplayResult(null);
+      await loadRules();
       await loadDashboard({ resetToLatest: true, clearCode: true });
-    } catch (loadError) {
-      setError(loadError.message);
+    } catch (applyError) {
+      setError(applyError.message);
     }
+  }
+
+  function closeReplayMode() {
+    setReplayMode(false);
+    setReplayDashboard(null);
+    setReplayResult(null);
+    setRulesOpen(true);
   }
 
   useEffect(() => {
@@ -183,6 +237,42 @@ export default function DashboardPage() {
     return (
       <main className="page-shell">
         <div className="loading-card">MA 통합 탐지 대시보드를 불러오는 중...</div>
+      </main>
+    );
+  }
+
+  if (replayMode) {
+    return (
+      <main className="page-shell">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Temporary Replay</p>
+            <h1>Replay 임시 결과</h1>
+          </div>
+          <div className="rule-actions">
+            <button onClick={applyReplayConfig}>설정</button>
+            <button onClick={closeReplayMode}>닫기</button>
+          </div>
+        </header>
+        {error ? <section className="error-banner">{error}</section> : null}
+        <ReplayWorkspace
+          dashboard={replayDashboard}
+          replayRules={replayRules}
+          replayThresholdDraft={replayThresholdDraft}
+          replayRuleId={replayRuleId}
+          replayNewRuleId={replayNewRuleId}
+          replayRuleEditor={replayRuleEditor}
+          replayResult={replayResult}
+          onRuleSelect={selectReplayRule}
+          onNewRuleIdChange={setReplayNewRuleId}
+          onRuleEditorChange={setReplayRuleEditor}
+          onThresholdDraftChange={setReplayThresholdDraft}
+          onStartNewRule={startReplayNewRule}
+          onSaveRule={saveReplayRule}
+          onDeleteRule={deleteReplayRule}
+          onSaveThresholds={saveReplayThresholds}
+          onReplay={() => runReplayPreview()}
+        />
       </main>
     );
   }
@@ -214,19 +304,10 @@ export default function DashboardPage() {
           rules={rules}
           ruleDraft={ruleDraft}
           selectedRuleId={selectedRuleId}
-          newRuleId={newRuleId}
           ruleEditor={ruleEditor}
-          replayResult={replayResult}
-          onDraftChange={setRuleDraft}
           onRuleSelect={selectRule}
-          onNewRuleIdChange={setNewRuleId}
-          onRuleEditorChange={setRuleEditor}
-          onStartNewRule={startNewRule}
-          onSaveRule={saveRule}
-          onDeleteRule={deleteRule}
-          onSaveThresholds={saveThresholds}
           onReload={loadRules}
-          onReplay={runReplay}
+          onReplay={openReplayMode}
         />
       ) : null}
 
@@ -466,17 +547,8 @@ function RulePanel({
   rules,
   ruleDraft,
   selectedRuleId,
-  newRuleId,
   ruleEditor,
-  replayResult,
-  onDraftChange,
   onRuleSelect,
-  onNewRuleIdChange,
-  onRuleEditorChange,
-  onStartNewRule,
-  onSaveRule,
-  onDeleteRule,
-  onSaveThresholds,
   onReload,
   onReplay
 }) {
@@ -489,10 +561,6 @@ function RulePanel({
         </div>
         <div className="rule-actions">
           <button onClick={onReload}>새로고침</button>
-          <button onClick={onStartNewRule}>Rule 추가</button>
-          <button onClick={onSaveRule}>Rule 저장</button>
-          <button onClick={onDeleteRule}>Rule 삭제</button>
-          <button onClick={onSaveThresholds}>Threshold 저장</button>
           <button onClick={onReplay}>Replay 실행</button>
         </div>
       </div>
@@ -518,37 +586,144 @@ function RulePanel({
           </div>
         </div>
         <div>
-          <h3>Rule JSON</h3>
-          <label className="threshold-inline">
-            <span>활성화 임계값(score_threshold)</span>
-            <input
-              type="number"
-              step="0.05"
-              value={readRuleThreshold(ruleEditor)}
-              onChange={(event) => onRuleEditorChange(updateRuleThreshold(ruleEditor, event.target.value))}
-            />
-          </label>
-          <input
-            className="rule-id-input"
-            placeholder="새 Rule ID"
-            value={newRuleId}
-            onChange={(event) => onNewRuleIdChange(event.target.value)}
-          />
-          <textarea value={ruleEditor} onChange={(event) => onRuleEditorChange(event.target.value)} />
-          <p className="muted">
-            Rule을 선택하거나 새 Rule ID를 입력한 뒤 JSON을 수정하고 저장/삭제할 수 있습니다.
-          </p>
+          <h3>Rule JSON 읽기 전용</h3>
+          <textarea value={ruleEditor} readOnly />
+          <p className="muted">수정은 Replay 실행 후 임시 편집 화면에서만 가능합니다.</p>
         </div>
         <div>
-          <h3>Threshold JSON</h3>
-          <textarea value={ruleDraft} onChange={(event) => onDraftChange(event.target.value)} />
-          <p className="muted">수정 후 Threshold 저장을 누르면 replay로 결과를 확인합니다.</p>
+          <h3>Threshold JSON 읽기 전용</h3>
+          <textarea value={ruleDraft} readOnly />
+          <p className="muted">Replay에서 임시 threshold를 저장해 결과를 확인할 수 있습니다.</p>
         </div>
         <div>
-          <h3>Replay 결과</h3>
-          <pre>{replayResult ? JSON.stringify(replayResult, null, 2) : "Replay 결과 없음"}</pre>
+          <h3>Replay 안내</h3>
+          <pre>Replay 실행을 누르면 임시 Rule/Threshold 편집 화면으로 이동합니다.</pre>
         </div>
       </div>
+    </section>
+  );
+}
+
+function ReplayWorkspace({
+  dashboard,
+  replayRules,
+  replayThresholdDraft,
+  replayRuleId,
+  replayNewRuleId,
+  replayRuleEditor,
+  replayResult,
+  onRuleSelect,
+  onNewRuleIdChange,
+  onRuleEditorChange,
+  onThresholdDraftChange,
+  onStartNewRule,
+  onSaveRule,
+  onDeleteRule,
+  onSaveThresholds,
+  onReplay
+}) {
+  const [previewCommunicationAt, setPreviewCommunicationAt] = useState("");
+  const selectedCommunication = useMemo(() => {
+    const targetAt = previewCommunicationAt || dashboard?.latest_communication?.communicated_at;
+    return dashboard?.communications?.find((communication) => communication.communicated_at === targetAt)
+      || dashboard?.latest_communication;
+  }, [dashboard, previewCommunicationAt]);
+
+  if (!dashboard) {
+    return <section className="panel">임시 replay 결과를 생성하는 중입니다.</section>;
+  }
+
+  return (
+    <section className="replay-layout">
+      <section className="panel rule-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Temporary Rule Edit</p>
+            <h2>임시 Rule / Threshold 편집</h2>
+          </div>
+          <div className="rule-actions">
+            <button onClick={onStartNewRule}>Rule 추가</button>
+            <button onClick={onSaveRule}>Rule 저장</button>
+            <button onClick={onDeleteRule}>Rule 삭제</button>
+            <button onClick={onSaveThresholds}>Threshold 저장</button>
+            <button onClick={onReplay}>Replay 실행</button>
+          </div>
+        </div>
+        <div className="rule-grid">
+          <div>
+            <h3>임시 Rule</h3>
+            <div className="rule-list">
+              {Object.entries(replayRules || {}).map(([ruleId, rule]) => (
+                <button
+                  key={ruleId}
+                  className={`rule-list-item ${replayRuleId === ruleId ? "active" : ""}`}
+                  onClick={() => onRuleSelect(ruleId)}
+                >
+                  <strong>{ruleId} · {rule.name}</strong>
+                  <span>{rule.enabled ? "활성" : "비활성"} · {(rule.subsystems || []).join(", ")}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <h3>임시 Rule JSON</h3>
+            <label className="threshold-inline">
+              <span>활성화 임계값(score_threshold)</span>
+              <input
+                type="number"
+                step="0.05"
+                value={readRuleThreshold(replayRuleEditor)}
+                onChange={(event) => onRuleEditorChange(updateRuleThreshold(replayRuleEditor, event.target.value))}
+              />
+            </label>
+            <input
+              className="rule-id-input"
+              placeholder="새 Rule ID"
+              value={replayNewRuleId}
+              onChange={(event) => onNewRuleIdChange(event.target.value)}
+            />
+            <textarea value={replayRuleEditor} onChange={(event) => onRuleEditorChange(event.target.value)} />
+          </div>
+          <div>
+            <h3>임시 Threshold JSON</h3>
+            <textarea value={replayThresholdDraft} onChange={(event) => onThresholdDraftChange(event.target.value)} />
+          </div>
+          <div>
+            <h3>Replay 상태</h3>
+          <pre>
+            {replayResult
+              ? JSON.stringify({ ok: replayResult.ok, temporary: replayResult.temporary }, null, 2)
+              : "임시 결과 없음"}
+          </pre>
+          </div>
+        </div>
+      </section>
+      <section className="dashboard-grid">
+        <BlueprintPanel
+          blueprint={dashboard.blueprint}
+          recentThreats={dashboard.recent_threats}
+          latestCommunication={dashboard.latest_communication}
+          onSelect={() => {}}
+        />
+        <section className="panel right-panel">
+          <div className="selector-row">
+            <label className="search-box communication-select">
+              <span>통신</span>
+              <select
+                value={previewCommunicationAt || dashboard.latest_communication?.communicated_at || ""}
+                onChange={(event) => setPreviewCommunicationAt(event.target.value)}
+              >
+                {(dashboard.communications || []).map((communication) => (
+                  <option key={communication.communicated_at} value={communication.communicated_at}>
+                    {communication.communicated_at} · {communication.anomaly_count}개
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <CommunicationSummary communication={selectedCommunication} />
+        </section>
+      </section>
     </section>
   );
 }
@@ -584,13 +759,3 @@ function defaultRuleDefinition() {
   };
 }
 
-function flattenThresholds(thresholds) {
-  return Object.entries(thresholds).flatMap(([category, values]) => {
-    if (!values || typeof values !== "object" || Array.isArray(values)) {
-      return [];
-    }
-    return Object.entries(values)
-      .filter(([, value]) => typeof value === "number")
-      .map(([key, value]) => ({ category, key, value }));
-  });
-}

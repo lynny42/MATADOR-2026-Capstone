@@ -138,6 +138,18 @@ class RegistryManager:
             logger.error("unexpected delete rule failure: %s", error)
             return False
 
+    def replace_rules(self, rules: dict[str, Any]) -> bool:
+        """Replace the whole rule registry."""
+        try:
+            self._save(self._rule_path, rules)
+            return True
+        except (OSError, TypeError) as error:
+            logger.error("replace rules failed: %s", error)
+            return False
+        except Exception as error:
+            logger.error("unexpected replace rules failure: %s", error)
+            return False
+
     def toggle_rule(self, rule_id: str, enabled: bool) -> bool:
         """Enable or disable a rule."""
         try:
@@ -176,6 +188,18 @@ class RegistryManager:
             return False
         except Exception as error:
             logger.error("unexpected update threshold failure: %s", error)
+            return False
+
+    def replace_thresholds(self, thresholds: dict[str, Any]) -> bool:
+        """Replace the whole threshold configuration."""
+        try:
+            self._save(self._threshold_path, thresholds)
+            return True
+        except (OSError, TypeError) as error:
+            logger.error("replace thresholds failed: %s", error)
+            return False
+        except Exception as error:
+            logger.error("unexpected replace thresholds failure: %s", error)
             return False
 
     @staticmethod

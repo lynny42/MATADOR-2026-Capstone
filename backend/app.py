@@ -49,6 +49,14 @@ class ReplayRequest(BaseModel):
     packets: list[dict[str, Any]] | None = None
 
 
+class ReplayConfigRequest(BaseModel):
+    """Request body for temporary replay configuration."""
+
+    rules: dict[str, Any]
+    thresholds: dict[str, Any]
+    packets: list[dict[str, Any]] | None = None
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     """Health check endpoint."""
@@ -110,3 +118,15 @@ def update_threshold(request: ThresholdUpdateRequest) -> dict[str, Any]:
 def replay(request: ReplayRequest) -> dict[str, Any]:
     """Run replay analysis after rule or threshold edits."""
     return service.run_replay(request.packets)
+
+
+@app.post("/api/replay/preview")
+def replay_preview(request: ReplayConfigRequest) -> dict[str, Any]:
+    """Run a replay with temporary rules and thresholds."""
+    return service.run_replay_preview(request.rules, request.thresholds, request.packets)
+
+
+@app.post("/api/replay/apply")
+def replay_apply(request: ReplayConfigRequest) -> dict[str, Any]:
+    """Persist replay rules and thresholds, then rebuild detector state."""
+    return service.apply_replay_config(request.rules, request.thresholds)

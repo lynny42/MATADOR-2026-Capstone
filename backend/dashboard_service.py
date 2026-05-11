@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ma_detector import MAIntegratedDetector
+from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.registry.registry_manager import RegistryManager
 
 CORE_SUBSYSTEMS = ["OBC", "TCS", "EPS", "ADCS", "COM"]
@@ -50,8 +51,12 @@ class DashboardService:
 
     def get_dashboard_state(self) -> dict[str, Any]:
         """Return the full dashboard model consumed by the Next.js UI."""
-        dashboard_rows = self.detector.get_dashboard_records()
-        history_rows = self.detector.get_history_records()
+        return self._get_dashboard_state_for_detector(self.detector)
+
+    def _get_dashboard_state_for_detector(self, detector: MAIntegratedDetector) -> dict[str, Any]:
+        """Return the dashboard model for a specific detector instance."""
+        dashboard_rows = detector.get_dashboard_records()
+        history_rows = detector.get_history_records()
         detections = [self._to_detection(row) for row in dashboard_rows]
         communications = self._build_communications(history_rows, detections)
         latest_time = communications[-1]["communicated_at"] if communications else None
@@ -137,12 +142,55 @@ class DashboardService:
         self.detector.set_replay_mode(False)
         return {"ok": True, "result_count": len(buffer), "results": buffer}
 
+    def run_replay_preview(
+        self,
+        rules: dict[str, Any],
+        thresholds: dict[str, Any],
+        packets: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Run a replay with temporary rules and thresholds without changing saved config."""
+        detector = self._create_detector_with_config(rules, thresholds, packets)
+        return {
+            "ok": True,
+            "temporary": True,
+            "dashboard": self._get_dashboard_state_for_detector(detector),
+            "rules": rules,
+            "thresholds": thresholds,
+        }
+
+    def apply_replay_config(self, rules: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
+        """Persist replay settings and rebuild detector state from scratch."""
+        rules_ok = self.registry_manager.replace_rules(rules)
+        thresholds_ok = self.registry_manager.replace_thresholds(thresholds)
+        if not (rules_ok and thresholds_ok):
+            return {"ok": False, "error": "config persistence failed"}
+
+        self.detector = self._create_detector_with_config(rules, thresholds, None)
+        return {"ok": True, "dashboard": self.get_dashboard_state()}
+
     def _dashboard_detection_by_id(self, detect_id: int) -> dict[str, Any]:
         try:
             for row in self.detector.get_dashboard_records():
                 if int(row.get("DETECT_ID", -1)) == detect_id:
                     return self._to_detection(row)
             return {}
+
+    def _create_detector_with_config(
+        self,
+        rules: dict[str, Any],
+        thresholds: dict[str, Any],
+        packets: list[dict[str, Any]] | None,
+    ) -> MAIntegratedDetector:
+        detector = MAIntegratedDetector()
+        detector._action_registry = self.detector.get_action_registry()
+        detector._rule_registry = rules
+        detector._threshold_config = thresholds
+        detector._evidence_rules = EvidenceRules(detector._baseline_manager, thresholds)
+        normal = _normal_record()
+        detector.build_baseline([deepcopy(normal) for _ in range(6)])
+        for packet in packets if packets is not None else _seed_packets():
+            detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
+        return detector
         except (TypeError, ValueError):
             return {}
 

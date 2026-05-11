@@ -31,6 +31,29 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertIn("rule_details", detail)
         self.assertGreaterEqual(len(detail["rule_details"]), 1)
 
+    def test_replay_preview_does_not_change_saved_rules(self) -> None:
+        service = DashboardService(create_detector_with_seed())
+        original_rules = service.list_rules()["rules"]
+        preview_rules = dict(original_rules)
+        preview_rules.pop("E-02", None)
+        thresholds = service.list_rules()["thresholds"]
+
+        preview = service.run_replay_preview(preview_rules, thresholds)
+
+        self.assertTrue(preview["temporary"])
+        self.assertIn("dashboard", preview)
+        self.assertIn("E-02", service.list_rules()["rules"])
+
+    def test_apply_replay_config_persists_rules_and_rebuilds_dashboard(self) -> None:
+        service = DashboardService(create_detector_with_seed())
+        rules = dict(service.list_rules()["rules"])
+        thresholds = service.list_rules()["thresholds"]
+
+        result = service.apply_replay_config(rules, thresholds)
+
+        self.assertTrue(result["ok"])
+        self.assertIn("dashboard", result)
+
 
 if __name__ == "__main__":
     unittest.main()
