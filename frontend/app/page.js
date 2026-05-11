@@ -160,20 +160,8 @@ export default function DashboardPage() {
     try {
       const payload = await apiSend("/api/replay", "POST", {});
       setReplayResult(payload);
-    } catch (loadError) {
-      setError(loadError.message);
-    }
-  }
-
-  async function updateHardThreshold() {
-    try {
-      await apiSend("/api/thresholds", "PATCH", {
-        category: "z_score",
-        key: "HARD",
-        value: 2.8
-      });
-      await loadRules();
-      await runReplay();
+      setRulesOpen(false);
+      await loadDashboard({ resetToLatest: true, clearCode: true });
     } catch (loadError) {
       setError(loadError.message);
     }
@@ -239,7 +227,6 @@ export default function DashboardPage() {
           onSaveThresholds={saveThresholds}
           onReload={loadRules}
           onReplay={runReplay}
-          onQuickThreshold={updateHardThreshold}
         />
       ) : null}
 
@@ -247,6 +234,7 @@ export default function DashboardPage() {
         <BlueprintPanel
           blueprint={dashboard.blueprint}
           recentThreats={dashboard.recent_threats}
+          latestCommunication={dashboard.latest_communication}
           onSelect={loadDetail}
         />
         <RightPanel
@@ -265,7 +253,7 @@ export default function DashboardPage() {
   );
 }
 
-function BlueprintPanel({ blueprint, recentThreats, onSelect }) {
+function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelect }) {
   return (
     <section className="panel blueprint-panel">
       <div className="panel-heading">
@@ -308,7 +296,12 @@ function BlueprintPanel({ blueprint, recentThreats, onSelect }) {
       </div>
 
       <div className="recent-threats">
-        <h3>최근 위협 탐지</h3>
+        <div className="recent-threat-heading">
+          <h3>최근 위협 탐지</h3>
+          <span>
+            {latestCommunication?.communicated_at || "통신 없음"} : {latestCommunication?.anomaly_count || 0}개
+          </span>
+        </div>
         {recentThreats.length ? (
           <div className="recent-threat-track" aria-label="최근 위협 탐지 코드 슬라이더">
             {recentThreats.map((detection) => (
@@ -382,16 +375,6 @@ function RightPanel({
         <button className="reset-button" onClick={onResetLatest}>
           초기화
         </button>
-      </div>
-
-      <div className={`latest-card ${latest.status === "NORMAL" ? "normal" : "anomaly"}`}>
-        <p className="eyebrow">가장 최근 통신 결과</p>
-        <h2>{latest.communicated_at || "통신 기록 없음"}</h2>
-        <p>
-          {latest.status === "NORMAL"
-            ? "정상 통신입니다."
-            : `${latest.anomaly_count}개의 이상 코드가 감지되었습니다.`}
-        </p>
       </div>
 
       {selectedDetail ? (
@@ -495,8 +478,7 @@ function RulePanel({
   onDeleteRule,
   onSaveThresholds,
   onReload,
-  onReplay,
-  onQuickThreshold
+  onReplay
 }) {
   return (
     <section className="panel rule-panel">
@@ -511,7 +493,6 @@ function RulePanel({
           <button onClick={onSaveRule}>Rule 저장</button>
           <button onClick={onDeleteRule}>Rule 삭제</button>
           <button onClick={onSaveThresholds}>Threshold 저장</button>
-          <button onClick={onQuickThreshold}>HARD 임계치 2.8 적용</button>
           <button onClick={onReplay}>Replay 실행</button>
         </div>
       </div>
@@ -538,6 +519,15 @@ function RulePanel({
         </div>
         <div>
           <h3>Rule JSON</h3>
+          <label className="threshold-inline">
+            <span>활성화 임계값(score_threshold)</span>
+            <input
+              type="number"
+              step="0.05"
+              value={readRuleThreshold(ruleEditor)}
+              onChange={(event) => onRuleEditorChange(updateRuleThreshold(ruleEditor, event.target.value))}
+            />
+          </label>
           <input
             className="rule-id-input"
             placeholder="새 Rule ID"
@@ -563,6 +553,25 @@ function RulePanel({
   );
 }
 
+function readRuleThreshold(ruleEditor) {
+  try {
+    const parsed = JSON.parse(ruleEditor);
+    return parsed.score_threshold ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function updateRuleThreshold(ruleEditor, value) {
+  try {
+    const parsed = JSON.parse(ruleEditor);
+    parsed.score_threshold = Number(value);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return ruleEditor;
+  }
+}
+
 function defaultRuleDefinition() {
   return {
     name: "새 Rule",
@@ -570,7 +579,8 @@ function defaultRuleDefinition() {
     columns: [],
     contributes_to: {},
     single_sufficient: false,
-    enabled: true
+    enabled: true,
+    score_threshold: 0
   };
 }
 

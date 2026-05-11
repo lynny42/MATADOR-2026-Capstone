@@ -15,7 +15,7 @@ from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.registry.registry_manager import RegistryManager
 
 logger = logging.getLogger(__name__)
-DEFAULT_ANALYSIS_WINDOW_SEC = 300
+DEFAULT_ANALYSIS_WINDOW_SEC = 600
 
 
 @dataclass
@@ -245,7 +245,8 @@ class MAIntegratedDetector:
                     continue
 
                 rule_score = self._evidence_rules.evaluate(rule_id, typed_window)
-                if rule_score <= 0.0:
+                score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
+                if rule_score <= 0.0 or rule_score < score_threshold:
                     continue
 
                 latest = typed_window[-1] if typed_window else {}

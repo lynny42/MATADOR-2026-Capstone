@@ -1,7 +1,9 @@
 {
   "E-01": {
     "name": "파일 전송 무결성 이상",
-    "subsystems": ["CF"],
+    "subsystems": [
+      "CF"
+    ],
     "columns": [
       "CH1_FAULT_CRC",
       "CH2_FAULT_CRC",
@@ -20,7 +22,10 @@
   },
   "E-02": {
     "name": "명령 처리 이상",
-    "subsystems": ["CI", "SB"],
+    "subsystems": [
+      "CI",
+      "SB"
+    ],
     "columns": [
       "CMDREJECTEDCOUNTER",
       "PIPEOVERFLOWRRCNT",
@@ -32,11 +37,15 @@
       "A012": 0.3
     },
     "single_sufficient": false,
-    "enabled": true
+    "enabled": true,
+    "score_threshold": 0.2
   },
   "E-03": {
     "name": "메모리 무결성 이상",
-    "subsystems": ["OBC", "CS"],
+    "subsystems": [
+      "OBC",
+      "CS"
+    ],
     "columns": [
       "OBC_P_HASH",
       "EXPECTED_CRC",
@@ -55,8 +64,14 @@
   },
   "E-04": {
     "name": "HEAP 및 메모리 사용 이상",
-    "subsystems": ["ES"],
-    "columns": ["HEAP_FREE", "MEMINUSE", "EXECOUNTS"],
+    "subsystems": [
+      "ES"
+    ],
+    "columns": [
+      "HEAP_FREE",
+      "MEMINUSE",
+      "EXECOUNTS"
+    ],
     "contributes_to": {
       "A004": 0.4,
       "A005": 0.3,
@@ -67,7 +82,10 @@
   },
   "E-05": {
     "name": "리셋 부재 + 무결성 오류 공존",
-    "subsystems": ["OBC", "ES"],
+    "subsystems": [
+      "OBC",
+      "ES"
+    ],
     "columns": [
       "PROCESSOR_RESET_COUNT",
       "OBC_P_HASH",
@@ -84,8 +102,15 @@
   },
   "E-06": {
     "name": "CPU 및 자원 과부하",
-    "subsystems": ["HS", "SCH"],
-    "columns": ["UTILCPUAVG", "SKIPPEDSLOTSCOUNT", "ERLOGENTRIES"],
+    "subsystems": [
+      "HS",
+      "SCH"
+    ],
+    "columns": [
+      "UTILCPUAVG",
+      "SKIPPEDSLOTSCOUNT",
+      "ERLOGENTRIES"
+    ],
     "contributes_to": {
       "A005": 0.4,
       "A006": 0.3,
@@ -96,8 +121,14 @@
   },
   "E-07": {
     "name": "Dwell 서비스 이상",
-    "subsystems": ["MD"],
-    "columns": ["DWELL_MASK", "DWELL_ADDR_COUNT", "DWELL_BYTE_COUNT"],
+    "subsystems": [
+      "MD"
+    ],
+    "columns": [
+      "DWELL_MASK",
+      "DWELL_ADDR_COUNT",
+      "DWELL_BYTE_COUNT"
+    ],
     "contributes_to": {
       "A005": 0.5,
       "A007": 0.6
@@ -107,7 +138,10 @@
   },
   "E-08": {
     "name": "데이터 외부 송신 이상",
-    "subsystems": ["TO", "HK"],
+    "subsystems": [
+      "TO",
+      "HK"
+    ],
     "columns": [
       "COMBINEDPACKETSSENT",
       "ENABLEDROUTES",
@@ -123,7 +157,9 @@
   },
   "E-09": {
     "name": "ADCS 물리 이상",
-    "subsystems": ["ADCS"],
+    "subsystems": [
+      "ADCS"
+    ],
     "columns": [
       "QERR_0",
       "QERR_1",
@@ -150,7 +186,9 @@
   },
   "E-10": {
     "name": "전력 이상",
-    "subsystems": ["EPS"],
+    "subsystems": [
+      "EPS"
+    ],
     "columns": [
       "BATT_VOLTAGE",
       "BUS_3P3V",
@@ -168,8 +206,14 @@
   },
   "E-11": {
     "name": "IMU 센서값 고착",
-    "subsystems": ["ADCS"],
-    "columns": ["IMU_WBN_VARIANCE", "RAW_MAG_VARIANCE", "ST_VALID"],
+    "subsystems": [
+      "ADCS"
+    ],
+    "columns": [
+      "IMU_WBN_VARIANCE",
+      "RAW_MAG_VARIANCE",
+      "ST_VALID"
+    ],
     "contributes_to": {
       "A011": 0.6,
       "A014": 0.5
@@ -179,8 +223,15 @@
   },
   "E-12": {
     "name": "로그 공백 및 타임스탬프 모순",
-    "subsystems": ["DS", "TBL"],
-    "columns": ["SYSLOGENTRIES", "LASTVALCRC", "IS_SENT"],
+    "subsystems": [
+      "DS",
+      "TBL"
+    ],
+    "columns": [
+      "SYSLOGENTRIES",
+      "LASTVALCRC",
+      "IS_SENT"
+    ],
     "contributes_to": {
       "A008": 0.4,
       "A010": 0.4,
@@ -191,7 +242,10 @@
   },
   "E-13": {
     "name": "통신 에러 카운터 은폐",
-    "subsystems": ["COM", "CS"],
+    "subsystems": [
+      "COM",
+      "CS"
+    ],
     "columns": [
       "FORWARD_ERR_COUNT",
       "CH1_FAULT_CRC",
@@ -207,7 +261,10 @@
   },
   "E-X1": {
     "name": "자세-전력 물리 모순 [ADCS↔EPS 연계]",
-    "subsystems": ["ADCS", "EPS"],
+    "subsystems": [
+      "ADCS",
+      "EPS"
+    ],
     "columns": [
       "TCMD_X",
       "TCMD_Y",
@@ -227,7 +284,10 @@
   },
   "E-X2": {
     "name": "통신-에러 물리 모순 [COM↔CS 연계]",
-    "subsystems": ["COM", "CS"],
+    "subsystems": [
+      "COM",
+      "CS"
+    ],
     "columns": [
       "FORWARD_ERR_COUNT",
       "CH1_FAULT_CRC",
@@ -244,7 +304,11 @@
   },
   "E-X3": {
     "name": "SEU 위장 복합 판별 [OBC↔CF↔ES 연계]",
-    "subsystems": ["OBC", "CF", "ES"],
+    "subsystems": [
+      "OBC",
+      "CF",
+      "ES"
+    ],
     "columns": [
       "OBC_P_HASH",
       "EXPECTED_CRC",
@@ -264,7 +328,11 @@
   },
   "E-X4": {
     "name": "Dwell 기반 덤프-유출 연계 [MD↔TO↔ES 연계]",
-    "subsystems": ["MD", "TO", "ES"],
+    "subsystems": [
+      "MD",
+      "TO",
+      "ES"
+    ],
     "columns": [
       "DWELL_ADDR_COUNT",
       "DWELL_MASK",
@@ -282,7 +350,11 @@
   },
   "E-X5": {
     "name": "Ghost Telemetry 3중 모순 [ADCS↔EPS↔COM 연계]",
-    "subsystems": ["ADCS", "EPS", "COM"],
+    "subsystems": [
+      "ADCS",
+      "EPS",
+      "COM"
+    ],
     "columns": [
       "IMU_WBN_VARIANCE",
       "BUS_3P3V",

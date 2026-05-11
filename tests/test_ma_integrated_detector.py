@@ -94,10 +94,10 @@ def _official_satellite_packet(result: str = "Y") -> dict:
 
 
 class MAIntegratedDetectorTest(unittest.TestCase):
-    def test_default_analysis_window_is_reduced(self) -> None:
+    def test_default_analysis_window_uses_original_size(self) -> None:
         detector = MAIntegratedDetector()
 
-        self.assertEqual(DEFAULT_ANALYSIS_WINDOW_SEC, 300)
+        self.assertEqual(DEFAULT_ANALYSIS_WINDOW_SEC, 600)
         self.assertEqual(detector._window_size_sec, DEFAULT_ANALYSIS_WINDOW_SEC)
 
     def test_rule_evaluation_and_ma_generation(self) -> None:
@@ -131,6 +131,32 @@ class MAIntegratedDetectorTest(unittest.TestCase):
 
         self.assertTrue(reports)
         self.assertIn(reports[0]["grade"], {"CONFIRMED", "SUSPECTED", "UNKNOWN"})
+
+    def test_rule_score_threshold_filters_low_scores(self) -> None:
+        detector = MAIntegratedDetector()
+        detector._action_registry = {
+            "A001": {
+                "name": "MALICIOUS_PAYLOAD_INJECT",
+                "module": "CF",
+                "phase": 1,
+                "weight": 1.0,
+            }
+        }
+        detector._rule_registry = {
+            "E-01": {
+                "name": "파일 전송 무결성 이상",
+                "columns": ["CH1_FAULT_CRC"],
+                "contributes_to": {"A001": 0.4},
+                "enabled": True,
+                "score_threshold": 0.9,
+            }
+        }
+        anomaly = _normal_record()
+        anomaly["CH1_FAULT_CRC"] = 1
+
+        rule_data = json.loads(detector.evaluate_parallel_rules(json.dumps([anomaly])))
+
+        self.assertEqual(rule_data["rule_results"], [])
 
     def test_receive_telemetry_stores_ui_data(self) -> None:
         detector = MAIntegratedDetector()

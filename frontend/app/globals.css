@@ -37,7 +37,7 @@ button {
 
 .page-shell {
   min-height: 100vh;
-  padding: 28px;
+  padding: 18px;
 }
 
 .topbar,
@@ -79,7 +79,7 @@ button {
   border: 1px solid var(--line);
   border-radius: 24px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
-  padding: 26px;
+  padding: 18px;
 }
 
 .dashboard-grid {
@@ -101,20 +101,20 @@ button {
 
 .satellite-map {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   grid-template-areas:
     "obc obc com"
     "eps adcs com"
     "tcs adcs com";
-  margin-top: 20px;
+  margin-top: 14px;
 }
 
 .subsystem-card {
   background: var(--panel-strong);
   border: 1px solid var(--line);
   border-radius: 18px;
-  min-height: 150px;
-  padding: 16px;
+  min-height: 122px;
+  padding: 12px;
   position: relative;
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
@@ -207,14 +207,32 @@ button {
 }
 
 .recent-threats {
+  max-width: 100%;
   overflow: hidden;
+}
+
+.recent-threat-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.recent-threat-heading span {
+  background: rgba(110, 231, 249, 0.1);
+  border: 1px solid rgba(110, 231, 249, 0.25);
+  border-radius: 999px;
+  color: var(--accent);
+  padding: 8px 12px;
+  white-space: nowrap;
 }
 
 .recent-threat-track {
   display: flex;
   gap: 12px;
-  height: 116px;
+  height: 104px;
   margin-top: 12px;
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 8px;
@@ -224,8 +242,8 @@ button {
 }
 
 .recent-threat-track .threat-row {
-  flex: 0 0 360px;
-  min-height: 94px;
+  flex: 0 0 300px;
+  min-height: 82px;
   scroll-snap-align: start;
 }
 
@@ -291,7 +309,7 @@ button {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 18px;
-  padding: 22px;
+  padding: 16px;
 }
 
 .detail-heading strong {
@@ -402,6 +420,26 @@ button {
   border-radius: 12px;
   color: var(--text);
   margin-bottom: 10px;
+  padding: 12px;
+  width: 100%;
+}
+
+.threshold-inline {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.threshold-inline span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.threshold-inline input {
+  background: #08111f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
   padding: 12px;
   width: 100%;
 }
