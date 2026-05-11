@@ -87,7 +87,12 @@ class MAIntegratedDetector:
     def build_baseline(self, history: list[dict[str, Any]]) -> None:
         """Build normal-operation baseline statistics from history records."""
         try:
-            self._baseline_manager.build_from_history(history)
+            normalized_history = [
+                self._normalize_packet(record)
+                for record in history
+                if isinstance(record, dict)
+            ]
+            self._baseline_manager.build_from_history(normalized_history)
         except TypeError as error:
             logger.error("build baseline failed: %s", error)
         except Exception as error:
@@ -123,7 +128,7 @@ class MAIntegratedDetector:
             return []
 
     def receive_telemetry(self, json_token: str) -> None:
-        """Parse received telemetry and execute the MA detection pipeline for anomalies."""
+        """Parse satellite JSON and execute the MA detection pipeline for attack-like events."""
         try:
             packet = json.loads(json_token)
             if not isinstance(packet, dict):
@@ -216,7 +221,14 @@ class MAIntegratedDetector:
                     if phase not in accumulator.detected_phases:
                         accumulator.detected_phases.append(phase)
                     accumulator.timestamps.append(timestamp)
-                    phase_hits.append({"phase": phase, "timestamp": timestamp, "action_id": action_id, "rule_id": rule_id})
+                    phase_hits.append(
+                        {
+                            "phase": phase,
+                            "timestamp": timestamp,
+                            "action_id": action_id,
+                            "rule_id": rule_id,
+                        }
+                    )
 
                 rule_results.append(
                     {
@@ -297,7 +309,11 @@ class MAIntegratedDetector:
             unique_ordered = list(dict.fromkeys(ordered_phases))
             adjustment = 0.0
 
-            if all(phase in unique_ordered for phase in [1, 2, 3]) and unique_ordered.index(1) < unique_ordered.index(2) < unique_ordered.index(3):
+            full_sequence = (
+                all(phase in unique_ordered for phase in [1, 2, 3])
+                and unique_ordered.index(1) < unique_ordered.index(2) < unique_ordered.index(3)
+            )
+            if full_sequence:
                 adjustment += float(sequence_config.get("FULL_MATCH_BONUS", 15.0))
             elif 1 in unique_ordered and 3 in unique_ordered and unique_ordered.index(1) < unique_ordered.index(3):
                 adjustment += float(sequence_config.get("PARTIAL_MATCH_BONUS", 5.0))
@@ -492,6 +508,15 @@ class MAIntegratedDetector:
                 "corroboration_count": dashboard_row.get("CORROBORATION_COUNT"),
                 "evidence_keys": dashboard_row.get("EVIDENCE_KEYS", {}),
                 "is_new_pattern": dashboard_row.get("IS_NEW_PATTERN"),
+                "satellite_filter": {
+                    "result": dashboard_row.get("FALSE_POSITIVE_RESULT"),
+                    "weight": dashboard_row.get("FALSE_POSITIVE_WEIGHT"),
+                    "exception": dashboard_row.get("FALSE_POSITIVE_EXCEPTION"),
+                    "target_subsystem": dashboard_row.get("TARGET_SUBSYSTEM"),
+                    "event_id": dashboard_row.get("EVENT_ID"),
+                    "sw_id_list": dashboard_row.get("SW_ID_LIST", []),
+                    "detected_at": dashboard_row.get("SATELLITE_DETECTED_AT"),
+                },
                 "detail": {
                     "imu": [row.get("IMU_WBN_X") for row in detail_rows],
                     "mag": [row.get("RAW_MAG_X") for row in detail_rows],
@@ -521,12 +546,154 @@ class MAIntegratedDetector:
 
     def _normalize_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
         try:
-            normalized = dict(packet)
+            normalized = self._merge_packet_sections(packet)
             normalized.setdefault("UPDATED_AT", datetime.now(timezone.utc).isoformat())
+            normalized.setdefault("DETECTED_AT", normalized["UPDATED_AT"])
+            self._normalize_filter_fields(normalized)
             return normalized
         except Exception as error:
             logger.error("packet normalization failed: %s", error)
             return packet
+
+    def _merge_packet_sections(self, packet: dict[str, Any]) -> dict[str, Any]:
+        try:
+            normalized = dict(packet)
+            section_keys = [
+                "telemetry",
+                "tlm",
+                "power",
+                "pwr_meta",
+                "adcs",
+                "system",
+                "integrity",
+                "event",
+                "counters",
+                "evidence",
+                "ma_payload",
+                "SAT_TLM_CURRENT",
+                "SAT_PWR_META",
+                "SAT_ADCS_FILTER",
+                "SAT_EVENT_QUEUE",
+                "SAT_INTEGRITY_HASH",
+                "GS_TLM_HISTORY",
+                "GS_PWR_META",
+            ]
+            for section_key in section_keys:
+                section = packet.get(section_key)
+                if isinstance(section, dict):
+                    normalized.update(section)
+            return normalized
+        except TypeError as error:
+            logger.error("packet section merge failed: %s", error)
+            return dict(packet)
+        except Exception as error:
+            logger.error("unexpected packet section merge failure: %s", error)
+            return dict(packet)
+
+    def _normalize_filter_fields(self, normalized: dict[str, Any]) -> None:
+        try:
+            result = self._first_present(
+                normalized,
+                [
+                    "false_positive_result",
+                    "FALSE_POSITIVE_RESULT",
+                    "filter_result",
+                    "FILTER_RESULT",
+                    "filter_decision",
+                    "FILTER_DECISION",
+                    "decision",
+                    "DECISION",
+                ],
+            )
+            weight = self._first_present(
+                normalized,
+                [
+                    "false_positive_weight",
+                    "FALSE_POSITIVE_WEIGHT",
+                    "filter_weight",
+                    "FILTER_WEIGHT",
+                    "weight",
+                    "WEIGHT",
+                ],
+            )
+            exception = self._first_present(
+                normalized,
+                [
+                    "false_positive_exception",
+                    "FALSE_POSITIVE_EXCEPTION",
+                    "filter_exception",
+                    "FILTER_EXCEPTION",
+                    "exception",
+                    "EXCEPTION",
+                ],
+            )
+            target_subsystem = self._first_present(
+                normalized,
+                [
+                    "target_subsystem",
+                    "TARGET_SUBSYSTEM",
+                    "subsystem",
+                    "SUBSYSTEM",
+                    "attack_subsystem",
+                    "ATTACK_SUBSYSTEM",
+                ],
+            )
+            event_id = self._first_present(normalized, ["event_id", "EVENT_ID"])
+            sw_id_list = self._first_present(normalized, ["sw_id_list", "SW_ID_LIST"])
+            detected_at = self._first_present(normalized, ["detected_at", "DETECTED_AT"])
+
+            if result is not None:
+                normalized["FALSE_POSITIVE_RESULT"] = result
+                normalized["FILTER_DECISION"] = result
+                normalized["IS_ANOMALY"] = self._is_attack_decision(result)
+            else:
+                normalized.setdefault("FALSE_POSITIVE_RESULT", "Y" if normalized.get("IS_ANOMALY") else "N")
+                normalized.setdefault("FILTER_DECISION", normalized["FALSE_POSITIVE_RESULT"])
+
+            if weight is not None:
+                normalized["FALSE_POSITIVE_WEIGHT"] = weight
+                normalized["FILTER_WEIGHT"] = weight
+            if exception is not None:
+                normalized["FALSE_POSITIVE_EXCEPTION"] = exception
+                normalized["FILTER_EXCEPTION"] = exception
+            else:
+                normalized.setdefault("FALSE_POSITIVE_EXCEPTION", "")
+                normalized.setdefault("FILTER_EXCEPTION", normalized["FALSE_POSITIVE_EXCEPTION"])
+            if target_subsystem is not None:
+                normalized["TARGET_SUBSYSTEM"] = target_subsystem
+            if event_id is not None:
+                normalized["EVENT_ID"] = event_id
+            if sw_id_list is not None:
+                normalized["SW_ID_LIST"] = sw_id_list if isinstance(sw_id_list, list) else [sw_id_list]
+            if detected_at is not None:
+                normalized["DETECTED_AT"] = detected_at
+                normalized.setdefault("UPDATED_AT", detected_at)
+        except Exception as error:
+            logger.error("filter field normalization failed: %s", error)
+
+    @staticmethod
+    def _first_present(packet: dict[str, Any], keys: list[str]) -> Any:
+        try:
+            for key in keys:
+                if key in packet:
+                    return packet[key]
+            return None
+        except Exception as error:
+            logger.error("first present lookup failed: %s", error)
+            return None
+
+    @staticmethod
+    def _is_attack_decision(value: Any) -> bool:
+        try:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value > 0
+            normalized = str(value).strip().upper()
+            return normalized in {"Y", "YES", "TRUE", "ATTACK", "ATTACK_CONFIRMED", "1"}
+        except Exception as error:
+            logger.error("attack decision normalization failed: %s", error)
+            return False
 
     def _trim_window(self) -> None:
         try:
@@ -681,6 +848,13 @@ class MAIntegratedDetector:
                 "CORROBORATION_COUNT": report.get("corroboration_count"),
                 "EVIDENCE_KEYS": report.get("evidence_keys", {}),
                 "IS_NEW_PATTERN": report.get("is_new_pattern", False),
+                "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
+                "FALSE_POSITIVE_WEIGHT": latest.get("FALSE_POSITIVE_WEIGHT"),
+                "FALSE_POSITIVE_EXCEPTION": latest.get("FALSE_POSITIVE_EXCEPTION"),
+                "TARGET_SUBSYSTEM": latest.get("TARGET_SUBSYSTEM"),
+                "EVENT_ID": latest.get("EVENT_ID"),
+                "SW_ID_LIST": latest.get("SW_ID_LIST", []),
+                "SATELLITE_DETECTED_AT": latest.get("DETECTED_AT"),
             }
             self._dashboard_rows.append(row)
             detail = dict(latest)

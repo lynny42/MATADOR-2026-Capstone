@@ -67,6 +67,31 @@ def _normal_record() -> dict:
     }
 
 
+def _official_satellite_packet(result: str = "Y") -> dict:
+    telemetry = _normal_record()
+    telemetry.update(
+        {
+            "UPDATED_AT": "2026-05-10T07:03:00+00:00",
+            "OBC_P_HASH": "TAMPERED",
+            "APPCSERRCOUNTER": 5,
+            "LASTVALCRC": 101,
+            "CH1_FAULT_CRC": 1,
+            "HEAP_FREE": 300,
+            "UTILCPUAVG": 95.0,
+        }
+    )
+    return {
+        "event_id": 42,
+        "detected_at": "2026-05-10T07:03:00+00:00",
+        "false_positive_result": result,
+        "false_positive_weight": 88.5,
+        "false_positive_exception": "",
+        "target_subsystem": "ADCS",
+        "sw_id_list": [0, 1],
+        "telemetry": telemetry,
+    }
+
+
 class MAIntegratedDetectorTest(unittest.TestCase):
     def test_rule_evaluation_and_ma_generation(self) -> None:
         detector = MAIntegratedDetector()
@@ -123,6 +148,33 @@ class MAIntegratedDetectorTest(unittest.TestCase):
         self.assertNotIn("error", ui_payload)
         self.assertIn("ma_code", ui_payload)
         self.assertIn("detail", ui_payload)
+
+    def test_receive_official_satellite_json_maps_filter_fields(self) -> None:
+        detector = MAIntegratedDetector()
+        normal_packet = _official_satellite_packet("N")
+        normal_packet["telemetry"].update(_normal_record())
+        detector.build_baseline([normal_packet for _ in range(4)])
+
+        detector.receive_telemetry(json.dumps(_official_satellite_packet("Y")))
+        ui_payload = json.loads(detector.get_ui_data(1))
+
+        self.assertNotIn("error", ui_payload)
+        self.assertEqual(ui_payload["satellite_filter"]["result"], "Y")
+        self.assertEqual(ui_payload["satellite_filter"]["weight"], 88.5)
+        self.assertEqual(ui_payload["satellite_filter"]["target_subsystem"], "ADCS")
+        self.assertEqual(ui_payload["satellite_filter"]["event_id"], 42)
+        self.assertEqual(ui_payload["satellite_filter"]["sw_id_list"], [0, 1])
+        self.assertEqual(ui_payload["detail"]["history"][0]["FALSE_POSITIVE_RESULT"], "Y")
+
+    def test_false_positive_n_does_not_generate_ma_dashboard_row(self) -> None:
+        detector = MAIntegratedDetector()
+        detector.build_baseline([_normal_record() for _ in range(4)])
+
+        packet = _official_satellite_packet("N")
+        detector.receive_telemetry(json.dumps(packet))
+        ui_payload = json.loads(detector.get_ui_data(1))
+
+        self.assertIn("error", ui_payload)
 
 
 if __name__ == "__main__":
