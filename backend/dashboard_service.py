@@ -150,10 +150,13 @@ class DashboardService:
     ) -> dict[str, Any]:
         """Run a replay with temporary rules and thresholds without changing saved config."""
         detector = self._create_detector_with_config(rules, thresholds, packets)
+        current_dashboard = self.get_dashboard_state()
+        preview_dashboard = self._get_dashboard_state_for_detector(detector)
         return {
             "ok": True,
             "temporary": True,
-            "dashboard": self._get_dashboard_state_for_detector(detector),
+            "dashboard": preview_dashboard,
+            "comparison": self._build_replay_comparison(current_dashboard, preview_dashboard),
             "rules": rules,
             "thresholds": thresholds,
         }
@@ -198,6 +201,56 @@ class DashboardService:
         """Use all stored received telemetry rows as replay source."""
         history = self.detector.get_history_records()
         return [deepcopy(row) for row in history] if history else _seed_packets()
+
+    @staticmethod
+    def _build_replay_comparison(
+        current_dashboard: dict[str, Any],
+        preview_dashboard: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compare current detections with temporary replay detections."""
+        current_by_code = {
+            detection["ma_code"]: detection
+            for detection in current_dashboard.get("detections", [])
+        }
+        preview_by_code = {
+            detection["ma_code"]: detection
+            for detection in preview_dashboard.get("detections", [])
+        }
+        current_codes = set(current_by_code)
+        preview_codes = set(preview_by_code)
+
+        changed = []
+        for code in sorted(current_codes & preview_codes):
+            current = current_by_code[code]
+            preview = preview_by_code[code]
+            confidence_delta = round(
+                float(preview.get("confidence", 0.0)) - float(current.get("confidence", 0.0)),
+                2,
+            )
+            phase_delta = int(preview.get("phase", 0) or 0) - int(current.get("phase", 0) or 0)
+            if confidence_delta != 0 or phase_delta != 0 or current.get("grade") != preview.get("grade"):
+                changed.append(
+                    {
+                        "ma_code": code,
+                        "current": current,
+                        "preview": preview,
+                        "confidence_delta": confidence_delta,
+                        "phase_delta": phase_delta,
+                    }
+                )
+
+        return {
+            "current_count": len(current_codes),
+            "preview_count": len(preview_codes),
+            "delta_count": len(preview_codes) - len(current_codes),
+            "added": [preview_by_code[code] for code in sorted(preview_codes - current_codes)],
+            "removed": [current_by_code[code] for code in sorted(current_codes - preview_codes)],
+            "changed": changed,
+            "unchanged": [
+                preview_by_code[code]
+                for code in sorted((current_codes & preview_codes) - {item["ma_code"] for item in changed})
+            ],
+        }
 
     def _to_detection(self, row: dict[str, Any]) -> dict[str, Any]:
         module = str(row.get("MODULE", "UNKNOWN"))

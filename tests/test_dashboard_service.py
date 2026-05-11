@@ -42,6 +42,8 @@ class DashboardServiceTest(unittest.TestCase):
 
         self.assertTrue(preview["temporary"])
         self.assertIn("dashboard", preview)
+        self.assertIn("comparison", preview)
+        self.assertIn("delta_count", preview["comparison"])
         self.assertIn("E-02", service.list_rules()["rules"])
 
     def test_replay_preview_uses_stored_history(self) -> None:

@@ -269,6 +269,7 @@ export default function DashboardPage() {
         {error ? <section className="error-banner">{error}</section> : null}
         <ReplayWorkspace
           dashboard={replayDashboard}
+          comparison={replayResult?.comparison}
           replayRules={replayRules}
           replayThresholdDraft={replayThresholdDraft}
           replayRuleId={replayRuleId}
@@ -618,6 +619,7 @@ function RulePanel({
 
 function ReplayWorkspace({
   dashboard,
+  comparison,
   replayRules,
   replayThresholdDraft,
   replayRuleId,
@@ -635,13 +637,6 @@ function ReplayWorkspace({
   onSaveThresholds,
   onReplay
 }) {
-  const [previewCommunicationAt, setPreviewCommunicationAt] = useState("");
-  const selectedCommunication = useMemo(() => {
-    const targetAt = previewCommunicationAt || dashboard?.latest_communication?.communicated_at;
-    return dashboard?.communications?.find((communication) => communication.communicated_at === targetAt)
-      || dashboard?.latest_communication;
-  }, [dashboard, previewCommunicationAt]);
-
   if (!dashboard) {
     return <section className="panel">임시 replay 결과를 생성하는 중입니다.</section>;
   }
@@ -712,33 +707,81 @@ function ReplayWorkspace({
           </div>
         </div>
       </section>
-      <section className="dashboard-grid">
-        <BlueprintPanel
-          blueprint={dashboard.blueprint}
-          recentThreats={dashboard.recent_threats}
-          latestCommunication={dashboard.latest_communication}
-          onSelect={() => {}}
-        />
-        <section className="panel right-panel">
-          <div className="selector-row">
-            <label className="search-box communication-select">
-              <span>통신</span>
-              <select
-                value={previewCommunicationAt || dashboard.latest_communication?.communicated_at || ""}
-                onChange={(event) => setPreviewCommunicationAt(event.target.value)}
-              >
-                {(dashboard.communications || []).map((communication) => (
-                  <option key={communication.communicated_at} value={communication.communicated_at}>
-                    {communication.communicated_at} · {communication.anomaly_count}개
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <CommunicationSummary communication={selectedCommunication} />
-        </section>
-      </section>
+      <ReplayComparison comparison={comparison} replayBusy={replayBusy} replayUpdatedAt={replayUpdatedAt} />
     </section>
+  );
+}
+
+function ReplayComparison({ comparison, replayBusy, replayUpdatedAt }) {
+  if (!comparison) {
+    return <section className="panel">Replay 비교 결과를 생성하는 중입니다.</section>;
+  }
+
+  return (
+    <section className="panel replay-comparison">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Replay Diff</p>
+          <h2>기존 탐지 결과 vs 임시 기준 결과</h2>
+        </div>
+        <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
+          {replayBusy ? "Replay 실행 중..." : `반영 ${replayUpdatedAt || ""}`}
+        </div>
+      </div>
+
+      <div className="comparison-summary">
+        <span>기존 {comparison.current_count}개</span>
+        <span>Replay {comparison.preview_count}개</span>
+        <span>{comparison.delta_count >= 0 ? "+" : ""}{comparison.delta_count}개</span>
+      </div>
+
+      <div className="comparison-grid">
+        <ComparisonColumn title="추가됨 +" items={comparison.added} kind="added" />
+        <ComparisonColumn title="삭제됨 -" items={comparison.removed} kind="removed" />
+        <ChangedColumn items={comparison.changed} />
+      </div>
+    </section>
+  );
+}
+
+function ComparisonColumn({ title, items, kind }) {
+  return (
+    <div className="comparison-column">
+      <h3>{title}</h3>
+      {items?.length ? (
+        items.map((item) => (
+          <article key={`${kind}-${item.ma_code}`} className={`comparison-card ${kind}`}>
+            <strong>{item.ma_code}</strong>
+            <span>Phase {item.phase} · {item.confidence}% · {item.grade}</span>
+            <em>{item.detect_time}</em>
+          </article>
+        ))
+      ) : (
+        <p className="muted">변화 없음</p>
+      )}
+    </div>
+  );
+}
+
+function ChangedColumn({ items }) {
+  return (
+    <div className="comparison-column">
+      <h3>변경됨 ±</h3>
+      {items?.length ? (
+        items.map((item) => (
+          <article key={`changed-${item.ma_code}`} className="comparison-card changed">
+            <strong>{item.ma_code}</strong>
+            <span>
+              {item.current.confidence}% → {item.preview.confidence}%
+              {" "}({item.confidence_delta >= 0 ? "+" : ""}{item.confidence_delta})
+            </span>
+            <em>Phase {item.current.phase} → {item.preview.phase}</em>
+          </article>
+        ))
+      ) : (
+        <p className="muted">변화 없음</p>
+      )}
+    </div>
   );
 }
 
