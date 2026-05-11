@@ -29,6 +29,8 @@ export default function DashboardPage() {
   const [replayNewRuleId, setReplayNewRuleId] = useState("");
   const [replayRuleEditor, setReplayRuleEditor] = useState("");
   const [replayThresholdDraft, setReplayThresholdDraft] = useState("");
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replayUpdatedAt, setReplayUpdatedAt] = useState("");
   const [error, setError] = useState("");
 
   async function loadDashboard(options = {}) {
@@ -106,6 +108,7 @@ export default function DashboardPage() {
 
   async function openReplayMode() {
     try {
+      setReplayBusy(true);
       const payload = rules || await apiGet("/api/rules");
       setRules(payload);
       const rulesCopy = structuredClone(payload.rules);
@@ -122,20 +125,26 @@ export default function DashboardPage() {
       await runReplayPreview(rulesCopy, thresholdCopy);
     } catch (replayError) {
       setError(replayError.message);
+    } finally {
+      setReplayBusy(false);
     }
   }
 
   async function runReplayPreview(nextRules = replayRules, nextThresholds = replayThresholds) {
     try {
+      setReplayBusy(true);
       const payload = await apiSend("/api/replay/preview", "POST", {
         rules: nextRules,
         thresholds: nextThresholds
       });
       setReplayResult(payload);
       setReplayDashboard(payload.dashboard);
+      setReplayUpdatedAt(new Date().toLocaleTimeString());
       setError("");
     } catch (replayError) {
       setError(replayError.message);
+    } finally {
+      setReplayBusy(false);
     }
   }
 
@@ -199,6 +208,7 @@ export default function DashboardPage() {
 
   async function applyReplayConfig() {
     try {
+      setReplayBusy(true);
       const payload = await apiSend("/api/replay/apply", "POST", {
         rules: replayRules,
         thresholds: replayThresholds
@@ -211,6 +221,8 @@ export default function DashboardPage() {
       await loadDashboard({ resetToLatest: true, clearCode: true });
     } catch (applyError) {
       setError(applyError.message);
+    } finally {
+      setReplayBusy(false);
     }
   }
 
@@ -262,7 +274,8 @@ export default function DashboardPage() {
           replayRuleId={replayRuleId}
           replayNewRuleId={replayNewRuleId}
           replayRuleEditor={replayRuleEditor}
-          replayResult={replayResult}
+          replayBusy={replayBusy}
+          replayUpdatedAt={replayUpdatedAt}
           onRuleSelect={selectReplayRule}
           onNewRuleIdChange={setReplayNewRuleId}
           onRuleEditorChange={setReplayRuleEditor}
@@ -611,7 +624,8 @@ function ReplayWorkspace({
   replayRuleId,
   replayNewRuleId,
   replayRuleEditor,
-  replayResult,
+  replayBusy,
+  replayUpdatedAt,
   onRuleSelect,
   onNewRuleIdChange,
   onRuleEditorChange,
@@ -689,12 +703,11 @@ function ReplayWorkspace({
             <textarea value={replayThresholdDraft} onChange={(event) => onThresholdDraftChange(event.target.value)} />
           </div>
           <div>
-            <h3>Replay 상태</h3>
-          <pre>
-            {replayResult
-              ? JSON.stringify({ ok: replayResult.ok, temporary: replayResult.temporary }, null, 2)
-              : "임시 결과 없음"}
-          </pre>
+            <h3>임시 결과 안내</h3>
+            <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
+              {replayBusy ? "Replay 생성 중..." : `임시 대시보드 반영됨 ${replayUpdatedAt || ""}`}
+            </div>
+            <p className="muted">아래 대시보드는 저장된 원시 수신 history 전체를 임시 Rule/Threshold로 다시 판단한 결과입니다.</p>
           </div>
         </div>
       </section>

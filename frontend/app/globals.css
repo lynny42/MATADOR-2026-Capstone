@@ -36,8 +36,10 @@ button {
 }
 
 .page-shell {
+  margin: 0 auto;
+  max-width: 1080px;
   min-height: 100vh;
-  padding: 18px;
+  padding: 12px;
 }
 
 .topbar,
@@ -52,7 +54,7 @@ button {
 }
 
 .topbar {
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 
 .selector-row {
@@ -77,9 +79,9 @@ button {
 .panel {
   background: rgba(17, 28, 47, 0.88);
   border: 1px solid var(--line);
-  border-radius: 24px;
+  border-radius: 18px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
-  padding: 18px;
+  padding: 14px;
 }
 
 .dashboard-grid {
@@ -112,9 +114,9 @@ button {
 .subsystem-card {
   background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 18px;
-  min-height: 122px;
-  padding: 12px;
+  border-radius: 14px;
+  min-height: 104px;
+  padding: 10px;
   position: relative;
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
@@ -230,8 +232,8 @@ button {
 .recent-threat-track {
   display: flex;
   gap: 12px;
-  height: 104px;
-  margin-top: 12px;
+  height: 92px;
+  margin-top: 8px;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -242,8 +244,8 @@ button {
 }
 
 .recent-threat-track .threat-row {
-  flex: 0 0 300px;
-  min-height: 82px;
+  flex: 0 0 280px;
+  min-height: 74px;
   scroll-snap-align: start;
 }
 
@@ -308,8 +310,8 @@ button {
 .detail-card {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  padding: 16px;
+  border-radius: 14px;
+  padding: 14px;
 }
 
 .detail-heading strong {
@@ -355,6 +357,21 @@ button {
   gap: 4px;
   padding: 14px;
   word-break: break-word;
+}
+
+.replay-status {
+  background: rgba(110, 231, 249, 0.1);
+  border: 1px solid rgba(110, 231, 249, 0.28);
+  border-radius: 12px;
+  color: var(--accent);
+  margin-bottom: 10px;
+  padding: 12px;
+}
+
+.replay-status.busy {
+  background: rgba(250, 204, 21, 0.12);
+  border-color: rgba(250, 204, 21, 0.38);
+  color: var(--watch);
 }
 
 .communication-code span {

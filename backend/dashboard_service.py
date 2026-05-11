@@ -133,8 +133,8 @@ class DashboardService:
         return {"ok": ok, "category": category, "key": key, "value": value}
 
     def run_replay(self, packets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """Run replay mode for supplied packets or representative seeded anomalies."""
-        replay_packets = packets if packets else _seed_packets()
+        """Run replay mode for supplied packets or stored raw telemetry history."""
+        replay_packets = packets if packets else self._replay_source_packets()
         self.detector.set_replay_mode(True)
         for packet in replay_packets:
             self.detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
@@ -190,9 +190,14 @@ class DashboardService:
         detector._evidence_rules = EvidenceRules(detector._baseline_manager, thresholds)
         normal = _normal_record()
         detector.build_baseline([deepcopy(normal) for _ in range(6)])
-        for packet in packets if packets is not None else _seed_packets():
+        for packet in packets if packets is not None else self._replay_source_packets():
             detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
         return detector
+
+    def _replay_source_packets(self) -> list[dict[str, Any]]:
+        """Use all stored received telemetry rows as replay source."""
+        history = self.detector.get_history_records()
+        return [deepcopy(row) for row in history] if history else _seed_packets()
 
     def _to_detection(self, row: dict[str, Any]) -> dict[str, Any]:
         module = str(row.get("MODULE", "UNKNOWN"))

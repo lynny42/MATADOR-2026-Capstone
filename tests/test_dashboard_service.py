@@ -44,6 +44,32 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertIn("dashboard", preview)
         self.assertIn("E-02", service.list_rules()["rules"])
 
+    def test_replay_preview_uses_stored_history(self) -> None:
+        service = DashboardService(create_detector_with_seed())
+        rules = service.list_rules()["rules"]
+        thresholds = service.list_rules()["thresholds"]
+        extra_packet = {
+            "event_id": 999,
+            "detected_at": "2026-05-11T06:09:00+00:00",
+            "false_positive_result": "N",
+            "false_positive_weight": 0.0,
+            "target_subsystem": "",
+            "telemetry": {
+                "UPDATED_AT": "2026-05-11T06:09:00+00:00",
+                "MISSION_MODE": 2,
+                "ADCS_MODE": 1,
+            },
+        }
+        service.receive_satellite_packet(extra_packet)
+
+        preview = service.run_replay_preview(rules, thresholds)
+        communication_times = {
+            item["communicated_at"]
+            for item in preview["dashboard"]["communications"]
+        }
+
+        self.assertIn("2026-05-11T06:09:00+00:00", communication_times)
+
     def test_apply_replay_config_persists_rules_and_rebuilds_dashboard(self) -> None:
         service = DashboardService(create_detector_with_seed())
         rules = dict(service.list_rules()["rules"])
