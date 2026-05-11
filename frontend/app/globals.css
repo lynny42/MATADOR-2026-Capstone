@@ -55,6 +55,11 @@ button {
   margin-bottom: 20px;
 }
 
+.selector-row {
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
 .topbar h1,
 .panel h2,
 .latest-card h2 {
@@ -80,12 +85,13 @@ button {
 .dashboard-grid {
   display: grid;
   gap: 20px;
-  grid-template-columns: minmax(420px, 0.92fr) minmax(480px, 1.08fr);
+  grid-template-columns: 1fr;
 }
 
 .rule-button,
 .rule-actions button,
-.refresh-pill {
+.refresh-pill,
+.reset-button {
   background: rgba(110, 231, 249, 0.12);
   border: 1px solid rgba(110, 231, 249, 0.35);
   border-radius: 999px;
@@ -245,6 +251,14 @@ button {
   color: #111827;
 }
 
+.communication-select {
+  flex: 0 1 380px;
+}
+
+.reset-button {
+  min-width: 126px;
+}
+
 .selected-code {
   background: rgba(110, 231, 249, 0.08);
   border: 1px solid rgba(110, 231, 249, 0.22);
@@ -298,6 +312,30 @@ button {
 .rule-detail {
   border-top: 1px solid var(--line);
   padding: 14px 0;
+}
+
+.communication-code-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.communication-code {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.communication-code span {
+  color: var(--muted);
+}
+
+.communication-code em {
+  color: var(--accent);
+  font-style: normal;
 }
 
 .column-grid {

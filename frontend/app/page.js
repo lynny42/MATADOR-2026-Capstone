@@ -12,6 +12,7 @@ const severityLabel = {
 
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState(null);
+  const [selectedCommunicationAt, setSelectedCommunicationAt] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [selectedDetail, setSelectedDetail] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -20,15 +21,21 @@ export default function DashboardPage() {
   const [replayResult, setReplayResult] = useState(null);
   const [error, setError] = useState("");
 
-  async function loadDashboard(nextSelectedId = selectedId) {
+  async function loadDashboard(options = {}) {
     try {
       const payload = await apiGet("/api/dashboard");
       setDashboard(payload);
-      const fallbackId = payload.selected_detection?.detect_id || null;
-      const targetId = nextSelectedId || fallbackId;
+      const latestAt = payload.latest_communication?.communicated_at || "";
+      const communicationAt = options.resetToLatest
+        ? latestAt
+        : (options.communicationAt ?? selectedCommunicationAt) || latestAt;
+      const targetId = options.clearCode ? null : options.detectId ?? selectedId;
+      setSelectedCommunicationAt(communicationAt);
       setSelectedId(targetId);
       if (targetId) {
         await loadDetail(targetId);
+      } else {
+        setSelectedDetail(null);
       }
       setError("");
     } catch (loadError) {
@@ -41,9 +48,30 @@ export default function DashboardPage() {
       const detail = await apiGet(`/api/detections/${detectId}`);
       setSelectedDetail(detail);
       setSelectedId(detectId);
+      if (detail.detect_time) {
+        setSelectedCommunicationAt(detail.detect_time);
+      }
     } catch (loadError) {
       setError(loadError.message);
     }
+  }
+
+  function selectCommunication(communicatedAt) {
+    setSelectedCommunicationAt(communicatedAt);
+    setSelectedId(null);
+    setSelectedDetail(null);
+  }
+
+  function clearSelectedCode() {
+    setSelectedId(null);
+    setSelectedDetail(null);
+  }
+
+  function resetToLatestCommunication() {
+    const latestAt = dashboard?.latest_communication?.communicated_at || "";
+    setSelectedCommunicationAt(latestAt);
+    setSelectedId(null);
+    setSelectedDetail(null);
   }
 
   async function loadRules() {
@@ -80,17 +108,23 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    loadDashboard(null);
-    const timer = setInterval(() => loadDashboard(selectedId), 5000);
+    loadDashboard();
+    const timer = setInterval(() => loadDashboard(), 5000);
     return () => clearInterval(timer);
-  }, [selectedId]);
+  }, [selectedId, selectedCommunicationAt]);
 
   const selectedLabel = useMemo(() => {
     if (selectedDetail?.ma_code) {
       return selectedDetail.ma_code;
     }
-    return dashboard?.latest_communication?.communicated_at || "최근 통신 없음";
-  }, [dashboard, selectedDetail]);
+    return selectedCommunicationAt || dashboard?.latest_communication?.communicated_at || "최근 통신 없음";
+  }, [dashboard, selectedCommunicationAt, selectedDetail]);
+
+  const selectedCommunication = useMemo(() => {
+    const targetAt = selectedCommunicationAt || dashboard?.latest_communication?.communicated_at;
+    return dashboard?.communications?.find((communication) => communication.communicated_at === targetAt)
+      || dashboard?.latest_communication;
+  }, [dashboard, selectedCommunicationAt]);
 
   if (!dashboard) {
     return (
@@ -142,10 +176,15 @@ export default function DashboardPage() {
         />
         <RightPanel
           dashboard={dashboard}
+          selectedCommunication={selectedCommunication}
+          selectedCommunicationAt={selectedCommunicationAt}
           selectedLabel={selectedLabel}
           selectedId={selectedId}
           selectedDetail={selectedDetail}
           onSelect={loadDetail}
+          onCommunicationSelect={selectCommunication}
+          onCodeClear={clearSelectedCode}
+          onResetLatest={resetToLatestCommunication}
         />
       </section>
     </main>
@@ -216,17 +255,49 @@ function BlueprintPanel({ blueprint, recentThreats, onSelect }) {
   );
 }
 
-function RightPanel({ dashboard, selectedLabel, selectedId, selectedDetail, onSelect }) {
+function RightPanel({
+  dashboard,
+  selectedCommunication,
+  selectedCommunicationAt,
+  selectedLabel,
+  selectedId,
+  selectedDetail,
+  onSelect,
+  onCommunicationSelect,
+  onCodeClear,
+  onResetLatest
+}) {
   const latest = dashboard.latest_communication;
+  const communicationDetections = selectedCommunication?.detections || [];
   return (
     <section className="panel right-panel">
       <div className="selector-row">
+        <label className="search-box communication-select">
+          <span>통신</span>
+          <select
+            value={selectedCommunicationAt || latest.communicated_at || ""}
+            onChange={(event) => onCommunicationSelect(event.target.value)}
+          >
+            {(dashboard.communications || []).map((communication) => (
+              <option key={communication.communicated_at} value={communication.communicated_at}>
+                {communication.communicated_at} · {communication.anomaly_count}개
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="search-box">
           <span aria-hidden="true">🔍</span>
           <select
             value={selectedId || ""}
-            onChange={(event) => onSelect(event.target.value)}
+            onChange={(event) => {
+              if (event.target.value) {
+                onSelect(event.target.value);
+              } else {
+                onCodeClear();
+              }
+            }}
           >
+            <option value="">MA 코드 선택 안 함</option>
             {dashboard.detections.map((detection) => (
               <option key={detection.detect_id} value={detection.detect_id}>
                 {detection.ma_code}
@@ -238,6 +309,12 @@ function RightPanel({ dashboard, selectedLabel, selectedId, selectedDetail, onSe
           <span>선택 코드</span>
           <strong>{selectedLabel}</strong>
         </div>
+        <button className="reset-button" onClick={onResetLatest}>
+          통신 초기화
+        </button>
+        <button className="reset-button" onClick={onResetLatest}>
+          MA 코드 초기화
+        </button>
       </div>
 
       <div className={`latest-card ${latest.status === "NORMAL" ? "normal" : "anomaly"}`}>
@@ -251,26 +328,61 @@ function RightPanel({ dashboard, selectedLabel, selectedId, selectedDetail, onSe
       </div>
 
       <div className="timeline">
-        <h3>이상 코드 타임라인</h3>
-        {dashboard.detections.length ? (
-          dashboard.detections.map((detection) => (
+        <h3>선택 통신의 MA 코드</h3>
+        {communicationDetections.length ? (
+          communicationDetections.map((detection, index) => (
             <button
               key={detection.detect_id}
               className={`timeline-item severity-${detection.severity}`}
               onClick={() => onSelect(detection.detect_id)}
             >
-              <span>{detection.detect_time}</span>
+              <span>{index + 1}번째 발생 · {detection.detect_time}</span>
               <strong>{detection.ma_code}</strong>
               <em>신뢰도 {detection.confidence}% · Phase {detection.phase}</em>
             </button>
           ))
         ) : (
-          <p className="muted">이상 코드가 없습니다.</p>
+          <p className="muted">선택한 통신에서 발생한 MA 코드가 없습니다.</p>
         )}
       </div>
 
-      <DetailPanel selectedDetail={selectedDetail} />
+      {selectedDetail ? (
+        <DetailPanel selectedDetail={selectedDetail} />
+      ) : (
+        <CommunicationSummary communication={selectedCommunication} />
+      )}
     </section>
+  );
+}
+
+function CommunicationSummary({ communication }) {
+  if (!communication) {
+    return <div className="detail-card muted">통신 기록이 없습니다.</div>;
+  }
+
+  return (
+    <div className="detail-card">
+      <div className="detail-heading">
+        <div>
+          <p className="eyebrow">통신 단위 요약</p>
+          <h3>{communication.communicated_at}</h3>
+        </div>
+        <strong>{communication.anomaly_count || 0}개</strong>
+      </div>
+      {(communication.detections || []).length ? (
+        <div className="communication-code-list">
+          {communication.detections.map((detection, index) => (
+            <article key={detection.detect_id} className={`communication-code severity-${detection.severity}`}>
+              <span>{index + 1}번째 발생</span>
+              <strong>{detection.ma_code}</strong>
+              <em>Phase {detection.phase} · 신뢰도 {detection.confidence}%</em>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">해당 통신은 정상입니다.</p>
+      )}
+    </div>
   );
 }
 

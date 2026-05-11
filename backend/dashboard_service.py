@@ -65,6 +65,7 @@ class DashboardService:
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "core_subsystems": CORE_SUBSYSTEMS,
+            "communications": communications,
             "latest_communication": {
                 "communicated_at": latest_time,
                 "status": "ANOMALY" if latest_detections else "NORMAL",
@@ -201,7 +202,14 @@ class DashboardService:
             entry["status"] = "ANOMALY"
             entry["detections"].append(detection)
 
-        return sorted(communication_map.values(), key=lambda item: item["communicated_at"])[-5:]
+        communications = sorted(communication_map.values(), key=lambda item: item["communicated_at"])[-5:]
+        for communication in communications:
+            communication["detections"] = sorted(
+                communication["detections"],
+                key=lambda item: (str(item.get("detect_time", "")), int(item.get("detect_id", 0) or 0)),
+            )
+            communication["anomaly_count"] = len(communication["detections"])
+        return communications
 
     def _recent_threats(self, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(detections, key=lambda item: str(item.get("detect_time", "")))[-5:]

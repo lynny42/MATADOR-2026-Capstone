@@ -16,6 +16,8 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual(state["core_subsystems"], ["OBC", "TCS", "EPS", "ADCS", "COM"])
         self.assertIn("OBC", state["blueprint"])
         self.assertIn("latest_communication", state)
+        self.assertIn("communications", state)
+        self.assertGreaterEqual(len(state["communications"]), 1)
         self.assertGreaterEqual(len(state["detections"]), 1)
 
     def test_detection_detail_contains_rule_details(self) -> None:
