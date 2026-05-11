@@ -113,13 +113,6 @@ export default function DashboardPage() {
     return () => clearInterval(timer);
   }, [selectedId, selectedCommunicationAt]);
 
-  const selectedLabel = useMemo(() => {
-    if (selectedDetail?.ma_code) {
-      return selectedDetail.ma_code;
-    }
-    return selectedCommunicationAt || dashboard?.latest_communication?.communicated_at || "최근 통신 없음";
-  }, [dashboard, selectedCommunicationAt, selectedDetail]);
-
   const selectedCommunication = useMemo(() => {
     const targetAt = selectedCommunicationAt || dashboard?.latest_communication?.communicated_at;
     return dashboard?.communications?.find((communication) => communication.communicated_at === targetAt)
@@ -178,7 +171,6 @@ export default function DashboardPage() {
           dashboard={dashboard}
           selectedCommunication={selectedCommunication}
           selectedCommunicationAt={selectedCommunicationAt}
-          selectedLabel={selectedLabel}
           selectedId={selectedId}
           selectedDetail={selectedDetail}
           onSelect={loadDetail}
@@ -261,7 +253,6 @@ function RightPanel({
   dashboard,
   selectedCommunication,
   selectedCommunicationAt,
-  selectedLabel,
   selectedId,
   selectedDetail,
   onSelect,
@@ -306,10 +297,6 @@ function RightPanel({
             ))}
           </select>
         </label>
-        <div className="selected-code">
-          <span>선택 코드</span>
-          <strong>{selectedLabel}</strong>
-        </div>
         <button className="reset-button" onClick={onResetLatest}>
           초기화
         </button>

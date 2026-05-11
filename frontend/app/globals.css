@@ -79,7 +79,7 @@ button {
   border: 1px solid var(--line);
   border-radius: 24px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
-  padding: 22px;
+  padding: 26px;
 }
 
 .dashboard-grid {
@@ -206,17 +206,26 @@ button {
   margin-top: 20px;
 }
 
+.recent-threats {
+  overflow: hidden;
+}
+
 .recent-threat-track {
   display: flex;
   gap: 12px;
+  height: 116px;
   margin-top: 12px;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-bottom: 8px;
+  overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
+  width: 100%;
 }
 
 .recent-threat-track .threat-row {
-  flex: 0 0 320px;
+  flex: 0 0 360px;
+  min-height: 94px;
   scroll-snap-align: start;
 }
 
@@ -266,25 +275,11 @@ button {
 }
 
 .communication-select {
-  flex: 0 1 380px;
+  flex: 1 1 380px;
 }
 
 .reset-button {
   min-width: 126px;
-}
-
-.selected-code {
-  background: rgba(110, 231, 249, 0.08);
-  border: 1px solid rgba(110, 231, 249, 0.22);
-  border-radius: 16px;
-  display: grid;
-  min-width: 240px;
-  padding: 10px 14px;
-}
-
-.selected-code span {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .timeline {
@@ -296,7 +291,7 @@ button {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 18px;
-  padding: 18px;
+  padding: 22px;
 }
 
 .detail-heading strong {
@@ -340,7 +335,8 @@ button {
   border-radius: 14px;
   display: grid;
   gap: 4px;
-  padding: 12px;
+  padding: 14px;
+  word-break: break-word;
 }
 
 .communication-code span {
