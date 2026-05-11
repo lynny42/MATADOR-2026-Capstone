@@ -174,6 +174,8 @@ class DashboardService:
                 if int(row.get("DETECT_ID", -1)) == detect_id:
                     return self._to_detection(row)
             return {}
+        except (TypeError, ValueError):
+            return {}
 
     def _create_detector_with_config(
         self,
@@ -191,8 +193,6 @@ class DashboardService:
         for packet in packets if packets is not None else _seed_packets():
             detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
         return detector
-        except (TypeError, ValueError):
-            return {}
 
     def _to_detection(self, row: dict[str, Any]) -> dict[str, Any]:
         module = str(row.get("MODULE", "UNKNOWN"))
