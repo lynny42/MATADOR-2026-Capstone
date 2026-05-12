@@ -32,6 +32,32 @@ def _default_db_path() -> Path:
         raise
 
 
+def _seed_sat_tlm_current(conn: sqlite3.Connection) -> None:
+    """TLM_ID=1 기본 행 — UDPReceiver가 UPDATE만 할 수 있도록 보장."""
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO SAT_TLM_CURRENT (
+              TLM_ID, UPDATED_AT, MISSION_MODE, OBC_S_TICK, HEAP_FREE,
+              APPENABLESTATE, DWELL_MASK, ADCS_MODE,
+              SVB_X, SVB_Y, SVB_Z, WBN_X, WBN_Y, WBN_Z,
+              DT, TORQUER_PERIOD, SUN_VALID
+            ) VALUES (
+              1, '1970-01-01T00:00:00Z', 0, 0, 0,
+              0, 0, 0,
+              0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0, 0
+            )
+            """
+        )
+    except sqlite3.Error as e:
+        logger.error("SAT_TLM_CURRENT 시드 실패: %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_TLM_CURRENT 시드 실패: %s", e)
+        raise
+
+
 DDL_STATEMENTS: list[str] = [
     # SAT_TLM_CURRENT — 위성체 상태(순환 버퍼는 앱 로직에서 관리)
     """
@@ -180,6 +206,7 @@ def init_db(db_path: Path) -> None:
         conn = sqlite3.connect(db_path)
         for stmt in DDL_STATEMENTS:
             conn.execute(stmt)
+        _seed_sat_tlm_current(conn)
         conn.commit()
     except sqlite3.Error as e:
         logger.error("SQLite 스키마 적용 실패: %s", e)

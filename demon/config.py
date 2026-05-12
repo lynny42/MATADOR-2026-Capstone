@@ -1,0 +1,163 @@
+"""
+데몬 전역 설정. 모든 환경별 상수는 여기 한 곳에서만 정의한다.
+
+- 임무 ICD에 맞게 텔레메트리 MID/오프셋을 조정한다.
+- NOS3 generic_* / SC MID는 저장소 옆 nos3 트리의 msgids.h 와 일치시킨다.
+- 절대 워커 코드 안에 매직넘버를 하드코딩하지 말 것.
+"""
+from __future__ import annotations
+
+import logging
+
+# ============================================================
+# 시리얼 (아두이노 전력 수집)
+# ============================================================
+SERIAL_PORT = "/dev/ttyUSB0"
+BAUD_RATE = 115200
+SERIAL_READ_TIMEOUT_SEC = 1.0
+SERIAL_REOPEN_BACKOFF_SEC = 5.0
+
+# ============================================================
+# UDP (cFS TO 텔레메트리 수신)
+# ============================================================
+UDP_TLM_BIND_HOST = "0.0.0.0"
+UDP_TLM_PORT = 5020
+UDP_RECV_BUFFER_BYTES = 65535
+
+# ============================================================
+# 지상국 TCP (송수신)
+# ============================================================
+GS_HOST = "10.0.1.2"
+GS_PORT = 6000
+GS_SEND_RETRY_MAX = 3
+GS_SEND_RETRY_BASE_SEC = 1.0
+
+# ============================================================
+# DB
+# ============================================================
+# 운영 시: "/var/sat_monitor/sat_monitor.db" 등 절대 경로 권장.
+# 개발 시: None 이면 demon 패키지 옆 database.sqlite 를 사용 (core.context 가 처리).
+DB_PATH: str | None = None
+
+# ============================================================
+# 수집 주기
+# ============================================================
+COLLECT_INTERVAL_SEC = 1.0
+
+# ============================================================
+# 전력 초기 임계치 (SW_ID 0~3)
+# ============================================================
+V_THRESHOLD_LO = [3.0, 3.0, 4.5, 3.0]
+V_THRESHOLD_HI = [3.6, 3.6, 5.5, 3.6]
+
+# ============================================================
+# 물리적 범위 필터 (parse_serial_line 1차 필터)
+# ============================================================
+VOLTAGE_MAX = 6.0
+CURRENT_MAX = 5.0
+
+# ============================================================
+# 무결성 검증
+# ============================================================
+INTEGRITY_TARGET_DIR = "/cf"
+
+# ============================================================
+# 이상탐지 기준
+# ============================================================
+EXCEED_COUNT_THRESHOLD = 3
+CONSECUTIVE_THRESHOLD = 3
+
+# ============================================================
+# 로깅
+# ============================================================
+LOG_LEVEL = logging.INFO
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+# None 이면 stdout 만. 경로 지정 시 파일 핸들러 추가.
+LOG_FILE_PATH: str | None = None
+LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 5
+
+# ============================================================
+# CCSDS / cFE 헤더 레이아웃
+# ============================================================
+# CCSDS Primary Header 길이(바이트)
+CCSDS_PRIMARY_HEADER_BYTES = 6
+
+# cFE 텔레메트리 CCSDS 데이터 필드 앞부분(시간 2차 헤더) — 레거시/별도 경로용
+CFE_TLM_SEC_HDR_BYTES = 6
+
+# CFE_MSG_TelemetryHeader_t 직후 = generic_* TlmHeader 뒤 앱 페이로드 시작.
+# pri.h: Pri(6)+Sec(6)+Spare(4)=16 / priext.h: (Pri+Ext)(10)+Sec(6)=16 — 동일 총바이트.
+CFE_SB_TLM_MSG_HDR_BYTES = 16
+
+# generic_adcs_msg.h 등 packed 구조체 struct.unpack 엔디안 ("<"=리틀엔디안, ARM cFS 일반)
+TLM_STRUCT_ENDIAN = "<"
+
+# MID 산출 방식:
+# - "stream_id": UDP 첫 2바이트 = CCSDS 식별 워드(대개 APID 등) — SB MsgId 와 다를 수 있음.
+# - "payload_u16": CCSDS 데이터 필드에서 Tlm 2차 헤더(있으면 6B) 제거 후, 남은 영역 앞 2B = cFE SB StreamId/MsgId.
+MID_DERIVE_MODE = "stream_id"
+
+# payload_u16 에서 StreamId 언패킹 (cFE ICD·타깃 엔디안에 맞출 것)
+CFE_SB_STREAMID_STRUCT = ">H"
+
+# ============================================================
+# 텔레메트리 MID — NOS3 nos3/components/*/fsw/cfs/platform_inc/*_msgids.h 와 일치
+# ============================================================
+# generic_adcs
+GENERIC_ADCS_HK_TLM_MID = 0x0940
+GENERIC_ADCS_DI_MID = 0x0941
+GENERIC_ADCS_AD_MID = 0x0942
+GENERIC_ADCS_GNC_MID = 0x0943
+GENERIC_ADCS_AC_MID = 0x0944
+GENERIC_ADCS_DO_MID = 0x0945
+
+# generic_imu
+GENERIC_IMU_HK_TLM_MID = 0x0925
+GENERIC_IMU_DEVICE_TLM_MID = 0x0926
+
+# generic_mag
+GENERIC_MAG_HK_TLM_MID = 0x092A
+GENERIC_MAG_DEVICE_TLM_MID = 0x092B
+
+# SC
+SC_HK_TLM_MID = 0x08AA
+
+# MGR (Mission Manager — NOS3에서 SpacecraftMode 보유)
+# components/mgr/fsw/cfs/platform_inc/mgr_msgids.h
+MGR_HK_TLM_MID = 0x08F8
+
+# MID 라우팅 집합 — UDPReceiver.dispatch_tlm 이 사용
+# 명세 parse_sc_hktlm 은 미션 모드 추출용. NOS3 에서 실제 소스는 MGR HK 이므로 여기 매핑한다.
+MID_MISSION_MODE_TLM: tuple[int, ...] = (MGR_HK_TLM_MID,)
+MID_SC_HKTLM: tuple[int, ...] = (SC_HK_TLM_MID,)
+MID_ADCS_TLM: tuple[int, ...] = (
+    GENERIC_ADCS_HK_TLM_MID,
+    GENERIC_ADCS_DI_MID,
+    GENERIC_ADCS_AD_MID,
+    GENERIC_ADCS_GNC_MID,
+    GENERIC_ADCS_AC_MID,
+    GENERIC_ADCS_DO_MID,
+)
+MID_IMU_TLM: tuple[int, ...] = (GENERIC_IMU_HK_TLM_MID, GENERIC_IMU_DEVICE_TLM_MID)
+MID_MAG_TLM: tuple[int, ...] = (GENERIC_MAG_HK_TLM_MID, GENERIC_MAG_DEVICE_TLM_MID)
+
+# MGR HK 페이로드(사용자 영역) 내 SpacecraftMode 오프셋.
+# 구조: CommandErrorCount(1) + CommandCount(1) + SpacecraftMode(1) ... → offset 2
+MGR_HKTLM_SPACECRAFT_MODE_OFFSET = 2
+
+# NOS3 MGR SpacecraftMode 값 (mgr_app.h)
+MGR_SAFE_MODE = 1
+MGR_SAFE_REBOOT_MODE = 2
+MGR_SCIENCE_MODE = 3
+MGR_SCIENCE_REBOOT_MODE = 4
+
+# ============================================================
+# 디버그 토글
+# ============================================================
+# 등록되지 않은 MID 수신 시 INFO 1줄(원격에서 라우팅 미스 확인용; 안정화 후 False 권장)
+LOG_UNREGISTERED_TLM = False
+
+# True 면 매 텔레메트리 패킷마다 파싱 요약을 INFO 출력(주기 높음 — 안정화 후 False 권장)
+LOG_PARSED_TLM = True
