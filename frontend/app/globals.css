@@ -275,11 +275,11 @@ button {
 .recent-threat-track {
   display: flex;
   gap: 12px;
-  height: 92px;
+  min-height: 118px;
   margin-top: 8px;
   max-width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
   padding-bottom: 8px;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
@@ -288,8 +288,16 @@ button {
 
 .recent-threat-track .threat-row {
   flex: 0 0 280px;
-  min-height: 74px;
+  min-height: 96px;
   scroll-snap-align: start;
+}
+
+.recent-threat-track .threat-row strong,
+.recent-threat-track .threat-row em,
+.recent-threat-track .threat-row span {
+  display: block;
+  line-height: 1.35;
+  white-space: normal;
 }
 
 .recent-threats h3,
