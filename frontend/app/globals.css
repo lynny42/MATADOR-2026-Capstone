@@ -37,10 +37,10 @@ button {
 }
 
 .page-shell {
-  width: min(1720px, calc(100vw - 64px));
+  width: min(1440px, calc(100vw - 48px));
   margin: 0 auto;
   min-height: 100vh;
-  padding: 24px 0;
+  padding: 20px 0;
 }
 
 .topbar,
@@ -110,9 +110,9 @@ button {
   display: grid;
   gap: 10px;
   grid-template-areas:
-    "obc obc com"
-    "eps adcs com"
-    "tcs adcs com";
+    "obc obc adcs com"
+    "eps tcs adcs com";
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 14px;
   width: 100%;
 }
@@ -121,7 +121,7 @@ button {
   background: var(--panel-strong);
   border: 1px solid var(--line);
   border-radius: 14px;
-  min-height: 104px;
+  min-height: 128px;
   padding: 10px;
   position: relative;
   transition: transform 0.2s ease, border-color 0.2s ease;
@@ -480,7 +480,7 @@ button {
 
 .rule-grid {
   align-items: start;
-  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1fr) minmax(0, 1fr);
   margin-top: 18px;
 }
 
@@ -574,10 +574,6 @@ pre {
     grid-area: auto;
   }
 
-  .filter-grid,
-  .column-grid,
-  .comparison-grid,
-  .comparison-summary,
   .rule-grid {
     grid-template-columns: 1fr;
   }
@@ -591,6 +587,13 @@ pre {
 
   .satellite-map {
     grid-template-areas: none;
+    grid-template-columns: 1fr;
+  }
+
+  .filter-grid,
+  .column-grid,
+  .comparison-grid,
+  .comparison-summary {
     grid-template-columns: 1fr;
   }
 }
