@@ -621,10 +621,6 @@ function RulePanel({
           <textarea value={ruleDraft} readOnly />
           <p className="muted">Replay에서 임시 threshold를 저장해 결과를 확인할 수 있습니다.</p>
         </div>
-        <div>
-          <h3>Replay 안내</h3>
-          <pre>Replay 실행을 누르면 임시 Rule/Threshold 편집 화면으로 이동합니다.</pre>
-        </div>
       </div>
     </section>
   );
