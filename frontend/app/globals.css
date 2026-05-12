@@ -11,16 +11,14 @@
   --watch: #b7791f;
   --warning: #c2410c;
   --critical: #dc2626;
-  --page-bg:
-    radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 34rem),
-    linear-gradient(135deg, #f8fafc 0%, #eef3f8 48%, #f7f9fc 100%);
+  --page-bg: #f6f8fb;
   --panel-bg: rgba(255, 255, 255, 0.94);
   --soft-card-bg: rgba(15, 23, 42, 0.04);
   --button-bg: rgba(37, 99, 235, 0.08);
   --button-border: rgba(37, 99, 235, 0.28);
   --input-bg: #f8fafc;
   --option-text: #111827;
-  --shadow: 0 24px 80px rgba(15, 23, 42, 0.12);
+  --shadow: none;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -37,16 +35,14 @@
     --watch: #facc15;
     --warning: #fb923c;
     --critical: #f87171;
-    --page-bg:
-      radial-gradient(circle at top left, rgba(110, 231, 249, 0.18), transparent 34rem),
-      linear-gradient(135deg, #08101e 0%, #101b31 48%, #070b14 100%);
+    --page-bg: #09111f;
     --panel-bg: rgba(17, 28, 47, 0.88);
     --soft-card-bg: rgba(255, 255, 255, 0.04);
     --button-bg: rgba(110, 231, 249, 0.12);
     --button-border: rgba(110, 231, 249, 0.35);
     --input-bg: #08111f;
     --option-text: #111827;
-    --shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
+    --shadow: none;
   }
 }
 
@@ -198,17 +194,14 @@ button {
 
 .severity-watch {
   border-color: rgba(250, 204, 21, 0.78);
-  box-shadow: inset 0 0 20px rgba(250, 204, 21, 0.08);
 }
 
 .severity-warning {
   border-color: rgba(251, 146, 60, 0.85);
-  box-shadow: inset 0 0 22px rgba(251, 146, 60, 0.12);
 }
 
 .severity-critical {
   border-color: rgba(248, 113, 113, 0.95);
-  box-shadow: 0 0 30px rgba(248, 113, 113, 0.16), inset 0 0 22px rgba(248, 113, 113, 0.16);
 }
 
 .subsystem-title span,
