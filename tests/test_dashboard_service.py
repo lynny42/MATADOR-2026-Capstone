@@ -67,12 +67,12 @@ class DashboardServiceTest(unittest.TestCase):
         thresholds = service.list_rules()["thresholds"]
         extra_packet = {
             "event_id": 999,
-            "detected_at": "2026-05-11T06:09:00+00:00",
+            "detected_at": "2026-05-12T07:40:00+00:00",
             "false_positive_result": "N",
             "false_positive_weight": 0.0,
             "target_subsystem": "",
             "telemetry": {
-                "UPDATED_AT": "2026-05-11T06:09:00+00:00",
+                "UPDATED_AT": "2026-05-12T07:40:00+00:00",
                 "MISSION_MODE": 2,
                 "ADCS_MODE": 1,
             },
@@ -85,7 +85,7 @@ class DashboardServiceTest(unittest.TestCase):
             for item in preview["dashboard"]["communications"]
         }
 
-        self.assertIn("2026-05-11T06:09:00+00:00", communication_times)
+        self.assertIn("2026-05-12T07:40:00+00:00", communication_times)
 
     def test_apply_replay_config_persists_rules_and_rebuilds_dashboard(self) -> None:
         service = DashboardService(create_detector_with_seed())
