@@ -4,10 +4,25 @@ from __future__ import annotations
 
 import unittest
 
-from backend.dashboard_service import DashboardService, create_detector_with_seed
+from backend.dashboard_service import DashboardService, _baseline_history, _seed_packets, create_detector_with_seed
 
 
 class DashboardServiceTest(unittest.TestCase):
+    def test_realistic_dataset_contains_normals_and_attack_scenarios(self) -> None:
+        baseline = _baseline_history()
+        packets = _seed_packets()
+
+        self.assertGreaterEqual(len(baseline), 3)
+        self.assertGreaterEqual(len(packets), 5)
+        self.assertTrue(any(packet.get("false_positive_result") == "N" for packet in packets))
+        self.assertTrue(any(packet.get("false_positive_result") == "Y" for packet in packets))
+        self.assertTrue(
+            any(packet.get("target_subsystem") == "ADCS" for packet in packets)
+        )
+        self.assertTrue(
+            any(packet.get("target_subsystem") == "COM" for packet in packets)
+        )
+
     def test_dashboard_state_contains_blueprint_and_latest_result(self) -> None:
         service = DashboardService(create_detector_with_seed())
 

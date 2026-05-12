@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ma_detector import MAIntegratedDetector
@@ -24,13 +25,13 @@ MODULE_ALIASES = {
     "TBL": ["OBC"],
     "TO": ["COM"],
 }
+DATASET_PATH = Path(__file__).resolve().parent / "test_data" / "realistic_satellite_dataset.json"
 
 
 def create_detector_with_seed() -> MAIntegratedDetector:
     """Create a detector instance with representative ground-station data."""
     detector = MAIntegratedDetector()
-    normal = _normal_record()
-    detector.build_baseline([deepcopy(normal) for _ in range(6)])
+    detector.build_baseline(_baseline_history())
 
     for packet in _seed_packets():
         detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
@@ -191,8 +192,7 @@ class DashboardService:
         detector._rule_registry = rules
         detector._threshold_config = thresholds
         detector._evidence_rules = EvidenceRules(detector._baseline_manager, thresholds)
-        normal = _normal_record()
-        detector.build_baseline([deepcopy(normal) for _ in range(6)])
+        detector.build_baseline(_baseline_history())
         for packet in packets if packets is not None else self._replay_source_packets():
             detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
         return detector
@@ -421,7 +421,31 @@ class DashboardService:
         return round(min(abs(float(value)) * 10.0, 100.0), 2)
 
 
+def _load_realistic_dataset() -> dict[str, Any]:
+    """Load the realistic satellite communication test dataset."""
+    try:
+        with DATASET_PATH.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _baseline_history() -> list[dict[str, Any]]:
+    """Return baseline history rows from dataset, with fallback records."""
+    dataset = _load_realistic_dataset()
+    baseline = dataset.get("baseline_history", [])
+    if isinstance(baseline, list) and baseline:
+        return [deepcopy(row) for row in baseline if isinstance(row, dict)]
+    normal = _normal_record()
+    return [deepcopy(normal) for _ in range(6)]
+
+
 def _normal_record() -> dict[str, Any]:
+    """Return one representative normal telemetry row."""
+    dataset = _load_realistic_dataset()
+    baseline = dataset.get("baseline_history", [])
+    if isinstance(baseline, list) and baseline and isinstance(baseline[0], dict):
+        return deepcopy(baseline[0])
     return {
         "UPDATED_AT": "2026-05-11T06:00:00+00:00",
         "MISSION_MODE": 2,
@@ -481,6 +505,12 @@ def _normal_record() -> dict[str, Any]:
 
 
 def _seed_packets() -> list[dict[str, Any]]:
+    """Return representative satellite packets from dataset, with fallback packets."""
+    dataset = _load_realistic_dataset()
+    packets_from_dataset = dataset.get("packets", [])
+    if isinstance(packets_from_dataset, list) and packets_from_dataset:
+        return [deepcopy(packet) for packet in packets_from_dataset if isinstance(packet, dict)]
+
     normal = _normal_record()
     packets = []
     for idx in range(2):
