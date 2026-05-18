@@ -107,7 +107,7 @@ export default function DashboardPage() {
     setRuleEditor(JSON.stringify(rules?.rules?.[ruleId] || defaultRuleDefinition(), null, 2));
   }
 
-  async function openReplayMode() {
+  async function openReplayMode() { /* 처음 리플레이 누르고 들어간 거면 로딩이 걸릴 필요가 없지 */
     try {
       setReplayBusy(true);
       const payload = rules || await apiGet("/api/rules");
@@ -121,7 +121,7 @@ export default function DashboardPage() {
       setReplayNewRuleId("");
       setReplayRuleEditor(JSON.stringify(rulesCopy[firstRule] || defaultRuleDefinition(), null, 2));
       setReplayThresholdDraft(JSON.stringify(thresholdCopy, null, 2));
-      setReplayDashboard(null);
+      setReplayDashboard(true);
       setReplayResult(null);
       setReplayUpdatedAt("");
       setReplayDirty(false);
@@ -401,32 +401,6 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
           </article>
         ))}
       </div>
-
-      <div className="recent-threats">
-        <div className="recent-threat-heading">
-          <h3>최근 위협 탐지</h3>
-          <span>
-            {latestCommunication?.communicated_at || "통신 없음"} : {latestCommunication?.anomaly_count || 0}개
-          </span>
-        </div>
-        {recentThreats.length ? (
-          <div className="recent-threat-track" aria-label="최근 위협 탐지 코드 슬라이더">
-            {recentThreats.map((detection) => (
-              <button
-                key={detection.detect_id}
-                className="threat-row"
-                onClick={() => onSelect(detection.detect_id)}
-              >
-                <span>{detection.detect_time}</span>
-                <strong>{detection.ma_code}</strong>
-                <em>{detection.confidence}% / P{detection.phase}</em>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">최근 5회 통신 내 위협 탐지가 없습니다.</p>
-        )}
-      </div>
     </section>
   );
 }
@@ -447,7 +421,7 @@ function RightPanel({
     <section className="panel right-panel">
       <div className="selector-row">
         <label className="search-box communication-select">
-          <span>통신</span>
+          <span className="">통신</span>
           <select
             value={selectedCommunicationAt || latest.communicated_at || ""}
             onChange={(event) => onCommunicationSelect(event.target.value)}
@@ -502,7 +476,6 @@ function CommunicationSummary({ communication }) {
     <div className="detail-card">
       <div className="detail-heading">
         <div>
-          <p className="eyebrow">통신 단위 요약</p>
           <h3>{communication.communicated_at}</h3>
         </div>
         <strong>{communication.anomaly_count || 0}개</strong>
@@ -552,13 +525,13 @@ function DetailPanel({ selectedDetail }) {
               <strong>{rule.rule_id} · {rule.name}</strong>
               <span>최초 활성화: {rule.first_triggered_at}</span>
             </div>
-            <div className="column-grid">
+            <div className="column-grid /* 이상률 0이면 표시 안 함*/">
               {Object.entries(rule.columns || {}).map(([column, value]) => (
                 <div key={column} className="column-card">
                   <b>{column}</b>
                   <span>관측: {String(value.observed)}</span>
                   <span>정상: {String(value.normal)}</span>
-                  <em>이상률: {value.abnormal_percent ?? "Flag"}%</em>
+                  <em>이상률: {value.abnormal_percent ?? "Flag"}%</em> /* 이 부분 FLAG면 퍼센트가 안 들어가야함 */
                 </div>
               ))}
             </div>
@@ -612,14 +585,12 @@ function RulePanel({
           </div>
         </div>
         <div>
-          <h3>Rule JSON 읽기 전용</h3>
+          <h3>Rule JSON</h3>
           <textarea value={ruleEditor} readOnly />
-          <p className="muted">수정은 Replay 실행 후 임시 편집 화면에서만 가능합니다.</p>
         </div>
         <div>
-          <h3>Threshold JSON 읽기 전용</h3>
+          <h3>Threshold JSON</h3>
           <textarea value={ruleDraft} readOnly />
-          <p className="muted">Replay에서 임시 threshold를 저장해 결과를 확인할 수 있습니다.</p>
         </div>
       </div>
     </section>
@@ -648,7 +619,7 @@ function ReplayWorkspace({
   onReplay
 }) {
   if (!dashboard) {
-    return <section className="panel">임시 replay 결과를 생성하는 중입니다.</section>;
+    return <section className="panel">replay 결과를 생성하는 중입니다. "퍼센트 안 알려주면 언제까지 기다려 라고 생각할 듯"</section>;
   }
 
   return (
@@ -657,9 +628,9 @@ function ReplayWorkspace({
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Temporary Rule Edit</p>
-            <h2>임시 Rule / Threshold 편집</h2>
+            <h2>Replay</h2>
           </div>
-          <div className="rule-actions">
+          <div className="rule-actions /* 초기화 버튼 필요함 + 추가/삭제 진행 시 자동 Replay 실행 삭제 + 저장 버튼 삭제 + 실행 시 자동 저장*/">
             <button onClick={onStartNewRule}>Rule 추가</button>
             <button onClick={onSaveRule}>Rule 저장</button>
             <button onClick={onDeleteRule}>Rule 삭제</button>
@@ -671,7 +642,7 @@ function ReplayWorkspace({
         </div>
         <div className="rule-grid">
           <div>
-            <h3>임시 Rule</h3>
+            <h3>Rule</h3>
             <div className="rule-list">
               {Object.entries(replayRules || {}).map(([ruleId, rule]) => (
                 <button
@@ -686,8 +657,14 @@ function ReplayWorkspace({
             </div>
           </div>
           <div>
-            <h3>임시 Rule JSON</h3>
+            <h3>Rule JSON</h3>
             <label className="threshold-inline">
+              <input
+              className="rule-id-input"
+              placeholder="새 Rule ID"
+              value={replayNewRuleId}
+              onChange={(event) => onNewRuleIdChange(event.target.value)}
+            />
               <span>활성화 임계값(score_threshold)</span>
               <input
                 type="number"
@@ -696,24 +673,11 @@ function ReplayWorkspace({
                 onChange={(event) => onRuleEditorChange(updateRuleThreshold(replayRuleEditor, event.target.value))}
               />
             </label>
-            <input
-              className="rule-id-input"
-              placeholder="새 Rule ID"
-              value={replayNewRuleId}
-              onChange={(event) => onNewRuleIdChange(event.target.value)}
-            />
             <textarea value={replayRuleEditor} onChange={(event) => onRuleEditorChange(event.target.value)} />
           </div>
           <div>
-            <h3>임시 Threshold JSON</h3>
+            <h3>Threshold JSON</h3>
             <textarea value={replayThresholdDraft} onChange={(event) => onThresholdDraftChange(event.target.value)} />
-          </div>
-          <div>
-            <h3>임시 결과 안내</h3>
-            <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
-              {replayBusy ? "Replay 생성 중..." : `임시 대시보드 반영됨 ${replayUpdatedAt || ""}`}
-            </div>
-            <p className="muted">저장된 원시 수신 history 전체를 임시 Rule/Threshold로 다시 판단합니다.</p>
           </div>
         </div>
       </section>
@@ -735,8 +699,8 @@ function ReplayComparison({ comparison, replayBusy, replayDirty, replayUpdatedAt
           {replayBusy
             ? "Replay 실행 중..."
             : replayDirty
-              ? "임시 변경사항이 있습니다. Replay 실행을 눌러 비교 결과를 생성하세요."
-              : "Rule/Threshold를 임시로 수정한 뒤 Replay 실행을 누르세요."}
+              ? "변경사항이 있습니다. Replay 실행을 눌러 비교 결과를 생성하세요."
+              : "Rule/Threshold를 수정한 뒤 Replay 실행"}
         </div>
       </section>
     );
