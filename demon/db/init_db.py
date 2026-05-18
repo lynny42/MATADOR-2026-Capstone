@@ -89,13 +89,13 @@ DDL_STATEMENTS: list[str] = [
       V_THRESHOLD_HI REAL NOT NULL
     )
     """,
-    # SAT_INTEGRITY_HASH — 파일 무결성 (명세 컬럼명 LAST_VERIFIEDA_AT 유지)
+    # SAT_INTEGRITY_HASH — 파일 무결성
     """
     CREATE TABLE IF NOT EXISTS SAT_INTEGRITY_HASH (
       FILE_ID INTEGER NOT NULL PRIMARY KEY,
       FILE_PATH TEXT NOT NULL,
       EXPECTED_HASH TEXT NOT NULL,
-      LAST_VERIFIEDA_AT TEXT NOT NULL,
+      LAST_VERIFIED_AT TEXT NOT NULL,
       UPDATED_AT TEXT NOT NULL,
       IS_VIOLATED INTEGER NOT NULL
     )
@@ -186,6 +186,38 @@ DDL_STATEMENTS: list[str] = [
 ]
 
 
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        return any(row[1] == column for row in cur.fetchall())
+    except sqlite3.Error as e:
+        logger.error("table_info 조회 실패(SQLite) %s.%s: %s", table, column, e)
+        return False
+    except Exception as e:
+        logger.error("table_info 조회 실패 %s.%s: %s", table, column, e)
+        return False
+
+
+def _migrate_integrity_hash_column(conn: sqlite3.Connection) -> None:
+    """구 스키마 LAST_VERIFIEDA_AT → LAST_VERIFIED_AT 컬럼명 정리."""
+    try:
+        if not _table_has_column(conn, "SAT_INTEGRITY_HASH", "LAST_VERIFIEDA_AT"):
+            return
+        if _table_has_column(conn, "SAT_INTEGRITY_HASH", "LAST_VERIFIED_AT"):
+            return
+        conn.execute(
+            "ALTER TABLE SAT_INTEGRITY_HASH "
+            "RENAME COLUMN LAST_VERIFIEDA_AT TO LAST_VERIFIED_AT",
+        )
+        logger.info("SAT_INTEGRITY_HASH: LAST_VERIFIEDA_AT → LAST_VERIFIED_AT 마이그레이션 완료")
+    except sqlite3.Error as e:
+        logger.error("SAT_INTEGRITY_HASH 컬럼 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_INTEGRITY_HASH 컬럼 마이그레이션 실패: %s", e)
+        raise
+
+
 def init_db(db_path: Path) -> None:
     conn: sqlite3.Connection | None = None
     try:
@@ -197,6 +229,7 @@ def init_db(db_path: Path) -> None:
         conn = sqlite3.connect(db_path)
         for stmt in DDL_STATEMENTS:
             conn.execute(stmt)
+        _migrate_integrity_hash_column(conn)
         _seed_sat_tlm_current(conn)
         conn.commit()
     except sqlite3.Error as e:
