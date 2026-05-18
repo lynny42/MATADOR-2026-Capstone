@@ -38,6 +38,29 @@ GS_SEND_RETRY_BASE_SEC = 1.0
 # 운영 시: "/var/sat_monitor/sat_monitor.db" 등 절대 경로 권장.
 # 개발 시: None 이면 demon 패키지 옆 database.sqlite 를 사용 (core.context 가 처리).
 DB_PATH: str | None = None
+SQLITE_BUSY_TIMEOUT_MS = 5000
+SAT_TLM_ID = 1
+SAT_ADCS_FILTER_CHANNEL_ID = 1
+PWR_SW_ID_COUNT = 4
+
+# SAT_TLM_CURRENT 부분 UPDATE 허용 컬럼
+TLM_CURRENT_UPDATEABLE_COLS: tuple[str, ...] = (
+    "MISSION_MODE",
+    "OBC_S_TICK",
+    "HEAP_FREE",
+    "APPENABLESTATE",
+    "DWELL_MASK",
+    "ADCS_MODE",
+    "SVB_X",
+    "SVB_Y",
+    "SVB_Z",
+    "WBN_X",
+    "WBN_Y",
+    "WBN_Z",
+    "DT",
+    "TORQUER_PERIOD",
+    "SUN_VALID",
+)
 
 # ============================================================
 # 수집 주기
@@ -113,6 +136,9 @@ GENERIC_ADCS_GNC_MID = 0x0943
 GENERIC_ADCS_AC_MID = 0x0944
 GENERIC_ADCS_DO_MID = 0x0945
 
+# ADCS 한 사이클 수신 후 DB flush (나중에 GENERIC_ADCS_GNC_MID 로 줄일 수 있음)
+TLM_DB_FLUSH_TRIGGER_MID = GENERIC_ADCS_DO_MID
+
 # generic_imu
 GENERIC_IMU_HK_TLM_MID = 0x0925
 GENERIC_IMU_DEVICE_TLM_MID = 0x0926
@@ -147,7 +173,7 @@ MID_MAG_TLM: tuple[int, ...] = (GENERIC_MAG_HK_TLM_MID, GENERIC_MAG_DEVICE_TLM_M
 # 구조: CommandErrorCount(1) + CommandCount(1) + SpacecraftMode(1) ... → offset 2
 MGR_HKTLM_SPACECRAFT_MODE_OFFSET = 2
 
-# NOS3 MGR SpacecraftMode 값 (mgr_app.h)
+# NOS3 MGR SpacecraftMode 값 (mgr_app.h) — 로그/UI 해석용 (파서는 정수 그대로 저장)
 MGR_SAFE_MODE = 1
 MGR_SAFE_REBOOT_MODE = 2
 MGR_SCIENCE_MODE = 3

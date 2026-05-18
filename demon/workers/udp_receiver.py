@@ -2,51 +2,16 @@ from __future__ import annotations
 
 import logging
 import socket
-import sqlite3
 import struct
 import threading
-from datetime import datetime, timezone
 from typing import Any
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
+from ..db.db_manager import DBManager
 from . import tlm_parse_nos3
 
 logger = logging.getLogger(__name__)
-
-
-def _close_conn_safely(conn: sqlite3.Connection | None) -> None:
-    """sqlite3 커넥션 안전 close. finally 절에서 호출하면 try-except 중첩 1단계 절약."""
-    if conn is None:
-        return
-    try:
-        conn.close()
-    except sqlite3.Error as e:
-        logger.error("SQLite close 실패(sqlite3.Error): %s", e)
-    except Exception as e:
-        logger.error("SQLite close 실패: %s", e)
-
-
-# SAT_TLM_CURRENT 동적 UPDATE 시 허용 컬럼(화이트리스트)
-_TLM_UPDATEABLE_COLS = frozenset(
-    {
-        "MISSION_MODE",
-        "OBC_S_TICK",
-        "HEAP_FREE",
-        "APPENABLESTATE",
-        "DWELL_MASK",
-        "ADCS_MODE",
-        "SVB_X",
-        "SVB_Y",
-        "SVB_Z",
-        "WBN_X",
-        "WBN_Y",
-        "WBN_Z",
-        "DT",
-        "TORQUER_PERIOD",
-        "SUN_VALID",
-    },
-)
 
 
 def _application_zone(data_field: bytes, sec_hdr_flag: int) -> bytes:
@@ -163,6 +128,9 @@ class UDPReceiver:
         # AnomalyDetector 가 이상 감지 시 이 캐시를 SAT_ADCS_FILTER 에 INSERT 한다.
         self._latest_adcs_data: dict[str, Any] = {}
         self._adcs_lock = threading.Lock()
+        # SAT_TLM_CURRENT flush 전까지 merge (DO 0x0945 수신 시 1회 DB 반영)
+        self._tlm_pending: dict[str, Any] = {}
+        self._tlm_pending_lock = threading.Lock()
 
     def run(self) -> None:
         """스레드 진입점 — 설계상 `udp_receiver_thread`와 동일 역할."""
@@ -242,7 +210,7 @@ class UDPReceiver:
         """MID로 MGR / SC / ADCS / IMU / MAG / 일반 텔레메트리 분기 후 SAT_TLM_CURRENT 반영."""
         try:
             if demon_config.MID_MISSION_MODE_TLM and mid in demon_config.MID_MISSION_MODE_TLM:
-                mm = self._parse_sc_hktlm(full_packet)
+                mm = tlm_parse_nos3.parse_mgr_mission_mode(full_packet)
                 self._log_parsed_telemetry(
                     mid,
                     "mgr",
@@ -252,28 +220,28 @@ class UDPReceiver:
                 if mm is not None and mm >= 0:
                     with self._mission_lock:
                         self._mission_mode = mm
-                    self._update_sat_tlm_current({"MISSION_MODE": mm})
+                    self._merge_tlm_pending({"MISSION_MODE": mm})
             elif demon_config.MID_SC_HKTLM and mid in demon_config.MID_SC_HKTLM:
                 self._log_parsed_telemetry(mid, "sc", {}, note="SC HK counters only")
             elif demon_config.MID_ADCS_TLM and mid in demon_config.MID_ADCS_TLM:
                 adcs = tlm_parse_nos3.parse_adcs_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "adcs", adcs)
                 if adcs:
-                    # SAT_TLM_CURRENT 갱신 (화이트리스트 필드만 자동 필터)
-                    self._update_sat_tlm_current(adcs)
-                    # AnomalyDetector 가 사용할 최신 ADCS 스냅샷 캐시 (전체 필드)
+                    self._merge_tlm_pending(adcs)
                     with self._adcs_lock:
                         self._latest_adcs_data.update(adcs)
+                    if mid == demon_config.TLM_DB_FLUSH_TRIGGER_MID:
+                        self._flush_tlm_pending_to_db()
             elif demon_config.MID_IMU_TLM and mid in demon_config.MID_IMU_TLM:
                 imu = tlm_parse_nos3.parse_imu_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "imu", imu)
                 if imu:
-                    self._update_sat_tlm_current(imu)
+                    self._merge_tlm_pending(imu)
             elif demon_config.MID_MAG_TLM and mid in demon_config.MID_MAG_TLM:
                 mag = tlm_parse_nos3.parse_mag_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "mag", mag)
                 if mag:
-                    self._update_sat_tlm_current(mag)
+                    self._merge_tlm_pending(mag)
             else:
                 try:
                     if demon_config.LOG_UNREGISTERED_TLM:
@@ -284,11 +252,6 @@ class UDPReceiver:
                         )
                 except Exception as e:
                     logger.error("tlm unregistered 로그 실패: %s", e)
-                gen = self._parse_generic_tlm(mid, full_packet)
-                if gen:
-                    self._update_sat_tlm_current(gen)
-        except sqlite3.Error as e:
-            logger.error("dispatch_tlm DB 오류: %s", e)
         except Exception as e:
             logger.error("dispatch_tlm 실패: %s", e)
 
@@ -308,35 +271,6 @@ class UDPReceiver:
             logger.info("tlm parsed mid=0x%04x route=%s %s%s", mid, route, body, suffix)
         except Exception as e:
             logger.error("tlm parsed 로그 실패: %s", e)
-
-    def _parse_sc_hktlm(self, full_packet: bytes) -> int:
-        """
-        명세 메서드 이름은 parse_sc_hktlm 이지만 NOS3 에서 SpacecraftMode 는
-        MGR 앱 HK(0x08F8, MGR_Hk_tlm_t)에 있다. tlm_parse_nos3.parse_mgr_hktlm 위임.
-
-        반환: SpacecraftMode 정수(>=0). 파싱 실패 시 -1.
-        """
-        try:
-            parsed = tlm_parse_nos3.parse_mgr_hktlm(full_packet)
-            mm = parsed.get("MISSION_MODE")
-            if mm is None:
-                return -1
-            return int(mm)
-        except (ValueError, TypeError) as e:
-            logger.error("parse_sc_hktlm 변환 오류: %s", e)
-            return -1
-        except Exception as e:
-            logger.error("parse_sc_hktlm 실패: %s", e)
-            return -1
-
-    def _parse_generic_tlm(self, mid: int, full_packet: bytes) -> dict[str, Any]:
-        """등록되지 않은 MID — DB 미갱신."""
-        try:
-            _ = (mid, full_packet)
-            return {}
-        except Exception as e:
-            logger.error("parse_generic_tlm 실패: %s", e)
-            return {}
 
     def _close_socket_safely(self) -> None:
         """UDP 소켓 안전 close. finally 절에서 호출."""
@@ -363,51 +297,38 @@ class UDPReceiver:
 
     def get_mission_mode(self) -> int:
         """
-        현재 MISSION_MODE 반환. 명세상 DB 조회가 원칙이라 SAT_TLM_CURRENT 우선 조회,
-        DB 미가용/미초기화 시 메모리 캐시 fallback.
+        현재 MISSION_MODE 반환.
+
+        MGR HK 는 DO flush 전 pending 에만 있을 수 있어 메모리 캐시 우선,
+        미수신(0)이면 DB fallback.
         """
-        conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(self._ctx.config.db_path)
-            cur = conn.execute(
-                "SELECT MISSION_MODE FROM SAT_TLM_CURRENT WHERE TLM_ID = 1",
-            )
-            row = cur.fetchone()
-            if row is not None and row[0] is not None:
-                return int(row[0])
             with self._mission_lock:
-                return int(self._mission_mode)
-        except sqlite3.Error as e:
-            logger.error("get_mission_mode SQLite 오류: %s", e)
-            with self._mission_lock:
-                return int(self._mission_mode)
+                if self._mission_mode != 0:
+                    return int(self._mission_mode)
+            return self._ctx.db.get_mission_mode()
         except Exception as e:
             logger.error("get_mission_mode 실패: %s", e)
             return 0
-        finally:
-            _close_conn_safely(conn)
 
-    def _update_sat_tlm_current(self, fields: dict[str, Any]) -> None:
-        """SAT_TLM_CURRENT TLM_ID=1 행 부분 갱신."""
-        conn: sqlite3.Connection | None = None
+    def _merge_tlm_pending(self, fields: dict[str, Any]) -> None:
+        """SAT_TLM_CURRENT 화이트리스트 필드만 pending 에 merge."""
         try:
-            safe: dict[str, Any] = {}
-            for k, v in fields.items():
-                if k in _TLM_UPDATEABLE_COLS:
-                    safe[k] = v
-            if not safe:
+            filtered = DBManager.filter_tlm_current_fields(fields)
+            if not filtered:
                 return
-            now = datetime.now(timezone.utc).isoformat()
-            safe["UPDATED_AT"] = now
-            cols = ["UPDATED_AT = ?"] + [f"{k} = ?" for k in safe if k != "UPDATED_AT"]
-            vals = [safe["UPDATED_AT"]] + [safe[k] for k in safe if k != "UPDATED_AT"]
-            sql = f"UPDATE SAT_TLM_CURRENT SET {', '.join(cols)} WHERE TLM_ID = 1"
-            conn = sqlite3.connect(self._ctx.config.db_path)
-            conn.execute(sql, vals)
-            conn.commit()
-        except sqlite3.Error as e:
-            logger.error("SAT_TLM_CURRENT 갱신 실패(SQLite): %s", e)
+            with self._tlm_pending_lock:
+                self._tlm_pending.update(filtered)
         except Exception as e:
-            logger.error("SAT_TLM_CURRENT 갱신 실패: %s", e)
-        finally:
-            _close_conn_safely(conn)
+            logger.error("_merge_tlm_pending 실패: %s", e)
+
+    def _flush_tlm_pending_to_db(self) -> None:
+        """ADCS DO(0x0945) 수신 후 pending → SAT_TLM_CURRENT 1회 반영."""
+        try:
+            with self._tlm_pending_lock:
+                snapshot = dict(self._tlm_pending)
+            if not snapshot:
+                return
+            self._ctx.db.upsert_tlm_current(snapshot)
+        except Exception as e:
+            logger.error("_flush_tlm_pending_to_db 실패: %s", e)

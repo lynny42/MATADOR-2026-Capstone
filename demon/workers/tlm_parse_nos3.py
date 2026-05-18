@@ -468,6 +468,22 @@ def parse_mag_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
 # ===========================================================================
 # MGR HK (0x08F8) — MGR_Hk_tlm_t → SpacecraftMode → SAT_TLM_CURRENT.MISSION_MODE
 # ===========================================================================
+def parse_mgr_mission_mode(full_packet: bytes) -> int:
+    """MGR HK(0x08F8) SpacecraftMode → MISSION_MODE. 파싱 실패 시 -1."""
+    try:
+        parsed = parse_mgr_hktlm(full_packet)
+        mm = parsed.get("MISSION_MODE")
+        if mm is None:
+            return -1
+        return int(mm)
+    except (ValueError, TypeError) as e:
+        logger.error("parse_mgr_mission_mode 변환 오류: %s", e)
+        return -1
+    except Exception as e:
+        logger.error("parse_mgr_mission_mode 실패: %s", e)
+        return -1
+
+
 def parse_mgr_hktlm(full_packet: bytes) -> dict[str, Any]:
     """
     MGR_Hk_tlm_t 사용자 영역 레이아웃:
@@ -536,12 +552,6 @@ def _selftest_payload_sizes() -> None:
             + "3d3d3d3d3d"               # wbn, HwhlMaxB, HwhlB, Mcmd, Tcmd
             + "B4d4d"                    # qValid, qbn[4], qErr[4]
         )
-        ac_fmt = (
-            _E
-            + "dd3d3d"                                  # Bdot
-            + "3d3d3ddB3d3d3dd" + "3d3d"                # Sunsafe (Kp,Kr,sside,vmax,h_mgmt(1),therr,werr,Tcmd,err_t + cmd_wbn 위치 보정)
-        )
-        # Sunsafe 순서가 헤더 정의와 일치하도록 수동 재구성:
         ac_fmt = (
             _E
             + "dd3d3d"                                  # Bdot: b_range, Kb, bold[3], bdot[3] = 64

@@ -4,24 +4,15 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import config as demon_config
+from ..db.paths import default_db_path
+
+if TYPE_CHECKING:
+    from ..db.db_manager import DBManager
 
 logger = logging.getLogger(__name__)
-
-
-def _default_db_path() -> Path:
-    """config.DB_PATH 가 지정되어 있으면 그 값, 아니면 demon 패키지 옆 database.sqlite."""
-    try:
-        if demon_config.DB_PATH:
-            return Path(demon_config.DB_PATH).expanduser().resolve()
-        return Path(__file__).resolve().parent.parent / "database.sqlite"
-    except OSError as e:
-        logger.error("기본 DB 경로 계산 실패(OSError): %s", e)
-        raise
-    except Exception as e:
-        logger.error("기본 DB 경로 계산 실패: %s", e)
-        raise
 
 
 @dataclass
@@ -33,7 +24,7 @@ class DaemonConfig:
     """
 
     # --- 경로 ---
-    db_path: Path = field(default_factory=_default_db_path)
+    db_path: Path = field(default_factory=default_db_path)
 
     # --- 시리얼 ---
     serial_port: str = demon_config.SERIAL_PORT
@@ -85,3 +76,4 @@ class RuntimeContext:
 
     config: DaemonConfig
     shutdown_event: threading.Event
+    db: DBManager

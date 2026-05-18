@@ -5,7 +5,7 @@ import signal
 import sqlite3
 import threading
 
-from ..db.init_db import init_db
+from ..db.db_manager import DBManager
 from ..workers import AnomalyDetector, GScomms, SerialReader, UDPReceiver
 from .context import DaemonConfig, RuntimeContext
 
@@ -22,6 +22,7 @@ class MatadorDaemon:
         self._config = config or DaemonConfig()
         self._shutdown = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._db: DBManager | None = None
 
     @property
     def shutdown_event(self) -> threading.Event:
@@ -49,16 +50,23 @@ class MatadorDaemon:
         self._install_signals()
 
         try:
-            init_db(self._config.db_path)
+            self._db = DBManager(self._config.db_path)
+            if not self._db.init_db():
+                logger.error("DBManager.init_db 실패")
+                return 1
         except sqlite3.Error as e:
-            logger.error("init_db SQLite 오류: %s", e)
+            logger.error("DBManager SQLite 오류: %s", e)
             return 1
         except Exception as e:
-            logger.error("init_db 실패: %s", e)
+            logger.error("DBManager 기동 실패: %s", e)
             return 1
 
         try:
-            ctx = RuntimeContext(config=self._config, shutdown_event=self._shutdown)
+            ctx = RuntimeContext(
+                config=self._config,
+                shutdown_event=self._shutdown,
+                db=self._db,
+            )
 
             worker_specs: list[tuple[str, object]] = [
                 ("SerialReader", SerialReader(ctx)),
@@ -105,6 +113,9 @@ class MatadorDaemon:
                 logger.warning("thread %s did not exit in time", t.name)
 
     def cleanup(self) -> None:
-        logger.info(
-            "cleanup complete (extend with DB close / IS_SENT policy as needed)",
-        )
+        try:
+            if self._db is not None:
+                self._db.close()
+        except Exception as e:
+            logger.error("DBManager cleanup 실패: %s", e)
+        logger.info("cleanup complete")

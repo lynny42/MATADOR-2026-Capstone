@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""통합 검증 스크립트 — demon.main 기동 전 로컬에서 DB·파서·flush 동작 확인."""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+from demon import config as demon_config
+from demon.core.context import DaemonConfig, RuntimeContext
+from demon.db.db_manager import DBManager
+from demon.workers.udp_receiver import UDPReceiver
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger("verify")
+
+
+def _ok(msg: str) -> None:
+    logger.info("PASS: %s", msg)
+
+
+def _fail(msg: str) -> None:
+    logger.error("FAIL: %s", msg)
+    raise SystemExit(1)
+
+
+def test_db_manager_api(tmp_db: Path) -> None:
+    db = DBManager(tmp_db)
+    if not db.init_db():
+        _fail("DBManager.init_db")
+    _ok("DBManager.init_db")
+
+    conn = sqlite3.connect(tmp_db)
+    pwr_rows = conn.execute("SELECT COUNT(*) FROM SAT_PWR_META").fetchone()[0]
+    conn.close()
+    if pwr_rows != demon_config.PWR_SW_ID_COUNT:
+        _fail(f"SAT_PWR_META seed count={pwr_rows}")
+    _ok(f"SAT_PWR_META {pwr_rows} rows seeded")
+
+    db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.1, "current_a": 0.4})
+    db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.4, "current_a": 0.5})
+    m0 = db.get_pwr_meta(0)
+    if m0 is None or abs(m0["CURR_DELTA_V"] - 0.3) > 1e-6:
+        _fail(f"pwr delta expected 0.3 got {None if m0 is None else m0['CURR_DELTA_V']}")
+    _ok("upsert_pwr_meta delta sliding window")
+
+    db.update_pwr_exceed_meta(
+        {"sw_id": 0, "exceed_count": 3, "consecutive_exceed": 2, "anomaly_flag": 1},
+    )
+    m0_flag = db.get_pwr_meta(0)
+    if m0_flag is None or m0_flag["ANOMALY_FLAG"] != 1:
+        _fail("update_pwr_exceed_meta")
+    _ok("update_pwr_exceed_meta")
+
+    eid = db.insert_event({"EVENT_TYPE": "VERIFY", "PRIORITY": 0})
+    if eid < 1 or len(db.get_pending_events()) != 1:
+        _fail("insert_event / get_pending_events")
+    db.mark_event_sent(eid)
+    db.delete_event(eid)
+    _ok("event queue lifecycle")
+
+    db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
+    if not db.is_sunlight_window():
+        _fail("is_sunlight_window")
+    _ok("upsert_tlm_current + is_sunlight_window")
+
+    db.insert_adcs_filter({"QBN_0": 1.0, "SUN_VALID": 1, "_ADCS_HK_CMD_CNT": 10})
+    adcs = db.get_adcs_filter(1)
+    if adcs is None or adcs.get("QBN_0") != 1.0:
+        _fail(f"get_adcs_filter {adcs}")
+    _ok("insert_adcs_filter + get_adcs_filter")
+
+    db.insert_adcs_filter({"QBN_0": 0.9, "SUN_VALID": 0})
+    if db.get_adcs_filter(1).get("QBN_0") != 0.9:
+        _fail("insert_adcs_filter UPSERT (OR REPLACE)")
+    _ok("insert_adcs_filter OR REPLACE")
+
+    tlm = db.get_tlm_current()
+    if tlm is None or tlm.get("ADCS_MODE") is None:
+        _fail("get_tlm_current")
+    _ok("get_tlm_current")
+
+    all_pwr = db.get_pwr_meta_all()
+    if len(all_pwr) != demon_config.PWR_SW_ID_COUNT:
+        _fail(f"get_pwr_meta_all count={len(all_pwr)}")
+    _ok("get_pwr_meta_all")
+
+    eid2 = db.insert_event({"EVENT_TYPE": "LOOKUP", "PRIORITY": 1})
+    ev = db.get_event(eid2)
+    if ev is None or ev.get("EVENT_TYPE") != "LOOKUP":
+        _fail(f"get_event {ev}")
+    db.delete_event(eid2)
+    _ok("get_event")
+
+    if db.get_integrity_hash(999) is not None:
+        _fail("get_integrity_hash missing row")
+    if db.get_integrity_hash() != []:
+        _fail("get_integrity_hash empty table")
+    _ok("get_integrity_hash")
+
+    db.update_threshold(1, 3.2, 3.8)
+    m1 = db.get_pwr_meta(1)
+    if m1 is None or m1["V_THRESHOLD_LO"] != 3.2:
+        _fail("update_threshold")
+    _ok("update_threshold")
+
+    db.close()
+
+
+def test_do_flush_pending(tmp_db: Path) -> None:
+    """GNC 필드 merge 후 DO MID 에서만 DB flush 되는지."""
+    db = DBManager(tmp_db)
+    db.init_db()
+    shutdown = threading.Event()
+    ctx = RuntimeContext(config=DaemonConfig(db_path=tmp_db), shutdown_event=shutdown, db=db)
+    rx = UDPReceiver(ctx)
+
+    rx._merge_tlm_pending({"ADCS_MODE": 2, "SUN_VALID": 1})
+    row_mid = db.get_tlm_current()
+    if row_mid is not None and row_mid.get("ADCS_MODE") == 2:
+        _fail("DB updated before DO flush")
+
+    rx._merge_tlm_pending({"WBN_X": -0.002})
+    rx._flush_tlm_pending_to_db()
+
+    row = db.get_tlm_current()
+    if row is None:
+        _fail("get_tlm_current after flush")
+    if row.get("ADCS_MODE") != 2 or row.get("SUN_VALID") != 1:
+        _fail(f"after flush ADCS_MODE/SUN_VALID {row}")
+    if abs(float(row.get("WBN_X", 0)) + 0.002) > 1e-9:
+        _fail(f"after flush WBN_X {row.get('WBN_X')}")
+    _ok("DO-style flush: pending → SAT_TLM_CURRENT once")
+
+    rx._merge_tlm_pending({"_DO_RW_TCMD_X": 0.5, "ADCS_MODE": 3})
+    snap = DBManager.filter_tlm_current_fields(rx._tlm_pending)
+    if "_DO_RW_TCMD_X" in snap or any(k.startswith("_") for k in snap):
+        _fail("internal keys in filtered tlm")
+    _ok("filter_tlm_current_fields strips internal keys")
+
+    db.close()
+
+
+def test_flush_trigger_mid_config() -> None:
+    if demon_config.TLM_DB_FLUSH_TRIGGER_MID != demon_config.GENERIC_ADCS_DO_MID:
+        _fail(
+            f"flush trigger mid=0x{demon_config.TLM_DB_FLUSH_TRIGGER_MID:04x} "
+            f"expected DO 0x{demon_config.GENERIC_ADCS_DO_MID:04x}",
+        )
+    _ok("TLM_DB_FLUSH_TRIGGER_MID == GENERIC_ADCS_DO_MID (0x0945)")
+
+
+def main() -> int:
+    try:
+        test_flush_trigger_mid_config()
+        tmp = Path(tempfile.mkdtemp()) / "verify.db"
+        test_db_manager_api(tmp)
+        test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
+        logger.info("=== All local integration checks passed ===")
+        return 0
+    except SystemExit as exc:
+        return int(exc.code) if exc.code is not None else 1
+    except Exception as e:
+        logger.error("verify 실패: %s", e)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

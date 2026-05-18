@@ -15,21 +15,12 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from .paths import default_db_path
+
 # 명세 타입 매핑: INT/UINT32/TINYINT/BIT/BITMASK -> INTEGER, FLOAT -> REAL,
 # TIMESTAMP/DATETIME/VARCHAR -> TEXT
 
 logger = logging.getLogger(__name__)
-
-
-def _default_db_path() -> Path:
-    try:
-        return Path(__file__).resolve().parent.parent / "database.sqlite"
-    except OSError as e:
-        logger.error("기본 DB 경로 계산 실패(OSError): %s", e)
-        raise
-    except Exception as e:
-        logger.error("기본 DB 경로 계산 실패: %s", e)
-        raise
 
 
 def _seed_sat_tlm_current(conn: sqlite3.Connection) -> None:
@@ -238,7 +229,7 @@ def main() -> int:
             help="SQLite file path (default: demon/database.sqlite)",
         )
         args = p.parse_args()
-        db_path: Path = args.db_path if args.db_path is not None else _default_db_path()
+        db_path: Path = args.db_path if args.db_path is not None else default_db_path()
 
         try:
             init_db(db_path)
