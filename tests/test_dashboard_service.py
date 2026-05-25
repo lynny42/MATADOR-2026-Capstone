@@ -1,4 +1,4 @@
-"""Tests for the dashboard service backing the FastAPI UI."""
+﻿"""Tests for the dashboard service backing the FastAPI UI."""
 
 from __future__ import annotations
 
@@ -86,6 +86,15 @@ class DashboardServiceTest(unittest.TestCase):
         }
 
         self.assertIn("2026-05-12T07:40:00+00:00", communication_times)
+
+    def test_abnormal_percent_for_matching_hash_fields_is_zero(self) -> None:
+        snapshot = {"OBC_P_HASH": "OK", "EXPECTED_CRC": "OK"}
+        self.assertEqual(DashboardService._abnormal_percent("OBC_P_HASH", snapshot), 0.0)
+        self.assertEqual(DashboardService._abnormal_percent("EXPECTED_CRC", snapshot), 0.0)
+
+    def test_abnormal_percent_for_hash_mismatch_uses_flag(self) -> None:
+        snapshot = {"OBC_P_HASH": "TAMPERED", "EXPECTED_CRC": "0x8F12A9C0"}
+        self.assertIsNone(DashboardService._abnormal_percent("OBC_P_HASH", snapshot))
 
     def test_apply_replay_config_persists_rules_and_rebuilds_dashboard(self) -> None:
         service = DashboardService(create_detector_with_seed())

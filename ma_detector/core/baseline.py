@@ -1,4 +1,4 @@
-"""Baseline statistics used by the MA integrated detector."""
+﻿"""Baseline statistics used by the MA integrated detector."""
 
 from __future__ import annotations
 
@@ -19,11 +19,16 @@ class ColumnStats:
     std: float = 1.0
 
 
+DEFAULT_NORMAL_BUFFER_SIZE = 64
+
+
 class BaselineManager:
     """Builds and serves normal-operation statistics grouped by mission state."""
 
-    def __init__(self) -> None:
+    def __init__(self, normal_buffer_size: int = DEFAULT_NORMAL_BUFFER_SIZE) -> None:
         self._stats: dict[tuple[Any, ...], dict[str, ColumnStats]] = {}
+        self._normal_buffers: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+        self._normal_buffer_size = max(8, int(normal_buffer_size))
 
     def build_from_history(
         self,
@@ -60,10 +65,59 @@ class BaselineManager:
                     next_stats[key][column] = ColumnStats(mean=mean, std=std if std > 0 else 1.0)
 
             self._stats = next_stats
+            for key, records in grouped.items():
+                buffer = self._normal_buffers.setdefault(key, [])
+                buffer.clear()
+                buffer.extend(records[-self._normal_buffer_size :])
         except (TypeError, ValueError, statistics.StatisticsError) as error:
             logger.error("baseline build failed: %s", error)
         except Exception as error:
             logger.error("unexpected baseline build failure: %s", error)
+
+    def append_normal_record(
+        self,
+        record: dict[str, Any],
+        group_keys: list[str] | None = None,
+    ) -> None:
+        """Append one verified-normal telemetry row and refresh that group's baseline."""
+        try:
+            keys = group_keys or ["MISSION_MODE", "ADCS_MODE"]
+            key = tuple(record.get(group_key, "UNKNOWN") for group_key in keys)
+            buffer = self._normal_buffers.setdefault(key, [])
+            buffer.append(dict(record))
+            if len(buffer) > self._normal_buffer_size:
+                del buffer[0 : len(buffer) - self._normal_buffer_size]
+            self._stats[key] = self._compute_stats_for_records(buffer)
+        except (TypeError, ValueError, statistics.StatisticsError) as error:
+            logger.error("baseline append failed: %s", error)
+        except Exception as error:
+            logger.error("unexpected baseline append failure: %s", error)
+
+    def _compute_stats_for_records(self, records: list[dict[str, Any]]) -> dict[str, ColumnStats]:
+        try:
+            column_stats: dict[str, ColumnStats] = {}
+            all_columns: set[str] = set()
+            for record in records:
+                all_columns.update(record.keys())
+
+            for column in all_columns:
+                values = [
+                    float(record[column])
+                    for record in records
+                    if column in record and isinstance(record[column], (int, float))
+                ]
+                if not values:
+                    continue
+                mean = statistics.mean(values)
+                std = statistics.stdev(values) if len(values) > 1 else 1.0
+                column_stats[column] = ColumnStats(mean=mean, std=std if std > 0 else 1.0)
+            return column_stats
+        except (TypeError, ValueError, statistics.StatisticsError) as error:
+            logger.error("baseline group stats failed: %s", error)
+            return {}
+        except Exception as error:
+            logger.error("unexpected baseline group stats failure: %s", error)
+            return {}
 
     def get_stats(
         self,

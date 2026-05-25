@@ -10,6 +10,28 @@ const severityLabel = {
   critical: "위험"
 };
 
+function formatAbnormalLabel(abnormalPercent) {
+  if (abnormalPercent === null || abnormalPercent === undefined) {
+    return "Flag";
+  }
+  return `${abnormalPercent}%`;
+}
+
+function isColumnEvidenceVisible(columnValue) {
+  if (!columnValue) {
+    return false;
+  }
+  const percent = columnValue.abnormal_percent;
+  if (percent === null || percent === undefined) {
+    return true;
+  }
+  return Number(percent) > 0;
+}
+
+function getVisibleRuleColumns(columns) {
+  return Object.entries(columns || {}).filter(([, value]) => isColumnEvidenceVisible(value));
+}
+
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState(null);
   const [selectedCommunicationAt, setSelectedCommunicationAt] = useState("");
@@ -325,6 +347,9 @@ export default function DashboardPage() {
       </header>
 
       {error ? <section className="error-banner">{error}</section> : null}
+      {dashboard.ingest_error ? (
+        <section className="error-banner">패킷 검증: {dashboard.ingest_error}</section>
+      ) : null}
 
       {rulesOpen ? (
         <RulePanel
@@ -401,6 +426,34 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
           </article>
         ))}
       </div>
+
+      <section className="recent-threats">
+        <div className="recent-threat-heading">
+          <h3>최근 5회 위협</h3>
+          <span>{recentThreats?.length || 0}건</span>
+        </div>
+        {recentThreats?.length ? (
+          <div className="recent-threat-track">
+            {recentThreats.map((threat) => (
+              <button
+                type="button"
+                key={threat.detect_id}
+                className={`threat-row severity-${threat.severity}`}
+                onClick={() => onSelect(threat.detect_id)}
+              >
+                <strong>{threat.ma_code}</strong>
+                <span>{(threat.subsystems || [threat.module]).join(" · ")}</span>
+                <em>
+                  P{threat.phase} · {threat.confidence}% · {threat.grade}
+                </em>
+                <span>{threat.detect_time}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">최근 위협이 없습니다.</p>
+        )}
+      </section>
     </section>
   );
 }
@@ -461,13 +514,13 @@ function RightPanel({
       {selectedDetail ? (
         <DetailPanel selectedDetail={selectedDetail} />
       ) : (
-        <CommunicationSummary communication={selectedCommunication} />
+        <CommunicationSummary communication={selectedCommunication} onSelect={onSelect} />
       )}
     </section>
   );
 }
 
-function CommunicationSummary({ communication }) {
+function CommunicationSummary({ communication, onSelect }) {
   if (!communication) {
     return <div className="detail-card muted">통신 기록이 없습니다.</div>;
   }
@@ -483,11 +536,16 @@ function CommunicationSummary({ communication }) {
       {(communication.detections || []).length ? (
         <div className="communication-code-list">
           {communication.detections.map((detection, index) => (
-            <article key={detection.detect_id} className={`communication-code severity-${detection.severity}`}>
+            <button
+              type="button"
+              key={detection.detect_id}
+              className={`communication-code severity-${detection.severity}`}
+              onClick={() => onSelect(detection.detect_id)}
+            >
               <span>{index + 1}번째 발생</span>
               <strong>{detection.ma_code}</strong>
               <em>Phase {detection.phase} · 신뢰도 {detection.confidence}%</em>
-            </article>
+            </button>
           ))}
         </div>
       ) : (
@@ -525,16 +583,18 @@ function DetailPanel({ selectedDetail }) {
               <strong>{rule.rule_id} · {rule.name}</strong>
               <span>최초 활성화: {rule.first_triggered_at}</span>
             </div>
-            <div className="column-grid /* 이상률 0이면 표시 안 함*/">
-              {Object.entries(rule.columns || {}).map(([column, value]) => (
-                <div key={column} className="column-card">
-                  <b>{column}</b>
-                  <span>관측: {String(value.observed)}</span>
-                  <span>정상: {String(value.normal)}</span>
-                  <em>이상률: {value.abnormal_percent ?? "Flag"}%</em> /* 이 부분 FLAG면 퍼센트가 안 들어가야함 */
-                </div>
-              ))}
-            </div>
+            {getVisibleRuleColumns(rule.columns).length ? (
+              <div className="column-grid">
+                {getVisibleRuleColumns(rule.columns).map(([column, value]) => (
+                  <div key={column} className="column-card">
+                    <b>{column}</b>
+                    <span>관측: {String(value.observed)}</span>
+                    <span>정상: {String(value.normal)}</span>
+                    <em>이상률: {formatAbnormalLabel(value.abnormal_percent)}</em>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </article>
         ))}
       </div>

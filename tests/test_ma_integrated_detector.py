@@ -1,4 +1,4 @@
-"""Smoke tests for the MA integrated detector pipeline."""
+﻿"""Smoke tests for the MA integrated detector pipeline."""
 
 from __future__ import annotations
 
@@ -109,6 +109,8 @@ class MAIntegratedDetectorTest(unittest.TestCase):
             {
                 "UPDATED_AT": "2026-05-10T07:01:00+00:00",
                 "IS_ANOMALY": True,
+                "TARGET_SUBSYSTEM": "OBC",
+                "FALSE_POSITIVE_RESULT": "Y",
                 "OBC_P_HASH": "TAMPERED",
                 "APPCSERRCOUNTER": 5,
                 "LASTVALCRC": 101,
@@ -167,6 +169,8 @@ class MAIntegratedDetectorTest(unittest.TestCase):
             {
                 "UPDATED_AT": "2026-05-10T07:02:00+00:00",
                 "IS_ANOMALY": True,
+                "TARGET_SUBSYSTEM": "OBC",
+                "FALSE_POSITIVE_RESULT": "Y",
                 "OBC_P_HASH": "TAMPERED",
                 "APPCSERRCOUNTER": 5,
                 "CH1_FAULT_CRC": 1,
@@ -198,6 +202,18 @@ class MAIntegratedDetectorTest(unittest.TestCase):
         self.assertEqual(ui_payload["satellite_filter"]["event_id"], 42)
         self.assertEqual(ui_payload["satellite_filter"]["sw_id_list"], [0, 1])
         self.assertEqual(ui_payload["detail"]["history"][0]["FALSE_POSITIVE_RESULT"], "Y")
+
+    def test_attack_without_target_subsystem_returns_error(self) -> None:
+        detector = MAIntegratedDetector()
+        detector.build_baseline([_normal_record() for _ in range(4)])
+
+        packet = _official_satellite_packet("Y")
+        packet["target_subsystem"] = ""
+
+        error = detector.receive_telemetry(json.dumps(packet))
+
+        self.assertIsNotNone(error)
+        self.assertEqual(detector.get_dashboard_records(), [])
 
     def test_false_positive_n_does_not_generate_ma_dashboard_row(self) -> None:
         detector = MAIntegratedDetector()

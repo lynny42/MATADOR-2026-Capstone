@@ -411,6 +411,13 @@ button {
   word-break: break-word;
 }
 
+button.communication-code {
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
 .replay-status {
   background: rgba(110, 231, 249, 0.1);
   border: 1px solid rgba(110, 231, 249, 0.28);

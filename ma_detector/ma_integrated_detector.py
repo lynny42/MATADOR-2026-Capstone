@@ -1,4 +1,4 @@
-"""Ground-station MA integrated detection code generator."""
+﻿"""Ground-station MA integrated detection code generator."""
 
 from __future__ import annotations
 
@@ -12,6 +12,12 @@ from typing import Any
 
 from ma_detector.core.baseline import BaselineManager
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.target_context import (
+    build_novel_attack_advisory,
+    normalize_target_subsystem,
+    report_matches_target,
+    sort_reports_by_target,
+)
 from ma_detector.registry.registry_manager import RegistryManager
 
 logger = logging.getLogger(__name__)
@@ -65,6 +71,8 @@ class MAIntegratedDetector:
             self._detail_rows: list[dict[str, Any]] = []
             self._discard_log: list[dict[str, Any]] = []
             self._next_detect_id = 1
+            self._last_ingest_error: str | None = None
+            self._latest_novel_advisory: dict[str, Any] | None = None
         except Exception as error:
             logger.error("MA integrated detector initialization failed: %s", error)
             self._action_registry = {}
@@ -84,6 +92,26 @@ class MAIntegratedDetector:
             self._detail_rows = []
             self._discard_log = []
             self._next_detect_id = 1
+            self._last_ingest_error = None
+            self._latest_novel_advisory = None
+
+    def get_last_ingest_error(self) -> str | None:
+        """Return the most recent telemetry ingest validation error, if any."""
+        try:
+            return self._last_ingest_error
+        except Exception as error:
+            logger.error("get last ingest error failed: %s", error)
+            return None
+
+    def get_latest_novel_advisory(self) -> dict[str, Any] | None:
+        """Return advisory metadata for novel / unknown attack patterns."""
+        try:
+            if self._latest_novel_advisory is None:
+                return None
+            return dict(self._latest_novel_advisory)
+        except Exception as error:
+            logger.error("get novel advisory failed: %s", error)
+            return None
 
     def build_baseline(self, history: list[dict[str, Any]]) -> None:
         """Build normal-operation baseline statistics from history records."""
@@ -176,41 +204,65 @@ class MAIntegratedDetector:
             logger.error("get threshold config failed: %s", error)
             return {}
 
-    def receive_telemetry(self, json_token: str) -> None:
+    def receive_telemetry(self, json_token: str) -> str | None:
         """Parse satellite JSON and execute the MA detection pipeline for attack-like events."""
         try:
+            self._last_ingest_error = None
             packet = json.loads(json_token)
             if not isinstance(packet, dict):
-                logger.error("received telemetry must be a JSON object")
-                return
+                message = "received telemetry must be a JSON object"
+                logger.error(message)
+                self._last_ingest_error = message
+                return message
         except json.JSONDecodeError as error:
-            logger.error("receive telemetry JSON parse failed: %s", error)
-            return
+            message = f"receive telemetry JSON parse failed: {error}"
+            logger.error(message)
+            self._last_ingest_error = message
+            return message
         except TypeError as error:
-            logger.error("receive telemetry input type failed: %s", error)
-            return
+            message = f"receive telemetry input type failed: {error}"
+            logger.error(message)
+            self._last_ingest_error = message
+            return message
         except Exception as error:
-            logger.error("unexpected receive telemetry failure: %s", error)
-            return
+            message = f"unexpected receive telemetry failure: {error}"
+            logger.error(message)
+            self._last_ingest_error = message
+            return message
 
         try:
             packet = self._normalize_packet(packet)
             if self._is_replay_mode:
+                validation_error = self._validate_attack_packet(packet)
+                if validation_error:
+                    self._last_ingest_error = validation_error
+                    return validation_error
                 self._telemetry_window.append(packet)
                 self._trim_window()
                 self._run_pipeline()
-                return
+                return None
 
             self._insert_gs_tables(packet)
             if not packet.get("IS_ANOMALY", False):
+                self._baseline_manager.append_normal_record(packet)
                 self._notify_ui_normal(packet)
-                return
+                return None
+
+            validation_error = self._validate_attack_packet(packet)
+            if validation_error:
+                self._last_ingest_error = validation_error
+                logger.error(validation_error)
+                return validation_error
 
             self._telemetry_window.append(packet)
             self._trim_window()
             self._run_pipeline()
+            return None
         except Exception as error:
-            logger.error("receive telemetry pipeline failed: %s", error)
+            message = f"receive telemetry pipeline failed: {error}"
+            logger.error(message)
+            self._last_ingest_error = message
+            return message
 
     def evaluate_parallel_rules(self, snapshot: str) -> str:
         """Evaluate all enabled rules independently and return rule/action scores as JSON."""
@@ -486,7 +538,9 @@ class MAIntegratedDetector:
             if any_anomaly and not any(result["grade"] in ("CONFIRMED", "SUSPECTED") for result in results):
                 results.append(self._unknown_pattern_entry())
 
-            results.sort(key=lambda item: item["confidence_score"], reverse=True)
+            latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            results = sort_reports_by_target(results, target, self._rule_registry)
             return json.dumps(results, ensure_ascii=False, default=str)
         except (TypeError, ValueError, KeyError) as error:
             logger.error("MA code generation failed: %s", error)
@@ -590,6 +644,12 @@ class MAIntegratedDetector:
             confidence = self.verify_attack_sequence(rule_result_json)
             final_input = self._build_final_input(rule_result_json, confidence)
             report_json = self.generate_ma_code(final_input)
+            reports = json.loads(report_json)
+            latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            if isinstance(reports, list):
+                self._latest_novel_advisory = build_novel_attack_advisory(latest, reports)
+            else:
+                self._latest_novel_advisory = None
             self.insert_dashboard_db(report_json)
         except Exception as error:
             logger.error("pipeline execution failed: %s", error)
@@ -639,6 +699,21 @@ class MAIntegratedDetector:
         except Exception as error:
             logger.error("unexpected packet section merge failure: %s", error)
             return dict(packet)
+
+    def _validate_attack_packet(self, packet: dict[str, Any]) -> str | None:
+        """Require satellite 1st-pass target when false-positive filter says attack (Y)."""
+        try:
+            if not packet.get("IS_ANOMALY", False):
+                return None
+            target = normalize_target_subsystem(packet.get("TARGET_SUBSYSTEM"))
+            if target:
+                packet["TARGET_SUBSYSTEM"] = target
+                return None
+            message = "TARGET_SUBSYSTEM is required when false_positive_result indicates attack (Y)"
+            return message
+        except Exception as error:
+            logger.error("attack packet validation failed: %s", error)
+            return "attack packet validation failed"
 
     def _normalize_filter_fields(self, normalized: dict[str, Any]) -> None:
         try:
@@ -885,6 +960,7 @@ class MAIntegratedDetector:
             detect_id = self._next_detect_id
             self._next_detect_id += 1
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
             row = {
                 "DETECT_ID": detect_id,
                 "DASHBOARD_ID": detect_id,
@@ -898,6 +974,8 @@ class MAIntegratedDetector:
                 "CORROBORATION_COUNT": report.get("corroboration_count"),
                 "EVIDENCE_KEYS": report.get("evidence_keys", {}),
                 "IS_NEW_PATTERN": report.get("is_new_pattern", False),
+                "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
+                "SATELLITE_TARGET_SUBSYSTEM": target,
                 "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
                 "FALSE_POSITIVE_WEIGHT": latest.get("FALSE_POSITIVE_WEIGHT"),
                 "FALSE_POSITIVE_EXCEPTION": latest.get("FALSE_POSITIVE_EXCEPTION"),

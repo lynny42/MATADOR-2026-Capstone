@@ -1,9 +1,10 @@
-{
+﻿{
   "metadata": {
     "name": "MATADOR realistic satellite communication dataset",
     "description": "Representative ground-station replay data with normal passes, false-positive filtering, OBC integrity tamper, ADCS/EPS ghost telemetry, and COM command anomalies.",
     "source": "Synthetic capstone simulation data aligned to cFS/NOS3-style telemetry fields.",
-    "created_at": "2026-05-12T07:40:00+00:00"
+    "created_at": "2026-05-12T07:40:00+00:00",
+    "usage": "Loaded by backend/dashboard_service.py (_baseline_history, _seed_packets) for API seeding and tests/test_dashboard_service.py. Unit tests in tests/test_ma_integrated_detector.py use inline _normal_record() instead."
   },
   "baseline_history": [
     {

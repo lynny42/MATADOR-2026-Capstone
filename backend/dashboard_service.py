@@ -1,4 +1,4 @@
-"""Service layer that adapts MA detector memory tables for the dashboard API."""
+﻿"""Service layer that adapts MA detector memory tables for the dashboard API."""
 
 from __future__ import annotations
 
@@ -10,9 +10,13 @@ from typing import Any
 
 from ma_detector import MAIntegratedDetector
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.target_context import (
+    CORE_SUBSYSTEMS,
+    normalize_target_subsystem,
+    report_matches_target,
+)
 from ma_detector.registry.registry_manager import RegistryManager
 
-CORE_SUBSYSTEMS = ["OBC", "TCS", "EPS", "ADCS", "COM"]
 MODULE_ALIASES = {
     "CF": ["OBC"],
     "CS": ["OBC"],
@@ -25,6 +29,7 @@ MODULE_ALIASES = {
     "TBL": ["OBC"],
     "TO": ["COM"],
 }
+# Primary seed/replay dataset for dashboard boot and tests (see tests/ and create_detector_with_seed).
 DATASET_PATH = Path(__file__).resolve().parent / "test_data" / "realistic_satellite_dataset.json"
 
 
@@ -47,8 +52,12 @@ class DashboardService:
 
     def receive_satellite_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
         """Insert a satellite packet and return the current dashboard state."""
-        self.detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
-        return self.get_dashboard_state()
+        ingest_error = self.detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
+        state = self.get_dashboard_state()
+        state["ingest_ok"] = ingest_error is None
+        if ingest_error:
+            state["ingest_error"] = ingest_error
+        return state
 
     def get_dashboard_state(self) -> dict[str, Any]:
         """Return the full dashboard model consumed by the Next.js UI."""
@@ -59,6 +68,7 @@ class DashboardService:
         dashboard_rows = detector.get_dashboard_records()
         history_rows = detector.get_history_records()
         detections = [self._to_detection(row) for row in dashboard_rows]
+        detections = self._sort_detections_for_display(detections)
         communications = self._build_communications(history_rows, detections)
         latest_time = communications[-1]["communicated_at"] if communications else None
         latest_detections = [
@@ -66,20 +76,26 @@ class DashboardService:
             for detection in detections
             if latest_time is not None and detection["detect_time"] == latest_time
         ]
-        selected = detections[-1] if detections else None
+        latest_target = ""
+        if latest_detections:
+            latest_target = str(latest_detections[0].get("satellite_filter", {}).get("target_subsystem") or "")
+        latest_target = normalize_target_subsystem(latest_target)
+        selected = detections[0] if detections else None
 
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "core_subsystems": CORE_SUBSYSTEMS,
+            "core_subsystems": list(CORE_SUBSYSTEMS),
             "communications": communications,
             "latest_communication": {
                 "communicated_at": latest_time,
                 "status": "ANOMALY" if latest_detections else "NORMAL",
                 "anomaly_count": len(latest_detections),
                 "detections": latest_detections,
+                "satellite_target_subsystem": latest_target or None,
             },
+            "ingest_error": detector.get_last_ingest_error(),
             "recent_threats": self._recent_threats(detections),
-            "blueprint": self._build_blueprint(detections),
+            "blueprint": self._build_blueprint(detections, latest_target),
             "detections": detections,
             "selected_detection": selected,
         }
@@ -97,7 +113,26 @@ class DashboardService:
             detail_history[0] if detail_history else {},
             detection,
         )
+        payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
+        payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
+        payload["novel_attack_advisory"] = self._novel_advisory_for_detection(detection)
         return payload
+
+    def _novel_advisory_for_detection(self, detection: dict[str, Any]) -> dict[str, Any] | None:
+        """Return B-3 advisory only when the selected MA row is flagged is_new_pattern."""
+        try:
+            if not detection.get("is_new_pattern"):
+                return None
+            advisory = self.detector.get_latest_novel_advisory()
+            if not advisory:
+                return None
+            ma_code = str(detection.get("ma_code", ""))
+            return {
+                **advisory,
+                "related_ma_codes": [ma_code] if ma_code else [],
+            }
+        except Exception:
+            return None
 
     def list_rules(self) -> dict[str, Any]:
         """Return active rule and threshold configuration."""
@@ -256,6 +291,19 @@ class DashboardService:
         module = str(row.get("MODULE", "UNKNOWN"))
         confidence = float(row.get("CONFIDENCE_SCORE", 0.0) or 0.0)
         phase = int(row.get("SCENARIO_PHASE", 0) or 0)
+        target = normalize_target_subsystem(row.get("SATELLITE_TARGET_SUBSYSTEM") or row.get("TARGET_SUBSYSTEM"))
+        report_stub = {
+            "module": module,
+            "ma_code": row.get("MA_CODE"),
+            "triggered_rules": list((row.get("EVIDENCE_KEYS") or {}).keys()),
+        }
+        matches_target = bool(row.get("MATCHES_SATELLITE_TARGET"))
+        if target and not matches_target:
+            matches_target = report_matches_target(
+                report_stub,
+                target,
+                self.detector.get_rule_registry(),
+            )
         return {
             "detect_id": row.get("DETECT_ID"),
             "dashboard_id": row.get("DASHBOARD_ID"),
@@ -269,17 +317,32 @@ class DashboardService:
             "grade": row.get("GRADE"),
             "corroboration_count": row.get("CORROBORATION_COUNT"),
             "evidence_keys": row.get("EVIDENCE_KEYS", {}),
+            "matches_satellite_target": matches_target,
+            "is_new_pattern": bool(row.get("IS_NEW_PATTERN")),
             "satellite_filter": {
                 "result": row.get("FALSE_POSITIVE_RESULT"),
                 "weight": row.get("FALSE_POSITIVE_WEIGHT"),
                 "exception": row.get("FALSE_POSITIVE_EXCEPTION"),
-                "target_subsystem": row.get("TARGET_SUBSYSTEM"),
+                "target_subsystem": target or row.get("TARGET_SUBSYSTEM"),
                 "event_id": row.get("EVENT_ID"),
                 "sw_id_list": row.get("SW_ID_LIST", []),
                 "detected_at": row.get("SATELLITE_DETECTED_AT"),
             },
             "severity": self._severity(phase, confidence),
         }
+
+    def _sort_detections_for_display(self, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        try:
+            return sorted(
+                detections,
+                key=lambda item: (
+                    0 if item.get("matches_satellite_target") else 1,
+                    -float(item.get("confidence", 0.0) or 0.0),
+                    str(item.get("detect_time", "")),
+                ),
+            )
+        except Exception:
+            return detections
 
     def _build_communications(
         self,
@@ -320,17 +383,32 @@ class DashboardService:
     def _recent_threats(self, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(detections, key=lambda item: str(item.get("detect_time", "")))[-5:]
 
-    def _build_blueprint(self, detections: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_blueprint(
+        self,
+        detections: list[dict[str, Any]],
+        satellite_target: str = "",
+    ) -> dict[str, Any]:
         recent = self._recent_threats(detections)
+        normalized_target = normalize_target_subsystem(satellite_target)
         blueprint: dict[str, Any] = {
-            subsystem: {"name": subsystem, "detections": [], "severity": "normal"}
+            subsystem: {
+                "name": subsystem,
+                "detections": [],
+                "severity": "normal",
+                "satellite_target_emphasis": subsystem == normalized_target,
+            }
             for subsystem in CORE_SUBSYSTEMS
         }
         for detection in recent:
             for subsystem in detection["subsystems"]:
                 if subsystem not in blueprint:
                     continue
-                blueprint[subsystem]["detections"].append(detection)
+                entry = dict(detection)
+                entry["emphasized"] = bool(
+                    detection.get("matches_satellite_target")
+                    or subsystem == normalized_target
+                )
+                blueprint[subsystem]["detections"].append(entry)
                 blueprint[subsystem]["severity"] = self._max_severity(
                     blueprint[subsystem]["severity"],
                     detection["severity"],
@@ -413,6 +491,16 @@ class DashboardService:
     def _abnormal_percent(column: str, snapshot: dict[str, Any]) -> float | None:
         value = snapshot.get(column)
         if not isinstance(value, (int, float)):
+            if value is None:
+                return None
+            observed = str(value).strip()
+            expected = str(DashboardService._normal_reference(column, snapshot)).strip()
+            if observed == expected:
+                return 0.0
+            if column == "OBC_P_HASH":
+                crc = snapshot.get("EXPECTED_CRC")
+                if crc is not None and observed == str(crc).strip():
+                    return 0.0
             return None
         if column == "UTILCPUAVG":
             return round(max(0.0, value - 80.0), 2)
