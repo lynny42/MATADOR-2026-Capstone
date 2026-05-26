@@ -13,9 +13,26 @@ import logging
 # 시리얼 (아두이노 전력 수집)
 # ============================================================
 SERIAL_PORT = "/dev/ttyUSB0"
-BAUD_RATE = 115200
+BAUD_RATE = 9600
 SERIAL_READ_TIMEOUT_SEC = 1.0
 SERIAL_REOPEN_BACKOFF_SEC = 5.0
+# 아두이노 전력 CSV SW_ID 상한 (0~2 INA226, 3번은 L,light|dark 별도 라인)
+SERIAL_PWR_SW_ID_MAX = 2
+SERIAL_LIGHT_TAG = "L"
+UART_CMD_ATTACK = "ATTACK"
+UART_CMD_RECOVERY = "RECOVERY"
+# 아두이노 JSON 데모 — {"gyro":"on"|"off"}, {"num":N,"angle":D}
+UART_JSON_GYRO_ON = "on"
+UART_JSON_GYRO_OFF = "off"
+SERVO_ANGLE_MIN = 0
+SERVO_ANGLE_MAX = 180
+SERVO_REPEAT_MIN = 1
+SERVO_REPEAT_MAX = 20
+# 조도 L,light|dark 는 수신 전용(제어 명령 없음)
+SERIAL_LIGHT_STATE_LIGHT = "light"
+SERIAL_LIGHT_STATE_DARK = "dark"
+# True 면 수신·파싱·DB 반영 시 INFO (시리얼 디버그용)
+SERIAL_LOG_PARSED = True
 
 # ============================================================
 # UDP (cFS TO 텔레메트리 수신)

@@ -1,0 +1,383 @@
+/**
+ * 위성 전력 모니터 — demon SerialReader 명세 연동
+ *
+ * 전력 출력 (1 Hz, demon 파싱용) — 숫자 채널:
+ *   SW_ID,VOLTAGE,CURRENT_A,TIMESTAMP
+ *   - SW_ID 0: MPU-6050 rail   (INA226 0x40)
+ *   - SW_ID 1: Raspberry Pi    (INA226 0x41)
+ *   - SW_ID 2: Servo           (INA226 0x44)
+ *
+ * 조도 출력 (전력 채널 번호 대신 알파벳 태그 L):
+ *   L,light,TIMESTAMP   또는   L,dark,TIMESTAMP
+ *   조도: 디지털 DO만 사용 (LM393: 밝음=DO LOW, 가림=DO HIGH)
+ *   (SAT_PWR_META SW_ID 3 은 미갱신 — DB 시드 0 유지)
+ *
+ * 지상국/데몬 UART 명령 (한 줄):
+ *   ATTACK   — 전압 바이어스 시뮬 (이상 탐지 데모)
+ *   RECOVERY — 바이어스 해제
+ *
+ * 시리얼 모니터 데모 (선택, DEBUG_HUMAN_OUTPUT=1):
+ *   {"gyro":"on"} / {"gyro":"off"}
+ *   {"num":3,"angle":90} 또는 {"motor":{"num":3,"angle":90}}
+ *
+ * 보드레이트: 9600 (demon config.py BAUD_RATE 와 동일)
+ */
+#include <Wire.h>
+#include <Servo.h>
+#include <INA226_WE.h>
+#include <MPU6050_tockn.h>
+
+// demon PWR_SW_ID 0~3
+#define SW_ID_MPU    0
+#define SW_ID_RPI    1
+#define SW_ID_SERVO  2
+
+#define INA226_MPU_ADDR   0x40
+#define INA226_RPI_ADDR   0x41
+#define INA226_SERVO_ADDR 0x44
+
+#define LIGHT_AO A0
+#define LIGHT_DO 8
+#define SERVO_PIN 9
+
+#define SERIAL_BAUD 9600
+#define POWER_INTERVAL_MS 1000
+
+// 조도: 디지털 DO만 (D0 핀 → LIGHT_DO). LM393: 밝음=LOW, 가림=HIGH
+#define LIGHT_DO_BRIGHT_IS_LOW  1     // 0이면 DO HIGH=밝음
+#define LIGHT_DO_SAMPLES        5     // 다수결 디바운스
+#define LIGHT_TAG 'L'
+
+// ATTACK 시뮬: 전력 채널 전압 바이어스 (V)
+#define ATTACK_BIAS_MPU    1.2f
+#define ATTACK_BIAS_RPI    0.0f
+#define ATTACK_BIAS_SERVO  0.0f
+
+// 1 이면 한글 디버그 출력 (demon 은 CSV 줄만 사용)
+#define DEBUG_HUMAN_OUTPUT 0
+
+INA226_WE inaMPU(INA226_MPU_ADDR);
+INA226_WE inaRPI(INA226_RPI_ADDR);
+INA226_WE inaServo(INA226_SERVO_ADDR);
+
+MPU6050 mpu(Wire);
+Servo servo;
+
+bool gyroActive = false;
+bool attackMode = false;
+
+char cmdLine[128];
+uint8_t cmdLen = 0;
+
+void setupINA226(INA226_WE &ina) {
+    ina.init();
+    ina.setResistorRange(0.1, 1.0);
+    ina.setCorrectionFactor(1.0);
+}
+
+float readBusVoltage_V(INA226_WE &ina) {
+    return ina.getBusVoltage_V();
+}
+
+float readCurrent_A(INA226_WE &ina) {
+    return ina.getCurrent_mA() / 1000.0f;
+}
+
+float applyAttackBias(uint8_t swId, float voltage) {
+    if (!attackMode) {
+        return voltage;
+    }
+    switch (swId) {
+        case SW_ID_MPU:
+            return voltage + ATTACK_BIAS_MPU;
+        case SW_ID_RPI:
+            return voltage + ATTACK_BIAS_RPI;
+        case SW_ID_SERVO:
+            return voltage + ATTACK_BIAS_SERVO;
+        default:
+            return voltage;
+    }
+}
+
+void printPowerCsv(uint8_t swId, float voltage, float currentA) {
+    unsigned long ms = millis();
+    Serial.print(swId);
+    Serial.print(',');
+    Serial.print(voltage, 3);
+    Serial.print(',');
+    Serial.print(currentA, 4);
+    Serial.print(',');
+    Serial.print(ms);
+    Serial.println();
+}
+
+void emitPowerSample(uint8_t swId, INA226_WE &ina, float fallbackVoltage, float fallbackCurrentA) {
+    float v = readBusVoltage_V(ina);
+    float a = readCurrent_A(ina);
+    if (v < 0.01f && fallbackVoltage > 0.0f) {
+        v = fallbackVoltage;
+        a = fallbackCurrentA;
+    }
+    v = applyAttackBias(swId, v);
+    printPowerCsv(swId, v, a);
+}
+
+bool readLightDigitalBright(int *outDoLevel) {
+    uint8_t lowCount = 0;
+    for (uint8_t i = 0; i < LIGHT_DO_SAMPLES; i++) {
+        if (digitalRead(LIGHT_DO) == LOW) {
+            lowCount++;
+        }
+        delay(1);
+    }
+
+    uint8_t lastLevel = (lowCount > (LIGHT_DO_SAMPLES / 2)) ? 0 : 1;
+    if (outDoLevel != NULL) {
+        *outDoLevel = lastLevel;
+    }
+
+#if LIGHT_DO_BRIGHT_IS_LOW
+    return lowCount > (LIGHT_DO_SAMPLES / 2);
+#else
+    return lowCount <= (LIGHT_DO_SAMPLES / 2);
+#endif
+}
+
+bool isLightBright(int *outDoLevel) {
+    if (attackMode) {
+        if (outDoLevel != NULL) {
+            *outDoLevel = 1;
+        }
+        return false;
+    }
+    return readLightDigitalBright(outDoLevel);
+}
+
+void emitLightStatus() {
+    bool bright = isLightBright(NULL);
+
+    Serial.print(LIGHT_TAG);
+    Serial.print(',');
+    if (bright) {
+        Serial.print(F("light"));
+    } else {
+        Serial.print(F("dark"));
+    }
+    Serial.print(',');
+    Serial.println(millis());
+}
+
+void emitAllPowerCsv() {
+    emitPowerSample(SW_ID_MPU, inaMPU, 0.0f, 0.0f);
+    emitPowerSample(SW_ID_RPI, inaRPI, 0.0f, 0.0f);
+    emitPowerSample(SW_ID_SERVO, inaServo, 0.0f, 0.0f);
+    emitLightStatus();
+}
+
+#if DEBUG_HUMAN_OUTPUT
+void printPowerHuman(INA226_WE &ina, const __FlashStringHelper *label) {
+    float voltage = ina.getBusVoltage_V();
+    float current = ina.getCurrent_mA();
+    float power = ina.getBusPower();
+    Serial.print(F("["));
+    Serial.print(label);
+    Serial.print(F("] 전압: "));
+    Serial.print(voltage, 3);
+    Serial.print(F(" V | 전류: "));
+    Serial.print(current, 1);
+    Serial.print(F(" mA | 전력: "));
+    Serial.print(power, 1);
+    Serial.println(F(" mW"));
+}
+#endif
+
+String extractValue(const String &json, const String &key) {
+    int idx = json.indexOf(key);
+    if (idx < 0) {
+        return "";
+    }
+    idx = json.indexOf(':', idx) + 1;
+    while (idx < (int)json.length() && json[idx] == ' ') {
+        idx++;
+    }
+    if (idx >= (int)json.length()) {
+        return "";
+    }
+    if (json[idx] == '"') {
+        idx++;
+        int end = json.indexOf('"', idx);
+        if (end < 0) {
+            return "";
+        }
+        return json.substring(idx, end);
+    }
+    int end = idx;
+    while (end < (int)json.length()) {
+        char c = json[end];
+        if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+            end++;
+        } else {
+            break;
+        }
+    }
+    return json.substring(idx, end);
+}
+
+void handleGyroCommand(const String &gyroVal) {
+    if (gyroVal == "on") {
+        gyroActive = true;
+        Wire.beginTransmission(0x68);
+        Wire.write(0x6B);
+        Wire.write(0x00);
+        Wire.endTransmission();
+        Serial.println(F("# gyro on"));
+    } else if (gyroVal == "off") {
+        gyroActive = false;
+        Wire.beginTransmission(0x68);
+        Wire.write(0x6B);
+        Wire.write(0x40);
+        Wire.endTransmission();
+        Serial.println(F("# gyro off"));
+    }
+}
+
+void handleMotorCommand(const String &numVal, const String &angleVal) {
+    if (numVal.length() == 0 || angleVal.length() == 0) {
+        return;
+    }
+    int num = numVal.toInt();
+    int angle = constrain(angleVal.toInt(), 0, 180);
+    Serial.print(F("# servo "));
+    Serial.print(num);
+    Serial.print(F(" x angle "));
+    Serial.println(angle);
+    for (int i = 0; i < num; i++) {
+        servo.write(angle);
+        delay(500);
+        servo.write(0);
+        delay(500);
+    }
+    Serial.println(F("# servo done"));
+}
+
+void handleJsonCommand(const String &input) {
+    String gyroVal = extractValue(input, "gyro");
+    if (gyroVal.length() > 0) {
+        handleGyroCommand(gyroVal);
+    }
+    String numVal = extractValue(input, "num");
+    String angleVal = extractValue(input, "angle");
+    if (numVal.length() > 0 && angleVal.length() > 0) {
+        handleMotorCommand(numVal, angleVal);
+    }
+}
+
+void handleDaemonCommand(const String &input) {
+    String line = input;
+    line.trim();
+    if (line.length() == 0) {
+        return;
+    }
+    if (line.equalsIgnoreCase("ATTACK")) {
+        attackMode = true;
+        Serial.println(F("# ATTACK"));
+        return;
+    }
+    if (line.equalsIgnoreCase("RECOVERY")) {
+        attackMode = false;
+        Serial.println(F("# RECOVERY"));
+        return;
+    }
+    if (line.charAt(0) == '{') {
+        handleJsonCommand(line);
+        Serial.print(F("# json: "));
+        Serial.println(line);
+    }
+}
+
+void pollSerialCommands() {
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n') {
+            cmdLine[cmdLen] = '\0';
+            handleDaemonCommand(String(cmdLine));
+            cmdLen = 0;
+            continue;
+        }
+        if (cmdLen < sizeof(cmdLine) - 1) {
+            cmdLine[cmdLen++] = c;
+        }
+    }
+}
+
+#if DEBUG_HUMAN_OUTPUT
+void printHumanSensors() {
+    int doLevel = 1;
+    bool bright = isLightBright(&doLevel);
+    Serial.print(F("[조도] "));
+    Serial.print(bright ? F("light") : F("dark"));
+    Serial.print(F(" (DO="));
+    Serial.print(doLevel ? F("HIGH") : F("LOW"));
+    Serial.println(F(")"));
+
+    if (gyroActive) {
+        mpu.update();
+        Serial.print(F("[MPU] X="));
+        Serial.print(mpu.getAngleX());
+        Serial.print(F(" Y="));
+        Serial.print(mpu.getAngleY());
+        Serial.print(F(" Z="));
+        Serial.println(mpu.getAngleZ());
+    } else {
+        Serial.println(F("[MPU] off"));
+    }
+
+    printPowerHuman(inaMPU, F("MPU rail"));
+    printPowerHuman(inaRPI, F("RPi rail"));
+    printPowerHuman(inaServo, F("Servo rail"));
+    Serial.println(F("---"));
+}
+#endif
+
+void setup() {
+    Serial.begin(SERIAL_BAUD);
+    while (!Serial && millis() < 3000) {
+        ;
+    }
+
+    Wire.begin();
+    setupINA226(inaMPU);
+    setupINA226(inaRPI);
+    setupINA226(inaServo);
+
+    mpu.begin();
+    // true 이면 시리얼에 보정 문구 출력 → demon CSV 파싱 방해
+    mpu.calcGyroOffsets(false);
+    Wire.beginTransmission(0x68);
+    Wire.write(0x6B);
+    Wire.write(0x40);
+    Wire.endTransmission();
+
+    servo.attach(SERVO_PIN);
+    servo.write(0);
+    pinMode(LIGHT_DO, INPUT);
+
+    cmdLen = 0;
+    Serial.println(F("# sat_power_monitor ready"));
+    Serial.println(F("# power: 0,1,2 = CSV | light: L,light|dark (DO pin)"));
+    Serial.println(F("# CMD: ATTACK | RECOVERY | JSON demo"));
+}
+
+void loop() {
+    pollSerialCommands();
+    emitAllPowerCsv();
+
+#if DEBUG_HUMAN_OUTPUT
+    printHumanSensors();
+#endif
+
+    delay(POWER_INTERVAL_MS);
+}

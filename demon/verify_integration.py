@@ -12,6 +12,7 @@ from pathlib import Path
 from demon import config as demon_config
 from demon.core.context import DaemonConfig, RuntimeContext
 from demon.db.db_manager import DBManager
+from demon.workers.serial_reader import SerialReader
 from demon.workers.udp_receiver import UDPReceiver
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -144,6 +145,70 @@ def test_do_flush_pending(tmp_db: Path) -> None:
     db.close()
 
 
+def test_serial_reader_parsing(tmp_db: Path) -> None:
+    db = DBManager(tmp_db)
+    if not db.init_db():
+        _fail("serial test init_db")
+    shutdown = threading.Event()
+    ctx = RuntimeContext(config=DaemonConfig(db_path=tmp_db), shutdown_event=shutdown, db=db)
+    reader = SerialReader(ctx)
+
+    pwr = reader._parse_serial_line("1,3.312,0.0450,60001")
+    if pwr is None or pwr["sw_id"] != 1 or abs(pwr["voltage"] - 3.312) > 1e-6:
+        _fail(f"parse_serial_line power {pwr}")
+    _ok("parse_serial_line power CSV")
+
+    if reader._parse_serial_line("9,3.0,0.1,1") is not None:
+        _fail("parse_serial_line should reject sw_id>2")
+    _ok("parse_serial_line sw_id range")
+
+    if reader._parse_serial_line("x,y,z") is not None:
+        _fail("parse_serial_line should reject non-numeric")
+    _ok("parse_serial_line invalid CSV")
+
+    light = reader._parse_light_line("L,light,60002")
+    if light != "light":
+        _fail(f"parse_light_line light {light}")
+    dark = reader._parse_light_line("L,dark,61003")
+    if dark != "dark":
+        _fail(f"parse_light_line dark {dark}")
+    _ok("parse_light_line L,light|dark")
+
+    if not reader._validate_power_range({"sw_id": 0, "voltage": 3.3, "current_a": 0.1}):
+        _fail("validate_power_range valid sample")
+    if reader._validate_power_range({"sw_id": 0, "voltage": 99.0, "current_a": 0.1}):
+        _fail("validate_power_range should reject voltage")
+    _ok("validate_power_range")
+
+    db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.0, "current_a": 0.2})
+    reader._dispatch_line("0,3.5,0.25,70000")
+    m0 = db.get_pwr_meta(0)
+    if m0 is None or abs(float(m0["VOLTAGE"]) - 3.5) > 1e-6:
+        _fail(f"dispatch power line {m0}")
+    _ok("dispatch_line power → upsert_pwr_meta")
+
+    reader._dispatch_line("L,dark,80000")
+    if reader.get_light_state() != "dark":
+        _fail(f"dispatch light line state={reader.get_light_state()}")
+    row3 = db.get_pwr_meta(3)
+    if row3 is None or float(row3["VOLTAGE"]) != 0.0:
+        _fail("L line must not update SAT_PWR_META sw_id=3")
+    _ok("dispatch_line light — SW_ID 3 unchanged")
+
+    reader._dispatch_line("# comment")
+    reader._dispatch_line("")
+    _ok("dispatch_line ignores # and blank")
+
+    if reader.is_light_bright() is not False:
+        _fail("is_light_bright after L,dark")
+    reader._last_light = demon_config.SERIAL_LIGHT_STATE_LIGHT
+    if reader.is_light_bright() is not True:
+        _fail("is_light_bright after light")
+    _ok("serial control helpers (is_light_bright)")
+
+    db.close()
+
+
 def test_flush_trigger_mid_config() -> None:
     if demon_config.TLM_DB_FLUSH_TRIGGER_MID != demon_config.GENERIC_ADCS_DO_MID:
         _fail(
@@ -158,6 +223,7 @@ def main() -> int:
         test_flush_trigger_mid_config()
         tmp = Path(tempfile.mkdtemp()) / "verify.db"
         test_db_manager_api(tmp)
+        test_serial_reader_parsing(Path(tempfile.mkdtemp()) / "verify_serial.db")
         test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
         logger.info("=== All local integration checks passed ===")
         return 0

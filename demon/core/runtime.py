@@ -68,11 +68,18 @@ class MatadorDaemon:
                 db=self._db,
             )
 
+            serial_reader = SerialReader(ctx)
+            udp_receiver = UDPReceiver(ctx)
+            anomaly_detector = AnomalyDetector(ctx)
+            gs_comms = GScomms(ctx)
+            gs_comms.set_serial_reader(serial_reader)
+            gs_comms.set_anomaly_detector(anomaly_detector)
+
             worker_specs: list[tuple[str, object]] = [
-                ("SerialReader", SerialReader(ctx)),
-                ("UDPReceiver", UDPReceiver(ctx)),
-                ("AnomalyDetector", AnomalyDetector(ctx)),
-                ("GScomms", GScomms(ctx)),
+                ("SerialReader", serial_reader),
+                ("UDPReceiver", udp_receiver),
+                ("AnomalyDetector", anomaly_detector),
+                ("GScomms", gs_comms),
             ]
 
             self._threads = [

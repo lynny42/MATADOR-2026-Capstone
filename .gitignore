@@ -1,4 +1,16 @@
 __pycache__/
 *.py[cod]
+*$py.class
+.Python
+
+# demon 런타임 SQLite (WAL 모드 시 -wal / -shm 생성)
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 demon/database.sqlite
+demon/database.sqlite-*
+
+# 로컬 로그 (config.LOG_FILE_PATH 지정 시)
+*.log
+demon/*.log
