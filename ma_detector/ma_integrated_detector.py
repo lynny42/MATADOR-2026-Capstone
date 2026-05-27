@@ -512,8 +512,10 @@ class MAIntegratedDetector:
                         rule_id: self._rule_registry.get(rule_id, {}).get("name", "")
                         for rule_id in triggered_rules
                     },
-                    "is_new_pattern": ma_code not in self._known_patterns,
+                    "is_new_pattern": False,
+                    "action_mapping_status": "mapped",
                     "triggered_rules": triggered_rules,
+                    "unregistered_action_ids": [],
                 }
 
                 if grade in ("CONFIRMED", "SUSPECTED"):
@@ -535,13 +537,9 @@ class MAIntegratedDetector:
             results.extend(self._flush_pending_pool())
             if not results:
                 results.extend(discarded_entries)
-            if any_anomaly and not results:
-                results.append(self._unknown_pattern_entry())
-
-            if any_anomaly and not any(result["grade"] in ("CONFIRMED", "SUSPECTED") for result in results):
-                results.append(self._unknown_pattern_entry())
 
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            results = self._finalize_reports_for_action_mapping(results, data, latest)
             target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
             results = sort_reports_by_target(results, target, self._rule_registry)
             return json.dumps(results, ensure_ascii=False, default=str)
@@ -615,6 +613,10 @@ class MAIntegratedDetector:
                 "corroboration_count": dashboard_row.get("CORROBORATION_COUNT"),
                 "evidence_keys": dashboard_row.get("EVIDENCE_KEYS", {}),
                 "is_new_pattern": dashboard_row.get("IS_NEW_PATTERN"),
+                "action_mapping_status": dashboard_row.get("ACTION_MAPPING_STATUS", "mapped"),
+                "triggered_rules": dashboard_row.get("TRIGGERED_RULE_IDS", []),
+                "unregistered_action_ids": dashboard_row.get("UNREGISTERED_ACTION_IDS", []),
+                "triggered_rule_results": dashboard_row.get("TRIGGERED_RULE_RESULTS", []),
                 "satellite_filter": {
                     "result": dashboard_row.get("FALSE_POSITIVE_RESULT"),
                     "weight": dashboard_row.get("FALSE_POSITIVE_WEIGHT"),
@@ -970,8 +972,11 @@ class MAIntegratedDetector:
                     "grade": "SUSPECTED",
                     "corroboration_count": len(all_rules),
                     "evidence_keys": {rule: self._rule_registry.get(rule, {}).get("name", "") for rule in all_rules},
-                    "is_new_pattern": ma_code not in self._known_patterns,
+                    "is_new_pattern": False,
+                    "action_mapping_status": "mapped",
                     "triggered_rules": all_rules,
+                    "unregistered_action_ids": [],
+                    "triggered_rule_results": [],
                 }
             ]
         except (TypeError, ValueError) as error:
@@ -982,20 +987,114 @@ class MAIntegratedDetector:
             return []
 
     @staticmethod
-    def _unknown_pattern_entry() -> dict[str, Any]:
-        return {
-            "ma_code": "UNKNOWN_UNKNOWN_P0",
-            "action_id": "A000",
-            "action_name": "UNKNOWN_PATTERN",
-            "module": "UNKNOWN",
-            "scenario_phase": 0,
-            "confidence_score": 0.0,
-            "grade": "UNKNOWN",
-            "corroboration_count": 0,
-            "evidence_keys": {},
-            "is_new_pattern": True,
-            "triggered_rules": [],
-        }
+    def _is_attack_packet(packet: dict[str, Any]) -> bool:
+        try:
+            return bool(packet.get("IS_ANOMALY", False))
+        except Exception as error:
+            logger.error("attack packet check failed: %s", error)
+            return False
+
+    def _is_mapped_report(self, report: dict[str, Any]) -> bool:
+        try:
+            if report.get("grade") not in ("CONFIRMED", "SUSPECTED"):
+                return False
+            action_id = str(report.get("action_id", "") or "")
+            if not action_id or action_id == "A000":
+                return False
+            return action_id in self._action_registry
+        except Exception as error:
+            logger.error("mapped report check failed: %s", error)
+            return False
+
+    def _unregistered_action_ids_from_rule_ids(self, rule_ids: list[str]) -> list[str]:
+        try:
+            unregistered: set[str] = set()
+            for rule_id in rule_ids:
+                contributes = self._rule_registry.get(rule_id, {}).get("contributes_to", {})
+                for action_id in contributes:
+                    if action_id not in self._action_registry:
+                        unregistered.add(str(action_id))
+            return sorted(unregistered)
+        except Exception as error:
+            logger.error("unregistered action lookup failed: %s", error)
+            return []
+
+    def _build_undefined_action_report(
+        self,
+        latest: dict[str, Any],
+        rule_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            triggered = [
+                item for item in rule_data.get("rule_results", []) if item.get("triggered")
+            ]
+            rule_ids = [str(item.get("rule_id", "")) for item in triggered if item.get("rule_id")]
+            unregistered = self._unregistered_action_ids_from_rule_ids(rule_ids)
+            evidence_keys = {
+                rule_id: self._rule_registry.get(rule_id, {}).get("name", rule_id)
+                for rule_id in rule_ids
+            }
+            top_score = max((float(item.get("score", 0.0) or 0.0) for item in triggered), default=0.0)
+            target_module = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM")) or "UNKNOWN"
+            return {
+                "ma_code": "UNMAPPED_SATELLITE_ATTACK_P0",
+                "action_id": "",
+                "action_name": "UNMAPPED_ATTACK",
+                "module": target_module,
+                "scenario_phase": 0,
+                "confidence_score": round(top_score * 100.0, 2),
+                "grade": "SUSPECTED",
+                "corroboration_count": len(rule_ids),
+                "evidence_keys": evidence_keys,
+                "is_new_pattern": True,
+                "action_mapping_status": "undefined",
+                "triggered_rules": rule_ids,
+                "unregistered_action_ids": unregistered,
+                "triggered_rule_results": triggered,
+            }
+        except Exception as error:
+            logger.error("undefined action report build failed: %s", error)
+            return {
+                "ma_code": "UNMAPPED_SATELLITE_ATTACK_P0",
+                "action_id": "",
+                "action_name": "UNMAPPED_ATTACK",
+                "module": "UNKNOWN",
+                "scenario_phase": 0,
+                "confidence_score": 0.0,
+                "grade": "SUSPECTED",
+                "corroboration_count": 0,
+                "evidence_keys": {},
+                "is_new_pattern": True,
+                "action_mapping_status": "undefined",
+                "triggered_rules": [],
+                "unregistered_action_ids": [],
+                "triggered_rule_results": [],
+            }
+
+    def _finalize_reports_for_action_mapping(
+        self,
+        reports: list[dict[str, Any]],
+        rule_data: dict[str, Any],
+        latest: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        try:
+            if not self._is_attack_packet(latest):
+                for report in reports:
+                    report["action_mapping_status"] = "mapped"
+                    report["is_new_pattern"] = False
+                return reports
+
+            mapped = [report for report in reports if self._is_mapped_report(report)]
+            if mapped:
+                for report in mapped:
+                    report["action_mapping_status"] = "mapped"
+                    report["is_new_pattern"] = False
+                return mapped
+
+            return [self._build_undefined_action_report(latest, rule_data)]
+        except Exception as error:
+            logger.error("action mapping finalize failed: %s", error)
+            return reports
 
     @staticmethod
     def _timestamp_to_epoch(value: Any) -> float:
@@ -1052,6 +1151,10 @@ class MAIntegratedDetector:
                 "CORROBORATION_COUNT": report.get("corroboration_count"),
                 "EVIDENCE_KEYS": report.get("evidence_keys", {}),
                 "IS_NEW_PATTERN": report.get("is_new_pattern", False),
+                "ACTION_MAPPING_STATUS": report.get("action_mapping_status", "mapped"),
+                "TRIGGERED_RULE_IDS": list(report.get("triggered_rules", [])),
+                "UNREGISTERED_ACTION_IDS": list(report.get("unregistered_action_ids", [])),
+                "TRIGGERED_RULE_RESULTS": list(report.get("triggered_rule_results", [])),
                 "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
                 "SATELLITE_TARGET_SUBSYSTEM": target,
                 "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
@@ -1067,6 +1170,9 @@ class MAIntegratedDetector:
             detail["DASHBOARD_ID"] = detect_id
             detail["DETECT_ID"] = detect_id
             detail["MA_CODE"] = report.get("ma_code")
+            detail["ACTION_MAPPING_STATUS"] = report.get("action_mapping_status", "mapped")
+            detail["TRIGGERED_RULE_RESULTS"] = list(report.get("triggered_rule_results", []))
+            detail["UNREGISTERED_ACTION_IDS"] = list(report.get("unregistered_action_ids", []))
             self._detail_rows.append(detail)
         except Exception as error:
             logger.error("dashboard row insert failed: %s", error)

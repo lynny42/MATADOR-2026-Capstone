@@ -29,6 +29,19 @@ class RuleUpsertRequest(BaseModel):
     definition: dict[str, Any]
 
 
+class ActionUpsertRequest(BaseModel):
+    """Request body for creating or replacing an action."""
+
+    action_id: str = Field(..., min_length=1)
+    definition: dict[str, Any]
+
+
+class ActionUpdateRequest(BaseModel):
+    """Request body for patching an existing action."""
+
+    updates: dict[str, Any]
+
+
 class RuleUpdateRequest(BaseModel):
     """Request body for patching an existing rule."""
 
@@ -54,7 +67,26 @@ class ReplayConfigRequest(BaseModel):
 
     rules: dict[str, Any]
     thresholds: dict[str, Any]
+    actions: dict[str, Any] | None = None
     packets: list[dict[str, Any]] | None = None
+
+
+class RulesPersistRequest(BaseModel):
+    """Request body for replacing the full rule registry on disk."""
+
+    rules: dict[str, Any]
+
+
+class ThresholdsPersistRequest(BaseModel):
+    """Request body for replacing threshold configuration on disk."""
+
+    thresholds: dict[str, Any]
+
+
+class ActionsPersistRequest(BaseModel):
+    """Request body for replacing the full action registry on disk."""
+
+    actions: dict[str, Any]
 
 
 @app.get("/api/health")
@@ -111,6 +143,24 @@ def delete_rule(rule_id: str) -> dict[str, Any]:
     return service.delete_rule(rule_id)
 
 
+@app.post("/api/actions")
+def upsert_action(request: ActionUpsertRequest) -> dict[str, Any]:
+    """Create or replace an action definition."""
+    return service.upsert_action(request.action_id, request.definition)
+
+
+@app.patch("/api/actions/{action_id}")
+def update_action(action_id: str, request: ActionUpdateRequest) -> dict[str, Any]:
+    """Patch an existing action definition."""
+    return service.update_action(action_id, request.updates)
+
+
+@app.delete("/api/actions/{action_id}")
+def delete_action(action_id: str) -> dict[str, Any]:
+    """Delete an action definition."""
+    return service.delete_action(action_id)
+
+
 @app.patch("/api/thresholds")
 def update_threshold(request: ThresholdUpdateRequest) -> dict[str, Any]:
     """Update a threshold setting."""
@@ -126,10 +176,32 @@ def replay(request: ReplayRequest) -> dict[str, Any]:
 @app.post("/api/replay/preview")
 def replay_preview(request: ReplayConfigRequest) -> dict[str, Any]:
     """Run a replay with temporary rules and thresholds."""
-    return service.run_replay_preview(request.rules, request.thresholds, request.packets)
+    return service.run_replay_preview(
+        request.rules, request.thresholds, request.packets, request.actions
+    )
 
 
 @app.post("/api/replay/apply")
 def replay_apply(request: ReplayConfigRequest) -> dict[str, Any]:
-    """Persist replay rules and thresholds, then rebuild detector state."""
-    return service.apply_replay_config(request.rules, request.thresholds)
+    """Persist Rule/Action/Threshold JSON and re-run MAIntegratedDetector on all stored telemetry."""
+    return service.apply_replay_config(
+        request.rules, request.thresholds, request.actions
+    )
+
+
+@app.post("/api/config/rules")
+def persist_rules(request: RulesPersistRequest) -> dict[str, Any]:
+    """Persist the full rule registry JSON used by the live detector."""
+    return service.persist_rules(request.rules)
+
+
+@app.post("/api/config/thresholds")
+def persist_thresholds(request: ThresholdsPersistRequest) -> dict[str, Any]:
+    """Persist threshold configuration JSON used by the live detector."""
+    return service.persist_thresholds(request.thresholds)
+
+
+@app.post("/api/config/actions")
+def persist_actions(request: ActionsPersistRequest) -> dict[str, Any]:
+    """Persist the full action registry JSON used by the live detector."""
+    return service.persist_actions(request.actions)

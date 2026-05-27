@@ -150,6 +150,18 @@ class RegistryManager:
             logger.error("unexpected replace rules failure: %s", error)
             return False
 
+    def replace_actions(self, actions: dict[str, Any]) -> bool:
+        """Replace the whole action registry."""
+        try:
+            self._save(self._action_path, actions)
+            return True
+        except (OSError, TypeError) as error:
+            logger.error("replace actions failed: %s", error)
+            return False
+        except Exception as error:
+            logger.error("unexpected replace actions failure: %s", error)
+            return False
+
     def toggle_rule(self, rule_id: str, enabled: bool) -> bool:
         """Enable or disable a rule."""
         try:

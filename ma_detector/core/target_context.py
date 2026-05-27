@@ -163,29 +163,47 @@ def build_novel_attack_advisory(
     packet: dict[str, Any],
     reports: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Build UI advisory when at least one MA report is flagged is_new_pattern (B-3)."""
+    """Build UI advisory when attack(Y) has no mapped Action in the registry (B-3)."""
     try:
-        novel_reports = [report for report in reports if report.get("is_new_pattern")]
-        if not novel_reports:
+        undefined_reports = [
+            report
+            for report in reports
+            if report.get("action_mapping_status") == "undefined" or report.get("is_new_pattern")
+        ]
+        if not undefined_reports:
             return None
 
         exception_code = str(packet.get("FALSE_POSITIVE_EXCEPTION", "") or "").strip()
         target = normalize_target_subsystem(packet.get("TARGET_SUBSYSTEM"))
         likelihood = EXCEPTION_LIKELIHOOD_HINTS.get(
             exception_code,
-            "등록된 Action과 완전히 일치하지 않을 수 있습니다. Rule·Phase 교차 근거를 함께 확인하세요.",
+            "Rule 근거는 있으나 action_registry에 연결된 Action이 없습니다.",
         )
-        codes = [str(item.get("ma_code", "")) for item in novel_reports if item.get("ma_code")]
+        triggered_rules: list[str] = []
+        unregistered_action_ids: list[str] = []
+        for report in undefined_reports:
+            triggered_rules.extend(report.get("triggered_rules", []))
+            unregistered_action_ids.extend(report.get("unregistered_action_ids", []))
+        triggered_rules = sorted(set(triggered_rules))
+        unregistered_action_ids = sorted(set(unregistered_action_ids))
+        codes = [str(item.get("ma_code", "")) for item in undefined_reports if item.get("ma_code")]
         return {
-            "title": "기존 Action에 없는 패턴 가능성",
+            "title": "등록된 Action 없음 (공격 Y만 확인)",
             "message": (
-                "위성 오탐필터는 공격(Y)으로 보았으나, 지상 Rule 집합과 완전히 일치하지 않을 수 있습니다. "
-                f"예상 가능성: {likelihood}"
+                "위성 오탐필터는 공격(Y)으로 판정했으나, 지상 action_registry에 매핑된 Action이 없습니다. "
+                "Rule Lab에서 Action을 추가하고 Rule의 contributes_to에 연결한 뒤 Replay하세요. "
+                f"참고: {likelihood}"
+            ),
+            "register_action_hint": (
+                "action_registry.json에 Action(이름·module·phase)을 추가하고, "
+                "발화한 Rule의 contributes_to에 action_id를 지정하세요."
             ),
             "exception_code": exception_code or None,
             "target_subsystem": target or None,
             "related_ma_codes": codes,
-            "report_count": len(novel_reports),
+            "triggered_rules": triggered_rules,
+            "unregistered_action_ids": unregistered_action_ids,
+            "report_count": len(undefined_reports),
         }
     except Exception as error:
         logger.error("novel advisory build failed: %s", error)

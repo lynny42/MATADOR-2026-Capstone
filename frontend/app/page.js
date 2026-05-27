@@ -2,6 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { apiGet, apiSend } from "../lib/api";
+import { cn } from "../lib/cn";
+import {
+  comparisonCardClass,
+  severityCardClass,
+  severityTextClass,
+  statusPillClass,
+  subsystemAreaClass,
+  ui
+} from "../lib/ui";
 
 const severityLabel = {
   normal: "정상",
@@ -46,6 +55,8 @@ export default function DashboardPage() {
   const [ruleDraft, setRuleDraft] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState("");
   const [ruleEditor, setRuleEditor] = useState("");
+  const [selectedActionId, setSelectedActionId] = useState("");
+  const [actionEditor, setActionEditor] = useState("");
   const [replayResult, setReplayResult] = useState(null);
   const [replayMode, setReplayMode] = useState(false);
   const [replayDashboard, setReplayDashboard] = useState(null);
@@ -55,9 +66,14 @@ export default function DashboardPage() {
   const [replayNewRuleId, setReplayNewRuleId] = useState("");
   const [replayRuleEditor, setReplayRuleEditor] = useState("");
   const [replayThresholdDraft, setReplayThresholdDraft] = useState("");
+  const [replayActions, setReplayActions] = useState(null);
+  const [replayActionId, setReplayActionId] = useState("");
+  const [replayNewActionId, setReplayNewActionId] = useState("");
+  const [replayActionEditor, setReplayActionEditor] = useState("");
   const [replayBusy, setReplayBusy] = useState(false);
   const [replayUpdatedAt, setReplayUpdatedAt] = useState("");
   const [replayDirty, setReplayDirty] = useState(false);
+  const [replayNotice, setReplayNotice] = useState("");
   const [error, setError] = useState("");
   const [snapshotIndex, setSnapshotIndex] = useState(null);
 
@@ -149,6 +165,9 @@ export default function DashboardPage() {
         : Object.keys(payload.rules)[0] || "";
       setSelectedRuleId(fallbackRuleId);
       setRuleEditor(JSON.stringify(payload.rules[fallbackRuleId] || defaultRuleDefinition(), null, 2));
+      const fallbackActionId = Object.keys(payload.actions || {})[0] || "";
+      setSelectedActionId(fallbackActionId);
+      setActionEditor(JSON.stringify(payload.actions?.[fallbackActionId] || defaultActionDefinition(), null, 2));
     } catch (loadError) {
       setError(loadError.message);
     }
@@ -159,7 +178,12 @@ export default function DashboardPage() {
     setRuleEditor(JSON.stringify(rules?.rules?.[ruleId] || defaultRuleDefinition(), null, 2));
   }
 
-  async function openReplayMode() { /* 처음 리플레이 누르고 들어간 거면 로딩이 걸릴 필요가 없지 */
+  function selectAction(actionId) {
+    setSelectedActionId(actionId);
+    setActionEditor(JSON.stringify(rules?.actions?.[actionId] || defaultActionDefinition(), null, 2));
+  }
+
+  async function openReplayMode() {
     try {
       setReplayBusy(true);
       const payload = rules || await apiGet("/api/rules");
@@ -170,13 +194,24 @@ export default function DashboardPage() {
       setReplayRules(rulesCopy);
       setReplayThresholds(thresholdCopy);
       setReplayRuleId(firstRule);
-      setReplayNewRuleId("");
+      setReplayNewRuleId(firstRule);
       setReplayRuleEditor(JSON.stringify(rulesCopy[firstRule] || defaultRuleDefinition(), null, 2));
       setReplayThresholdDraft(JSON.stringify(thresholdCopy, null, 2));
-      setReplayDashboard(true);
+      const actionsCopy = structuredClone(payload.actions || {});
+      const firstAction = Object.keys(actionsCopy)[0] || "";
+      setReplayActions(actionsCopy);
+      setReplayActionId(firstAction);
+      setReplayNewActionId(firstAction);
+      setReplayActionEditor(
+        JSON.stringify(actionsCopy[firstAction] || defaultActionDefinition(), null, 2)
+      );
+      setReplayDashboard(null);
       setReplayResult(null);
       setReplayUpdatedAt("");
       setReplayDirty(false);
+      setReplayNotice(
+        "JSON을 수정한 뒤 «Replay 실행»으로 미리보기를 만드세요. 결과 확인 후 아래 «전체 저장»으로 파일 반영 및 MA 재분석을 실행합니다."
+      );
       setRulesOpen(false);
       setReplayMode(true);
     } catch (replayError) {
@@ -186,19 +221,65 @@ export default function DashboardPage() {
     }
   }
 
-  async function runReplayPreview(nextRules = replayRules, nextThresholds = replayThresholds) {
+  function syncReplayDrafts() {
+    try {
+      const nextRules = { ...(replayRules || {}) };
+      const ruleId = (replayNewRuleId || replayRuleId || "").trim();
+      if (ruleId) {
+        nextRules[ruleId] = JSON.parse(replayRuleEditor);
+      }
+      const nextThresholds = JSON.parse(replayThresholdDraft);
+      const nextActions = { ...(replayActions || {}) };
+      const actionId = (replayNewActionId || replayActionId || "").trim();
+      if (actionId) {
+        nextActions[actionId] = JSON.parse(replayActionEditor);
+      }
+      return { ok: true, nextRules, nextThresholds, nextActions, ruleId, actionId };
+    } catch (syncError) {
+      return { ok: false, error: syncError.message };
+    }
+  }
+
+  function applySyncedReplayState(synced) {
+    setReplayRules(synced.nextRules);
+    setReplayThresholds(synced.nextThresholds);
+    setReplayActions(synced.nextActions);
+    if (synced.ruleId) {
+      setReplayRuleId(synced.ruleId);
+      setReplayNewRuleId(synced.ruleId);
+    }
+    if (synced.actionId) {
+      setReplayActionId(synced.actionId);
+      setReplayNewActionId(synced.actionId);
+    }
+  }
+
+  async function runReplayPreview() {
+    const synced = syncReplayDrafts();
+    if (!synced.ok) {
+      setError(`JSON 형식 오류: ${synced.error}`);
+      return;
+    }
+    applySyncedReplayState(synced);
     try {
       setReplayBusy(true);
+      setReplayNotice("서버에서 Replay 미리보기를 계산하는 중입니다…");
       const payload = await apiSend("/api/replay/preview", "POST", {
-        rules: nextRules,
-        thresholds: nextThresholds
+        rules: synced.nextRules,
+        thresholds: synced.nextThresholds,
+        actions: synced.nextActions
       });
       setReplayResult(payload);
       setReplayDashboard(payload.dashboard);
       setReplayUpdatedAt(new Date().toLocaleTimeString());
       setReplayDirty(false);
+      const comparison = payload.comparison || {};
+      setReplayNotice(
+        `Replay 완료 (${new Date().toLocaleTimeString()}). 기존 ${comparison.current_count ?? 0}건 → 미리보기 ${comparison.preview_count ?? 0}건 (Δ ${comparison.delta_count ?? 0}). 확정하려면 아래 «전체 저장»을 누르세요.`
+      );
       setError("");
     } catch (replayError) {
+      setReplayNotice("");
       setError(replayError.message);
     } finally {
       setReplayBusy(false);
@@ -207,7 +288,7 @@ export default function DashboardPage() {
 
   function selectReplayRule(ruleId) {
     setReplayRuleId(ruleId);
-    setReplayNewRuleId("");
+    setReplayNewRuleId(ruleId);
     setReplayRuleEditor(JSON.stringify(replayRules?.[ruleId] || defaultRuleDefinition(), null, 2));
   }
 
@@ -215,24 +296,6 @@ export default function DashboardPage() {
     setReplayRuleId("");
     setReplayNewRuleId("E-NEW");
     setReplayRuleEditor(JSON.stringify(defaultRuleDefinition(), null, 2));
-  }
-
-  async function saveReplayRule() {
-    try {
-      const ruleId = (replayNewRuleId || replayRuleId).trim();
-      if (!ruleId) {
-        setError("저장할 임시 Rule ID가 필요합니다.");
-        return;
-      }
-      const nextRules = { ...(replayRules || {}) };
-      nextRules[ruleId] = JSON.parse(replayRuleEditor);
-      setReplayRules(nextRules);
-      setReplayRuleId(ruleId);
-      setReplayNewRuleId("");
-      markReplayDirty();
-    } catch (saveError) {
-      setError(saveError.message);
-    }
   }
 
   async function deleteReplayRule() {
@@ -246,43 +309,78 @@ export default function DashboardPage() {
       const nextRuleId = Object.keys(nextRules)[0] || "";
       setReplayRules(nextRules);
       setReplayRuleId(nextRuleId);
+      setReplayNewRuleId(nextRuleId);
       setReplayRuleEditor(JSON.stringify(nextRules[nextRuleId] || defaultRuleDefinition(), null, 2));
-      markReplayDirty();
+      markReplayDirty("Rule이 삭제되었습니다. «Replay 실행»으로 탐지 변화를 확인하세요.");
     } catch (deleteError) {
       setError(deleteError.message);
     }
   }
 
-  async function saveReplayThresholds() {
+  function selectReplayAction(actionId) {
+    setReplayActionId(actionId);
+    setReplayNewActionId(actionId);
+    setReplayActionEditor(
+      JSON.stringify(replayActions?.[actionId] || defaultActionDefinition(), null, 2)
+    );
+  }
+
+  function startReplayNewAction() {
+    setReplayActionId("");
+    setReplayNewActionId("A-NEW");
+    setReplayActionEditor(JSON.stringify(defaultActionDefinition(), null, 2));
+  }
+
+  async function deleteReplayAction() {
     try {
-      const nextThresholds = JSON.parse(replayThresholdDraft);
-      setReplayThresholds(nextThresholds);
-      markReplayDirty();
-    } catch (saveError) {
-      setError(saveError.message);
+      if (!replayActionId) {
+        setError("삭제할 임시 Action을 선택하세요.");
+        return;
+      }
+      const nextActions = { ...(replayActions || {}) };
+      delete nextActions[replayActionId];
+      const nextActionId = Object.keys(nextActions)[0] || "";
+      setReplayActions(nextActions);
+      setReplayActionId(nextActionId);
+      setReplayNewActionId(nextActionId);
+      setReplayActionEditor(
+        JSON.stringify(nextActions[nextActionId] || defaultActionDefinition(), null, 2)
+      );
+      markReplayDirty("Action이 삭제되었습니다. «Replay 실행»으로 탐지 변화를 확인하세요.");
+    } catch (deleteError) {
+      setError(deleteError.message);
     }
   }
 
-  function markReplayDirty() {
-    setReplayDirty(true);
-    setReplayDashboard(null);
-    setReplayResult(null);
-    setReplayUpdatedAt("");
-  }
-
   async function applyReplayConfig() {
+    const synced = syncReplayDrafts();
+    if (!synced.ok) {
+      setError(`JSON 형식 오류: ${synced.error}`);
+      return;
+    }
+    applySyncedReplayState(synced);
     try {
       setReplayBusy(true);
+      setReplayNotice(
+        "Rule/Action/Threshold를 파일에 저장한 뒤, 누적된 텔레메트리 전체를 MAIntegratedDetector로 재분석하는 중입니다…"
+      );
       const payload = await apiSend("/api/replay/apply", "POST", {
-        rules: replayRules,
-        thresholds: replayThresholds
+        rules: synced.nextRules,
+        thresholds: synced.nextThresholds,
+        actions: synced.nextActions
       });
+      if (!payload.ok) {
+        setError(payload.error || "전체 저장에 실패했습니다.");
+        return;
+      }
       setDashboard(payload.dashboard);
       setReplayMode(false);
       setReplayDashboard(null);
       setReplayResult(null);
+      setReplayNotice("");
       await loadRules();
       await loadDashboard({ resetToLatest: true, clearCode: true });
+      setError("");
     } catch (applyError) {
       setError(applyError.message);
     } finally {
@@ -290,10 +388,20 @@ export default function DashboardPage() {
     }
   }
 
+  function markReplayDirty(notice) {
+    setReplayDirty(true);
+    setReplayResult(null);
+    setReplayUpdatedAt("");
+    if (notice) {
+      setReplayNotice(notice);
+    }
+  }
+
   function closeReplayMode() {
     setReplayMode(false);
     setReplayDashboard(null);
     setReplayResult(null);
+    setReplayNotice("");
     setRulesOpen(true);
   }
 
@@ -311,60 +419,85 @@ export default function DashboardPage() {
 
   if (!dashboard) {
     return (
-      <main className="page-shell">
-        <div className="loading-card">MA 통합 탐지 대시보드를 불러오는 중...</div>
+      <main className={ui.shell}>
+        <div className={ui.loadingCard}>MA 통합 탐지 대시보드를 불러오는 중...</div>
       </main>
     );
   }
 
   if (replayMode) {
     return (
-      <main className="page-shell">
-        <header className="topbar">
+      <main className={ui.shell}>
+        <header className={ui.topbar}>
           <div>
-            <p className="eyebrow">Temporary Replay</p>
-            <h1>Replay 임시 결과</h1>
+            <p className={ui.eyebrow}>Temporary Replay</p>
+            <h1 className={ui.heading}>Replay 임시 결과</h1>
           </div>
-          <div className="rule-actions">
-            <button onClick={applyReplayConfig}>설정</button>
-            <button onClick={closeReplayMode}>닫기</button>
+          <div className={ui.btnRow}>
+            <button type="button" className={ui.btnPill} onClick={closeReplayMode}>
+              닫기
+            </button>
           </div>
         </header>
-        {error ? <section className="error-banner">{error}</section> : null}
+        {error ? <section className={ui.errorBanner}>{error}</section> : null}
         <ReplayWorkspace
-          dashboard={replayDashboard}
           comparison={replayResult?.comparison}
+          replayNotice={replayNotice}
           replayRules={replayRules}
           replayThresholdDraft={replayThresholdDraft}
           replayRuleId={replayRuleId}
           replayNewRuleId={replayNewRuleId}
           replayRuleEditor={replayRuleEditor}
+          replayActions={replayActions}
+          replayActionId={replayActionId}
+          replayNewActionId={replayNewActionId}
+          replayActionEditor={replayActionEditor}
           replayBusy={replayBusy}
           replayUpdatedAt={replayUpdatedAt}
           replayDirty={replayDirty}
           onRuleSelect={selectReplayRule}
-          onNewRuleIdChange={setReplayNewRuleId}
-          onRuleEditorChange={setReplayRuleEditor}
-          onThresholdDraftChange={setReplayThresholdDraft}
+          onNewRuleIdChange={(value) => {
+            setReplayNewRuleId(value);
+            markReplayDirty();
+          }}
+          onRuleEditorChange={(value) => {
+            setReplayRuleEditor(value);
+            markReplayDirty();
+          }}
+          onThresholdDraftChange={(value) => {
+            setReplayThresholdDraft(value);
+            markReplayDirty();
+          }}
           onStartNewRule={startReplayNewRule}
-          onSaveRule={saveReplayRule}
           onDeleteRule={deleteReplayRule}
-          onSaveThresholds={saveReplayThresholds}
-          onReplay={() => runReplayPreview()}
+          onActionSelect={selectReplayAction}
+          onNewActionIdChange={(value) => {
+            setReplayNewActionId(value);
+            markReplayDirty();
+          }}
+          onActionEditorChange={(value) => {
+            setReplayActionEditor(value);
+            markReplayDirty();
+          }}
+          onStartNewAction={startReplayNewAction}
+          onDeleteAction={deleteReplayAction}
+          onReplay={runReplayPreview}
+          onApplyAll={applyReplayConfig}
         />
       </main>
     );
   }
 
   return (
-    <main className="page-shell">
-      <header className="topbar">
+    <main className={ui.shell}>
+      <header className={ui.topbar}>
         <div>
-          <p className="eyebrow">MATADOR Ground Station</p>
-          <h1>MA 통합 탐지 대시보드</h1>
+          <p className={ui.eyebrow}>MATADOR Ground Station</p>
+          <h1 className={ui.heading}>MA 통합 탐지 대시보드</h1>
         </div>
         <button
-          className="rule-button"
+          type="button"
+          className={ui.btnPill}
           onClick={async () => {
             setRulesOpen(!rulesOpen);
             if (!rules) {
@@ -376,9 +509,9 @@ export default function DashboardPage() {
         </button>
       </header>
 
-      {error ? <section className="error-banner">{error}</section> : null}
+      {error ? <section className={ui.errorBanner}>{error}</section> : null}
       {dashboard.ingest_error ? (
-        <section className="error-banner">패킷 검증: {dashboard.ingest_error}</section>
+        <section className={ui.errorBanner}>패킷 검증: {dashboard.ingest_error}</section>
       ) : null}
 
       {rulesOpen ? (
@@ -387,13 +520,16 @@ export default function DashboardPage() {
           ruleDraft={ruleDraft}
           selectedRuleId={selectedRuleId}
           ruleEditor={ruleEditor}
+          selectedActionId={selectedActionId}
+          actionEditor={actionEditor}
           onRuleSelect={selectRule}
+          onActionSelect={selectAction}
           onReload={loadRules}
           onReplay={openReplayMode}
         />
       ) : null}
 
-      <section className="dashboard-grid">
+      <section className={ui.dashboardGrid}>
         <BlueprintPanel
           blueprint={dashboard.blueprint}
           recentThreats={dashboard.recent_threats}
@@ -421,70 +557,76 @@ export default function DashboardPage() {
 
 function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelect }) {
   return (
-    <section className="panel blueprint-panel">
-      <div className="panel-heading">
+    <section className={ui.panel}>
+      <div className={ui.panelHeading}>
         <div>
-          <p className="eyebrow">최근 5회 통신 기반</p>
-          <h2>위성체 Blueprint</h2>
+          <p className={ui.eyebrow}>최근 5회 통신 기반</p>
+          <h2 className={ui.heading}>위성체 Blueprint</h2>
         </div>
       </div>
 
-      <div className="satellite-map">
+      <div className={ui.satelliteMap}>
         {Object.values(blueprint).map((subsystem) => (
           <article
             key={subsystem.name}
-            className={`subsystem-card severity-${subsystem.severity}`}
+            className={cn(severityCardClass(subsystem.severity), subsystemAreaClass(subsystem.name))}
           >
-            <div className="subsystem-title">
+            <div className={ui.subsystemTitle}>
               <strong>{subsystem.name}</strong>
-              <span>{severityLabel[subsystem.severity]}</span>
+              <span className={severityTextClass(subsystem.severity)}>
+                {severityLabel[subsystem.severity]}
+              </span>
             </div>
-            <div className="code-stack">
+            <div className={ui.codeStack}>
               {subsystem.detections.length ? (
                 subsystem.detections.slice(-3).map((detection) => (
                   <button
+                    type="button"
                     key={`${subsystem.name}-${detection.detect_id}`}
-                    className="code-chip"
+                    className={ui.codeChip}
                     onClick={() => onSelect(detection.detect_id)}
                   >
-                    <span>{detection.ma_code}</span>
-                    <b>P{detection.phase}</b>
-                    <em>{detection.confidence}%</em>
+                    <span className={ui.muted}>{detection.ma_code}</span>
+                    <b className="text-[var(--accent)] not-italic">P{detection.phase}</b>
+                    <em className="text-[var(--accent)] not-italic">{detection.confidence}%</em>
                   </button>
                 ))
               ) : (
-                <span className="no-code">최근 위협 없음</span>
+                <span className={ui.muted}>최근 위협 없음</span>
               )}
             </div>
           </article>
         ))}
       </div>
 
-      <section className="recent-threats">
-        <div className="recent-threat-heading">
-          <h3>최근 5회 위협</h3>
-          <span>{recentThreats?.length || 0}건</span>
+      <section className={ui.recentThreats}>
+        <div className={ui.recentThreatHeading}>
+          <h3 className="m-0 mb-3">최근 5회 위협</h3>
+          <span className={ui.recentThreatBadge}>{recentThreats?.length || 0}건</span>
         </div>
         {recentThreats?.length ? (
-          <div className="recent-threat-track">
+          <div className={ui.recentThreatTrack}>
             {recentThreats.map((threat) => (
               <button
                 type="button"
                 key={threat.detect_id}
-                className={`threat-row severity-${threat.severity}`}
+                className={cn(ui.threatRow, severityCardClass(threat.severity))}
                 onClick={() => onSelect(threat.detect_id)}
               >
                 <strong>{threat.ma_code}</strong>
-                <span>{(threat.subsystems || [threat.module]).join(" · ")}</span>
-                <em>
+                {threat.action_mapping_status === "undefined" ? (
+                  <span className={statusPillClass("undefined")}>Action 미매핑</span>
+                ) : null}
+                <span className={ui.muted}>{(threat.subsystems || [threat.module]).join(" · ")}</span>
+                <em className="text-[var(--accent)] not-italic">
                   P{threat.phase} · {threat.confidence}% · {threat.grade}
                 </em>
-                <span>{threat.detect_time}</span>
+                <span className={ui.muted}>{threat.detect_time}</span>
               </button>
             ))}
           </div>
         ) : (
-          <p className="muted">최근 위협이 없습니다.</p>
+          <p className={ui.muted}>최근 위협이 없습니다.</p>
         )}
       </section>
     </section>
@@ -507,11 +649,12 @@ function RightPanel({
 }) {
   const latest = dashboard.latest_communication;
   return (
-    <section className="panel right-panel">
-      <div className="selector-row">
-        <label className="search-box communication-select">
-          <span className="">통신</span>
+    <section className={ui.panel}>
+      <div className={ui.selectorRow}>
+        <label className={cn(ui.searchBox, "min-w-[360px] flex-[1.2_1_360px]")}>
+          <span>통신</span>
           <select
+            className={ui.searchSelect}
             value={selectedCommunicationAt || latest.communicated_at || ""}
             onChange={(event) => onCommunicationSelect(event.target.value)}
           >
@@ -522,9 +665,10 @@ function RightPanel({
             ))}
           </select>
         </label>
-        <label className="search-box">
+        <label className={ui.searchBox}>
           <span aria-hidden="true">🔍</span>
           <select
+            className={ui.searchSelect}
             value={selectedId || ""}
             onChange={(event) => {
               if (event.target.value) {
@@ -542,7 +686,7 @@ function RightPanel({
             ))}
           </select>
         </label>
-        <button className="reset-button" onClick={onResetLatest}>
+        <button type="button" className={cn(ui.btnPill, "min-w-[126px]")} onClick={onResetLatest}>
           초기화
         </button>
       </div>
@@ -563,34 +707,36 @@ function RightPanel({
 
 function CommunicationSummary({ communication, onSelect }) {
   if (!communication) {
-    return <div className="detail-card muted">통신 기록이 없습니다.</div>;
+    return <div className={cn(ui.detailCard, ui.muted)}>통신 기록이 없습니다.</div>;
   }
 
   return (
-    <div className="detail-card">
-      <div className="detail-heading">
+    <div className={ui.detailCard}>
+      <div className={ui.detailHeading}>
         <div>
-          <h3>{communication.communicated_at}</h3>
+          <h3 className="m-0">{communication.communicated_at}</h3>
         </div>
-        <strong>{communication.anomaly_count || 0}개</strong>
+        <strong className={ui.detailAccent}>{communication.anomaly_count || 0}개</strong>
       </div>
       {(communication.detections || []).length ? (
-        <div className="communication-code-list">
+        <div className={ui.codeList}>
           {communication.detections.map((detection, index) => (
             <button
               type="button"
               key={detection.detect_id}
-              className={`communication-code severity-${detection.severity}`}
+              className={cn(ui.codeButton, severityCardClass(detection.severity))}
               onClick={() => onSelect(detection.detect_id)}
             >
-              <span>{index + 1}번째 발생</span>
+              <span className={ui.muted}>{index + 1}번째 발생</span>
               <strong>{detection.ma_code}</strong>
-              <em>Phase {detection.phase} · 신뢰도 {detection.confidence}%</em>
+              <em className="text-[var(--accent)] not-italic">
+                Phase {detection.phase} · 신뢰도 {detection.confidence}%
+              </em>
             </button>
           ))}
         </div>
       ) : (
-        <p className="muted">해당 통신은 정상입니다.</p>
+        <p className={ui.muted}>해당 통신은 정상입니다.</p>
       )}
     </div>
   );
@@ -598,7 +744,7 @@ function CommunicationSummary({ communication, onSelect }) {
 
 function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshotNext }) {
   if (!selectedDetail) {
-    return <div className="detail-card muted">코드를 선택하면 Rule 근거가 표시됩니다.</div>;
+    return <div className={cn(ui.detailCard, ui.muted)}>코드를 선택하면 Rule 근거가 표시됩니다.</div>;
   }
 
   const frame = selectedDetail.snapshot_frame;
@@ -606,30 +752,53 @@ function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshot
     frame && frame.total > 0
       ? `스냅샷 ${(snapshotIndex ?? frame.index) + 1} / ${frame.total} (10분·1초 시리즈)`
       : null;
+  const isUndefinedAction = selectedDetail.action_mapping_status === "undefined";
 
   return (
-    <div className="detail-card">
-      <div className="detail-heading">
+    <div className={ui.detailCard}>
+      {selectedDetail.novel_attack_advisory ? (
+        <section className={ui.advisoryBanner}>
+          <strong>{selectedDetail.novel_attack_advisory.title}</strong>
+          <p className="mt-1.5 mb-0">{selectedDetail.novel_attack_advisory.message}</p>
+          {selectedDetail.novel_attack_advisory.register_action_hint ? (
+            <p className={ui.advisoryHint}>{selectedDetail.novel_attack_advisory.register_action_hint}</p>
+          ) : null}
+          {(selectedDetail.unregistered_action_ids || []).length ? (
+            <p className={ui.muted}>
+              Rule에만 있고 registry에 없는 Action ID:{" "}
+              {selectedDetail.unregistered_action_ids.join(", ")}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+      <div className={ui.detailHeading}>
         <div>
-          <p className="eyebrow">선택 코드 상세</p>
-          <h3>{selectedDetail.ma_code}</h3>
+          <p className={ui.eyebrow}>선택 코드 상세</p>
+          <h3 className="m-0">{selectedDetail.ma_code}</h3>
+          {isUndefinedAction ? (
+            <span className={statusPillClass("undefined")}>Action 미매핑</span>
+          ) : null}
+          {selectedDetail.is_new_pattern && !isUndefinedAction ? (
+            <span className={statusPillClass("new")}>신규 MA 코드</span>
+          ) : null}
         </div>
-        <strong>{selectedDetail.confidence_score}%</strong>
+        <strong className={ui.detailAccent}>{selectedDetail.confidence_score}%</strong>
       </div>
-      <div className="filter-grid">
-        <span>위성체 판정: {selectedDetail.satellite_filter?.result || "-"}</span>
-        <span>가중치: {selectedDetail.satellite_filter?.weight || "-"}</span>
-        <span>대상: {selectedDetail.satellite_filter?.target_subsystem || "-"}</span>
-        <span>이벤트: {selectedDetail.satellite_filter?.event_id || "-"}</span>
+      <div className={ui.filterGrid}>
+        <span className={ui.filterCell}>위성체 판정: {selectedDetail.satellite_filter?.result || "-"}</span>
+        <span className={ui.filterCell}>가중치: {selectedDetail.satellite_filter?.weight || "-"}</span>
+        <span className={ui.filterCell}>대상: {selectedDetail.satellite_filter?.target_subsystem || "-"}</span>
+        <span className={ui.filterCell}>이벤트: {selectedDetail.satellite_filter?.event_id || "-"}</span>
       </div>
       {frameLabel ? (
-        <div className="snapshot-nav">
-          <button type="button" onClick={onSnapshotPrev} disabled={!frame || frame.index <= 0}>
+        <div className={ui.snapshotNav}>
+          <button type="button" className={ui.btnPill} onClick={onSnapshotPrev} disabled={!frame || frame.index <= 0}>
             이전 1초
           </button>
-          <p className="muted">{frameLabel}</p>
+          <p className={cn(ui.muted, "m-0 flex-1")}>{frameLabel}</p>
           <button
             type="button"
+            className={ui.btnPill}
             onClick={onSnapshotNext}
             disabled={!frame || frame.index >= frame.total - 1}
           >
@@ -638,27 +807,71 @@ function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshot
         </div>
       ) : null}
       {frame?.current_at ? (
-        <p className="muted">
+        <p className={ui.muted}>
           직전 스냅샷: {frame.previous_at || "(없음)"} → 현재: {frame.current_at}
         </p>
       ) : null}
 
-      <div className="rule-detail-list">
+      <div>
         {(selectedDetail.rule_details || []).map((rule) => (
-          <article key={rule.rule_id} className="rule-detail">
+          <article key={rule.rule_id} className={ui.ruleDetail}>
             <div>
-              <strong>{rule.rule_id} · {rule.name}</strong>
-              <span>최초 활성화: {rule.first_triggered_at}</span>
+              <strong>
+                {rule.rule_id} · {rule.name}
+              </strong>
+              <span className={cn(ui.muted, "block")}>
+                최초 활성화: {rule.first_triggered_at}
+                {rule.rule_score !== undefined && rule.rule_score !== null
+                  ? ` · Rule 점수 ${rule.rule_score}`
+                  : ""}
+              </span>
             </div>
-            {getVisibleRuleColumns(rule.columns).length ? (
-              <div className="column-grid">
-                {getVisibleRuleColumns(rule.columns).map(([column, value]) => (
-                  <div key={column} className="column-card">
+            {(rule.unmapped_actions || []).length ? (
+              <div className={ui.actionMapGrid}>
+                <p className={ui.muted}>미등록 Action (contributes_to에만 존재)</p>
+                {rule.unmapped_actions.map((action) => (
+                  <div
+                    key={action.action_id}
+                    className={cn(ui.columnCard, "border border-red-400/55")}
+                  >
+                    <b>{action.action_id}</b>
+                    <span className={ui.muted}>이름: {action.name}</span>
+                    <span className={ui.muted}>가중치: {action.weight}</span>
+                    <em className="text-[var(--accent)] not-italic">action_registry.json에 추가 필요</em>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {(rule.mapped_actions || []).length ? (
+              <div className={ui.actionMapGrid}>
+                <p className={ui.muted}>등록된 Action 기여</p>
+                {rule.mapped_actions.map((action) => (
+                  <div key={action.action_id} className={ui.columnCard}>
+                    <b>
+                      {action.action_id} · {action.name}
+                    </b>
+                    <span className={ui.muted}>
+                      module: {action.module} · P{action.phase}
+                    </span>
+                    <span className={ui.muted}>가중치: {action.weight}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {Object.entries(rule.columns || {}).length ? (
+              <div className={ui.columnGrid}>
+                {(isUndefinedAction
+                  ? Object.entries(rule.columns)
+                  : getVisibleRuleColumns(rule.columns)
+                ).map(([column, value]) => (
+                  <div key={column} className={ui.columnCard}>
                     <b>{column}</b>
-                    <span>관측: {String(value.observed)}</span>
-                    <span>직전 스냅샷: {String(value.previous_observed ?? "-")}</span>
-                    <span>비교 기준: {String(value.normal)}</span>
-                    <em>직전 1초 대비 변화율: {formatStepMetricLabel(value.abnormal_percent)}</em>
+                    <span className={ui.muted}>관측: {String(value.observed ?? "-")}</span>
+                    <span className={ui.muted}>직전 스냅샷: {String(value.previous_observed ?? "-")}</span>
+                    <span className={ui.muted}>비교 기준: {String(value.normal)}</span>
+                    <em className="text-[var(--accent)] not-italic">
+                      직전 1초 대비 변화율: {formatStepMetricLabel(value.abnormal_percent)}
+                    </em>
                   </div>
                 ))}
               </div>
@@ -675,50 +888,107 @@ function RulePanel({
   ruleDraft,
   selectedRuleId,
   ruleEditor,
+  selectedActionId,
+  actionEditor,
   onRuleSelect,
+  onActionSelect,
   onReload,
   onReplay
 }) {
   return (
-    <section className="panel rule-panel">
-      <div className="panel-heading">
+    <section className={cn(ui.panel, ui.rulePanel)}>
+      <div className={ui.panelHeading}>
         <div>
-          <p className="eyebrow">Rule Lab</p>
-          <h2>Rule / Threshold 수정 및 Replay</h2>
+          <p className={ui.eyebrow}>Rule Lab</p>
+          <h2 className={ui.heading}>Rule / Action / Threshold</h2>
         </div>
-        <div className="rule-actions">
-          <button onClick={onReload}>새로고침</button>
-          <button onClick={onReplay}>Replay</button>
+        <div className={ui.btnRow}>
+          <button type="button" className={ui.btnPill} onClick={onReload}>
+            새로고침
+          </button>
+          <button type="button" className={ui.btnPill} onClick={onReplay}>
+            Replay
+          </button>
         </div>
       </div>
 
-      <div className="rule-grid">
+      <div className={ui.ruleGrid}>
         <div>
-          <h3>현재 Rule</h3>
-          <div className="rule-list">
+          <h3 className="m-0 mb-3">Rule 목록</h3>
+          <div className={ui.ruleList}>
             {rules ? (
               Object.entries(rules.rules).map(([ruleId, rule]) => (
                 <button
+                  type="button"
                   key={ruleId}
-                  className={`rule-list-item ${selectedRuleId === ruleId ? "active" : ""}`}
+                  className={cn(
+                    ui.ruleListItem,
+                    selectedRuleId === ruleId && ui.ruleListItemActive
+                  )}
                   onClick={() => onRuleSelect(ruleId)}
                 >
-                  <strong>{ruleId} · {rule.name}</strong>
-                  <span>{rule.enabled ? "활성" : "비활성"} · {rule.subsystems.join(", ")}</span>
+                  <strong>
+                    {ruleId} · {rule.name}
+                  </strong>
+                  <span className={ui.muted}>
+                    {rule.enabled ? "활성" : "비활성"} · {rule.subsystems.join(", ")}
+                  </span>
                 </button>
               ))
             ) : (
-              <p className="muted">Rule을 불러오는 중입니다.</p>
+              <p className={ui.muted}>Rule을 불러오는 중입니다.</p>
             )}
           </div>
         </div>
         <div>
-          <h3>Rule JSON</h3>
-          <textarea value={ruleEditor} readOnly />
+          <h3 className="m-0 mb-3">Rule JSON (읽기 전용)</h3>
+          <textarea
+            className={cn(ui.jsonArea, ui.jsonAreaReadOnly)}
+            value={ruleEditor}
+            readOnly
+          />
         </div>
         <div>
-          <h3>Threshold JSON</h3>
-          <textarea value={ruleDraft} readOnly />
+          <h3 className="m-0 mb-3">Threshold JSON (읽기 전용)</h3>
+          <textarea className={cn(ui.jsonArea, ui.jsonAreaReadOnly)} value={ruleDraft} readOnly />
+        </div>
+      </div>
+
+      <p className={cn(ui.muted, "mt-4 mb-2 text-sm")}>
+        Action 추가·수정·삭제는 Replay 모드에서만 가능합니다.
+      </p>
+
+      <div className={ui.ruleGridTwo}>
+        <div>
+          <h3 className="m-0 mb-3">Action 목록</h3>
+          <div className={ui.ruleList}>
+            {rules ? (
+              Object.entries(rules.actions || {}).map(([actionId, action]) => (
+                <button
+                  type="button"
+                  key={actionId}
+                  className={cn(
+                    ui.ruleListItem,
+                    selectedActionId === actionId && ui.ruleListItemActive
+                  )}
+                  onClick={() => onActionSelect(actionId)}
+                >
+                  <strong>
+                    {actionId} · {action.name}
+                  </strong>
+                  <span className={ui.muted}>
+                    {action.module} · P{action.phase}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <p className={ui.muted}>Action을 불러오는 중입니다.</p>
+            )}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <h3 className="m-0 mb-3">Action JSON (읽기 전용)</h3>
+          <textarea className={cn(ui.jsonArea, ui.jsonAreaReadOnly)} value={actionEditor} readOnly />
         </div>
       </div>
     </section>
@@ -726,13 +996,17 @@ function RulePanel({
 }
 
 function ReplayWorkspace({
-  dashboard,
   comparison,
+  replayNotice,
   replayRules,
   replayThresholdDraft,
   replayRuleId,
   replayNewRuleId,
   replayRuleEditor,
+  replayActions,
+  replayActionId,
+  replayNewActionId,
+  replayActionEditor,
   replayBusy,
   replayUpdatedAt,
   replayDirty,
@@ -741,71 +1015,160 @@ function ReplayWorkspace({
   onRuleEditorChange,
   onThresholdDraftChange,
   onStartNewRule,
-  onSaveRule,
   onDeleteRule,
-  onSaveThresholds,
-  onReplay
+  onActionSelect,
+  onNewActionIdChange,
+  onActionEditorChange,
+  onStartNewAction,
+  onDeleteAction,
+  onReplay,
+  onApplyAll
 }) {
-  if (!dashboard) {
-    return <section className="panel">replay 결과를 생성하는 중입니다. "퍼센트 안 알려주면 언제까지 기다려 라고 생각할 듯"</section>;
-  }
+  const actionCount = Object.keys(replayActions || {}).length;
+  const ruleCount = Object.keys(replayRules || {}).length;
 
   return (
-    <section className="replay-layout">
-      <section className="panel rule-panel">
-        <div className="panel-heading">
+    <section className={ui.replayLayout}>
+      {replayNotice ? (
+        <section
+          className={cn(
+            ui.infoBanner,
+            replayDirty && !replayBusy && "border-yellow-400/40 bg-yellow-400/15"
+          )}
+        >
+          {replayBusy ? <span className={cn(ui.replaySpinner, "mr-2")} aria-hidden /> : null}
+          {replayNotice}
+        </section>
+      ) : null}
+      <p className={cn(ui.muted, "m-0 text-sm")}>
+        임시 Rule {ruleCount}개 · Action {actionCount}개
+        {replayDirty ? " · 변경됨 (Replay 실행 필요)" : ""}
+        {replayBusy ? " · 서버 처리 중…" : ""}
+      </p>
+      <section className={cn(ui.panel, ui.rulePanel)}>
+        <div className={ui.panelHeading}>
           <div>
-            <p className="eyebrow">Temporary Rule Edit</p>
-            <h2>Replay</h2>
+            <p className={ui.eyebrow}>Temporary Rule Edit</p>
+            <h2 className={ui.heading}>Replay</h2>
           </div>
-          <div className="rule-actions /* 초기화 버튼 필요함 + 추가/삭제 진행 시 자동 Replay 실행 삭제 + 저장 버튼 삭제 + 실행 시 자동 저장*/">
-            <button onClick={onStartNewRule}>Rule 추가</button>
-            <button onClick={onSaveRule}>Rule 저장</button>
-            <button onClick={onDeleteRule}>Rule 삭제</button>
-            <button onClick={onSaveThresholds}>Threshold 저장</button>
-            <button onClick={onReplay} disabled={replayBusy}>
+          <div className={ui.btnRow}>
+            <button type="button" className={ui.btnPill} onClick={onStartNewRule}>
+              Rule 추가
+            </button>
+            <button type="button" className={ui.btnPill} onClick={onDeleteRule}>
+              Rule 삭제
+            </button>
+            <button type="button" className={ui.btnPill} onClick={onReplay} disabled={replayBusy}>
               {replayBusy ? "Replay 실행 중..." : "Replay 실행"}
             </button>
           </div>
         </div>
-        <div className="rule-grid">
+        <div className={ui.ruleGrid}>
           <div>
-            <h3>Rule</h3>
-            <div className="rule-list">
+            <h3 className="m-0 mb-3">Rule</h3>
+            <div className={ui.ruleList}>
               {Object.entries(replayRules || {}).map(([ruleId, rule]) => (
                 <button
+                  type="button"
                   key={ruleId}
-                  className={`rule-list-item ${replayRuleId === ruleId ? "active" : ""}`}
+                  className={cn(
+                    ui.ruleListItem,
+                    (replayNewRuleId || replayRuleId) === ruleId && ui.ruleListItemActive
+                  )}
                   onClick={() => onRuleSelect(ruleId)}
                 >
-                  <strong>{ruleId} · {rule.name}</strong>
-                  <span>{rule.enabled ? "활성" : "비활성"} · {(rule.subsystems || []).join(", ")}</span>
+                  <strong>
+                    {ruleId} · {rule.name}
+                  </strong>
+                  <span className={ui.muted}>
+                    {rule.enabled ? "활성" : "비활성"} · {(rule.subsystems || []).join(", ")}
+                  </span>
                 </button>
               ))}
             </div>
           </div>
           <div>
-            <h3>Rule JSON</h3>
-            <label className="threshold-inline">
+            <h3 className="m-0 mb-3">Rule JSON</h3>
+            <label className={ui.thresholdInline}>
               <input
-              className="rule-id-input"
-              placeholder="새 Rule ID"
-              value={replayNewRuleId}
-              onChange={(event) => onNewRuleIdChange(event.target.value)}
-            />
-              <span>활성화 임계값(score_threshold)</span>
+                className={ui.ruleIdInput}
+                placeholder="Rule ID"
+                value={replayNewRuleId || replayRuleId || ""}
+                onChange={(event) => onNewRuleIdChange(event.target.value)}
+              />
+              <span className={ui.muted}>활성화 임계값(score_threshold)</span>
               <input
+                className={ui.ruleIdInput}
                 type="number"
                 step="0.05"
                 value={readRuleThreshold(replayRuleEditor)}
-                onChange={(event) => onRuleEditorChange(updateRuleThreshold(replayRuleEditor, event.target.value))}
+                onChange={(event) =>
+                  onRuleEditorChange(updateRuleThreshold(replayRuleEditor, event.target.value))
+                }
               />
             </label>
-            <textarea value={replayRuleEditor} onChange={(event) => onRuleEditorChange(event.target.value)} />
+            <textarea
+              className={ui.jsonArea}
+              value={replayRuleEditor}
+              onChange={(event) => onRuleEditorChange(event.target.value)}
+            />
           </div>
           <div>
-            <h3>Threshold JSON</h3>
-            <textarea value={replayThresholdDraft} onChange={(event) => onThresholdDraftChange(event.target.value)} />
+            <h3 className="m-0 mb-3">Threshold JSON</h3>
+            <textarea
+              className={ui.jsonArea}
+              value={replayThresholdDraft}
+              onChange={(event) => onThresholdDraftChange(event.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className={cn(ui.btnRow, "mt-4")}>
+          <input
+            className={cn(ui.ruleIdInput, "mb-0 flex-1")}
+            placeholder="Action ID (예: A015)"
+            value={replayNewActionId || replayActionId || ""}
+            onChange={(event) => onNewActionIdChange(event.target.value)}
+          />
+          <button type="button" className={ui.btnPill} onClick={onStartNewAction}>
+            Action 추가
+          </button>
+          <button type="button" className={ui.btnPill} onClick={onDeleteAction}>
+            Action 삭제
+          </button>
+        </div>
+
+        <div className={ui.ruleGridTwo}>
+          <div>
+            <h3 className="m-0 mb-3">Action</h3>
+            <div className={ui.ruleList}>
+              {Object.entries(replayActions || {}).map(([actionId, action]) => (
+                <button
+                  type="button"
+                  key={actionId}
+                  className={cn(
+                    ui.ruleListItem,
+                    (replayNewActionId || replayActionId) === actionId && ui.ruleListItemActive
+                  )}
+                  onClick={() => onActionSelect(actionId)}
+                >
+                  <strong>
+                    {actionId} · {action.name}
+                  </strong>
+                  <span className={ui.muted}>
+                    {action.module} · P{action.phase}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="min-w-0">
+            <h3 className="m-0 mb-3">Action JSON</h3>
+            <textarea
+              className={ui.jsonArea}
+              value={replayActionEditor}
+              onChange={(event) => onActionEditorChange(event.target.value)}
+            />
           </div>
         </div>
       </section>
@@ -814,45 +1177,72 @@ function ReplayWorkspace({
         replayBusy={replayBusy}
         replayDirty={replayDirty}
         replayUpdatedAt={replayUpdatedAt}
+        onApplyAll={onApplyAll}
       />
     </section>
   );
 }
 
-function ReplayComparison({ comparison, replayBusy, replayDirty, replayUpdatedAt }) {
+function ReplayComparison({
+  comparison,
+  replayBusy,
+  replayDirty,
+  replayUpdatedAt,
+  onApplyAll
+}) {
   if (!comparison) {
     return (
-      <section className="panel replay-comparison empty">
-        <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
-          {replayBusy
-            ? "Replay 실행 중..."
-            : replayDirty
-              ? "변경사항이 있습니다. Replay 실행을 눌러 비교 결과를 생성하세요."
-              : "Rule/Threshold를 수정한 뒤 Replay 실행"}
+      <section className={ui.panel}>
+        <h3 className="m-0 mb-3">탐지 결과 비교</h3>
+        <div className={cn(ui.replayStatus, replayBusy && ui.replayStatusBusy)}>
+          {replayBusy ? (
+            <>
+              <span className={cn(ui.replaySpinner, "mr-2")} aria-hidden />
+              서버에서 Replay 미리보기를 계산하는 중입니다…
+            </>
+          ) : replayDirty ? (
+            "편집 내용이 바뀌었습니다. «Replay 실행»을 누르면 여기에 비교 결과가 표시됩니다."
+          ) : (
+            "Rule/Action/Threshold JSON을 수정한 뒤 «Replay 실행»을 누르세요."
+          )}
         </div>
       </section>
     );
   }
 
   return (
-    <section className="panel replay-comparison">
-      <div className="panel-heading">
+    <section className={ui.panel}>
+      <div className={ui.panelHeading}>
         <div>
-          <p className="eyebrow">Replay Diff</p>
-          <h2>기존 탐지 결과 vs 임시 기준 결과</h2>
+          <p className={ui.eyebrow}>Replay Diff</p>
+          <h2 className={ui.heading}>기존 탐지 결과 vs 임시 기준 결과</h2>
         </div>
-        <div className={`replay-status ${replayBusy ? "busy" : ""}`}>
-          {replayBusy ? "Replay 실행 중..." : `반영 ${replayUpdatedAt || ""}`}
+        <div className={cn(ui.replayStatus, replayBusy && ui.replayStatusBusy)}>
+          {replayBusy ? "Replay 실행 중..." : `미리보기 ${replayUpdatedAt || ""}`}
         </div>
       </div>
 
-      <div className="comparison-summary">
-        <span>기존 {comparison.current_count}개</span>
-        <span>Replay {comparison.preview_count}개</span>
-        <span>{comparison.delta_count >= 0 ? "+" : ""}{comparison.delta_count}개</span>
+      <div className={cn(ui.btnRow, "mb-4")}>
+        <button type="button" className={ui.btnPill} onClick={onApplyAll} disabled={replayBusy}>
+          {replayBusy ? "전체 저장·재분석 중…" : "전체 저장"}
+        </button>
+      </div>
+      <p className={cn(ui.muted, "m-0 mb-4 text-sm")}>
+        Rule·Threshold·Action을 JSON 파일에 모두 저장하고, 지상국에 쌓인 텔레메트리를
+        MAIntegratedDetector로 처음부터 다시 돌려 운영 대시보드를 갱신합니다. Replay 미리보기와
+        달리 이 단계에서만 실제 파일과 탐지 결과가 바뀝니다.
+      </p>
+
+      <div className={ui.comparisonSummary}>
+        <span className={ui.comparisonSummaryCell}>기존 {comparison.current_count}개</span>
+        <span className={ui.comparisonSummaryCell}>Replay {comparison.preview_count}개</span>
+        <span className={ui.comparisonSummaryCell}>
+          {comparison.delta_count >= 0 ? "+" : ""}
+          {comparison.delta_count}개
+        </span>
       </div>
 
-      <div className="comparison-grid">
+      <div className={ui.comparisonGrid}>
         <ComparisonColumn title="추가됨 +" items={comparison.added} kind="added" />
         <ComparisonColumn title="삭제됨 -" items={comparison.removed} kind="removed" />
         <ChangedColumn items={comparison.changed} />
@@ -863,18 +1253,20 @@ function ReplayComparison({ comparison, replayBusy, replayDirty, replayUpdatedAt
 
 function ComparisonColumn({ title, items, kind }) {
   return (
-    <div className="comparison-column">
-      <h3>{title}</h3>
+    <div className={ui.comparisonColumn}>
+      <h3 className="m-0 mb-3">{title}</h3>
       {items?.length ? (
         items.map((item) => (
-          <article key={`${kind}-${item.ma_code}`} className={`comparison-card ${kind}`}>
+          <article key={`${kind}-${item.ma_code}`} className={comparisonCardClass(kind)}>
             <strong>{item.ma_code}</strong>
-            <span>Phase {item.phase} · {item.confidence}% · {item.grade}</span>
-            <em>{item.detect_time}</em>
+            <span className={ui.muted}>
+              Phase {item.phase} · {item.confidence}% · {item.grade}
+            </span>
+            <em className={ui.muted}>{item.detect_time}</em>
           </article>
         ))
       ) : (
-        <p className="muted">변화 없음</p>
+        <p className={ui.muted}>변화 없음</p>
       )}
     </div>
   );
@@ -882,21 +1274,24 @@ function ComparisonColumn({ title, items, kind }) {
 
 function ChangedColumn({ items }) {
   return (
-    <div className="comparison-column">
-      <h3>변경됨 ±</h3>
+    <div className={ui.comparisonColumn}>
+      <h3 className="m-0 mb-3">변경됨 ±</h3>
       {items?.length ? (
         items.map((item) => (
-          <article key={`changed-${item.ma_code}`} className="comparison-card changed">
+          <article key={`changed-${item.ma_code}`} className={comparisonCardClass("changed")}>
             <strong>{item.ma_code}</strong>
-            <span>
-              {item.current.confidence}% → {item.preview.confidence}%
-              {" "}({item.confidence_delta >= 0 ? "+" : ""}{item.confidence_delta})
+            <span className={ui.muted}>
+              {item.current.confidence}% → {item.preview.confidence}% (
+              {item.confidence_delta >= 0 ? "+" : ""}
+              {item.confidence_delta})
             </span>
-            <em>Phase {item.current.phase} → {item.preview.phase}</em>
+            <em className={ui.muted}>
+              Phase {item.current.phase} → {item.preview.phase}
+            </em>
           </article>
         ))
       ) : (
-        <p className="muted">변화 없음</p>
+        <p className={ui.muted}>변화 없음</p>
       )}
     </div>
   );
@@ -930,6 +1325,16 @@ function defaultRuleDefinition() {
     single_sufficient: false,
     enabled: true,
     score_threshold: 0
+  };
+}
+
+function defaultActionDefinition() {
+  return {
+    name: "NEW_ATTACK_PATTERN",
+    module: "OBC",
+    phase: 1,
+    weight: 1.0,
+    description: "신규 공격 패턴 — Rule contributes_to와 함께 등록"
   };
 }
 

@@ -136,13 +136,16 @@ class DashboardService:
         )
         payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
         payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
+        payload["action_mapping_status"] = detection.get("action_mapping_status", "mapped")
+        payload["unregistered_action_ids"] = detection.get("unregistered_action_ids", [])
+        payload["triggered_rule_results"] = detection.get("triggered_rule_results", [])
         payload["novel_attack_advisory"] = self._novel_advisory_for_detection(detection)
         return payload
 
     def _novel_advisory_for_detection(self, detection: dict[str, Any]) -> dict[str, Any] | None:
-        """Return B-3 advisory only when the selected MA row is flagged is_new_pattern."""
+        """Return B-3 advisory when attack(Y) has no mapped Action or is_new_pattern."""
         try:
-            if not detection.get("is_new_pattern"):
+            if detection.get("action_mapping_status") != "undefined" and not detection.get("is_new_pattern"):
                 return None
             advisory = self.detector.get_latest_novel_advisory()
             if not advisory:
@@ -183,6 +186,26 @@ class DashboardService:
         self.detector.reload_config()
         return {"ok": ok, "rule_id": rule_id}
 
+    def upsert_action(self, action_id: str, definition: dict[str, Any]) -> dict[str, Any]:
+        """Create or replace an action definition and reload the detector config."""
+        if not action_id:
+            return {"ok": False, "error": "action_id is required"}
+        ok = self.registry_manager.add_action(action_id, definition)
+        self.detector.reload_config()
+        return {"ok": ok, "action_id": action_id}
+
+    def update_action(self, action_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        """Update an action definition and reload detector config."""
+        ok = self.registry_manager.update_action(action_id, updates)
+        self.detector.reload_config()
+        return {"ok": ok, "action_id": action_id}
+
+    def delete_action(self, action_id: str) -> dict[str, Any]:
+        """Delete an action definition and reload detector config."""
+        ok = self.registry_manager.delete_action(action_id)
+        self.detector.reload_config()
+        return {"ok": ok, "action_id": action_id}
+
     def update_threshold(self, category: str, key: str, value: float) -> dict[str, Any]:
         """Update a threshold value and reload detector config."""
         ok = self.registry_manager.update_threshold(category, key, value)
@@ -204,9 +227,10 @@ class DashboardService:
         rules: dict[str, Any],
         thresholds: dict[str, Any],
         packets: list[dict[str, Any]] | None = None,
+        actions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a replay with temporary rules and thresholds without changing saved config."""
-        detector = self._create_detector_with_config(rules, thresholds, packets)
+        detector = self._create_detector_with_config(rules, thresholds, packets, actions)
         current_dashboard = self.get_dashboard_state()
         preview_dashboard = self._get_dashboard_state_for_detector(detector)
         return {
@@ -218,15 +242,44 @@ class DashboardService:
             "thresholds": thresholds,
         }
 
-    def apply_replay_config(self, rules: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
+    def apply_replay_config(
+        self,
+        rules: dict[str, Any],
+        thresholds: dict[str, Any],
+        actions: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Persist replay settings and rebuild detector state from scratch."""
         rules_ok = self.registry_manager.replace_rules(rules)
         thresholds_ok = self.registry_manager.replace_thresholds(thresholds)
-        if not (rules_ok and thresholds_ok):
+        actions_ok = True
+        if actions is not None:
+            actions_ok = self.registry_manager.replace_actions(actions)
+        if not (rules_ok and thresholds_ok and actions_ok):
             return {"ok": False, "error": "config persistence failed"}
 
-        self.detector = self._create_detector_with_config(rules, thresholds, None)
+        self.detector = self._create_detector_with_config(rules, thresholds, None, actions)
         return {"ok": True, "dashboard": self.get_dashboard_state()}
+
+    def persist_rules(self, rules: dict[str, Any]) -> dict[str, Any]:
+        """Write the full rule registry to disk and reload the live detector."""
+        ok = self.registry_manager.replace_rules(rules)
+        if ok:
+            self.detector.reload_config()
+        return {"ok": ok, "target": "rule_registry.json"}
+
+    def persist_thresholds(self, thresholds: dict[str, Any]) -> dict[str, Any]:
+        """Write threshold config to disk and reload the live detector."""
+        ok = self.registry_manager.replace_thresholds(thresholds)
+        if ok:
+            self.detector.reload_config()
+        return {"ok": ok, "target": "threshold_config.json"}
+
+    def persist_actions(self, actions: dict[str, Any]) -> dict[str, Any]:
+        """Write the full action registry to disk and reload the live detector."""
+        ok = self.registry_manager.replace_actions(actions)
+        if ok:
+            self.detector.reload_config()
+        return {"ok": ok, "target": "action_registry.json"}
 
     def _dashboard_detection_by_id(self, detect_id: int) -> dict[str, Any]:
         try:
@@ -242,9 +295,12 @@ class DashboardService:
         rules: dict[str, Any],
         thresholds: dict[str, Any],
         packets: list[dict[str, Any]] | None,
+        actions: dict[str, Any] | None = None,
     ) -> MAIntegratedDetector:
         detector = MAIntegratedDetector()
-        detector._action_registry = self.detector.get_action_registry()
+        detector._action_registry = (
+            actions if actions is not None else self.detector.get_action_registry()
+        )
         detector._rule_registry = rules
         merge_default_activations(detector._rule_registry)
         detector._threshold_config = thresholds
@@ -341,6 +397,10 @@ class DashboardService:
             "evidence_keys": row.get("EVIDENCE_KEYS", {}),
             "matches_satellite_target": matches_target,
             "is_new_pattern": bool(row.get("IS_NEW_PATTERN")),
+            "action_mapping_status": str(row.get("ACTION_MAPPING_STATUS", "mapped")),
+            "triggered_rule_ids": list(row.get("TRIGGERED_RULE_IDS", [])),
+            "unregistered_action_ids": list(row.get("UNREGISTERED_ACTION_IDS", [])),
+            "triggered_rule_results": list(row.get("TRIGGERED_RULE_RESULTS", [])),
             "satellite_filter": {
                 "result": row.get("FALSE_POSITIVE_RESULT"),
                 "weight": row.get("FALSE_POSITIVE_WEIGHT"),
@@ -445,8 +505,16 @@ class DashboardService:
         previous_snapshot: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         rules = self.detector.get_rule_registry()
+        actions = self.detector.get_action_registry()
+        triggered_results = {
+            str(item.get("rule_id", "")): item
+            for item in (detection.get("triggered_rule_results") or [])
+            if item.get("rule_id")
+        }
+        rule_ids = detection.get("triggered_rule_ids") or list(evidence_keys.keys())
         details = []
-        for rule_id, rule_name in evidence_keys.items():
+        for rule_id in rule_ids:
+            rule_name = evidence_keys.get(rule_id) or rules.get(rule_id, {}).get("name", rule_id)
             rule = rules.get(rule_id, {})
             columns = rule.get("columns", [])
             column_values = {
@@ -457,18 +525,40 @@ class DashboardService:
                     "previous_observed": (previous_snapshot or {}).get(column),
                 }
                 for column in columns
-                if column in snapshot
             }
+            contributes = rule.get("contributes_to", {})
+            mapped_actions = []
+            unmapped_actions = []
+            for action_id, weight in contributes.items():
+                action_def = actions.get(action_id)
+                entry = {
+                    "action_id": action_id,
+                    "weight": weight,
+                    "registered": action_def is not None,
+                    "name": (action_def or {}).get("name", "(미등록)"),
+                    "module": (action_def or {}).get("module", "-"),
+                    "phase": (action_def or {}).get("phase", "-"),
+                }
+                if action_def is None:
+                    unmapped_actions.append(entry)
+                else:
+                    mapped_actions.append(entry)
+            result = triggered_results.get(rule_id, {})
             details.append(
                 {
                     "rule_id": rule_id,
                     "name": rule_name,
+                    "rule_score": result.get("score"),
+                    "triggered": result.get("triggered", rule_id in evidence_keys),
                     "first_triggered_at": detection.get("detect_time"),
                     "subsystems": rule.get("subsystems", []),
                     "columns": column_values,
-                    "contributes_to": rule.get("contributes_to", {}),
+                    "contributes_to": contributes,
+                    "mapped_actions": mapped_actions,
+                    "unmapped_actions": unmapped_actions,
                     "single_sufficient": rule.get("single_sufficient", False),
                     "activation": rule.get("activation", {}),
+                    "evidence": result.get("evidence", {}),
                 }
             )
         return details

@@ -8,10 +8,14 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "clsx": "^2.1.1",
     "next": "latest",
     "postcss": "^8.5.14",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.0"
   },
   "overrides": {
     "next": {
