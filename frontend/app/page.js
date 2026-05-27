@@ -301,7 +301,7 @@ export default function DashboardPage() {
   async function deleteReplayRule() {
     try {
       if (!replayRuleId) {
-        setError("삭제할 임시 Rule을 선택하세요.");
+        setError("삭제할 Rule을 선택하세요.");
         return;
       }
       const nextRules = { ...(replayRules || {}) };
@@ -334,7 +334,7 @@ export default function DashboardPage() {
   async function deleteReplayAction() {
     try {
       if (!replayActionId) {
-        setError("삭제할 임시 Action을 선택하세요.");
+        setError("삭제할 Action을 선택하세요.");
         return;
       }
       const nextActions = { ...(replayActions || {}) };
@@ -430,8 +430,7 @@ export default function DashboardPage() {
       <main className={ui.shell}>
         <header className={ui.topbar}>
           <div>
-            <p className={ui.eyebrow}>Temporary Replay</p>
-            <h1 className={ui.heading}>Replay 임시 결과</h1>
+            <h1 className="text-2xl font-bold">Replay 결과</h1>
           </div>
           <div className={ui.btnRow}>
             <button type="button" className={ui.btnPill} onClick={closeReplayMode}>
@@ -493,7 +492,7 @@ export default function DashboardPage() {
       <header className={ui.topbar}>
         <div>
           <p className={ui.eyebrow}>MATADOR Ground Station</p>
-          <h1 className={ui.heading}>MA 통합 탐지 대시보드</h1>
+          <h1 className="text-2xl font-bold">MA 통합 탐지 대시보드</h1>
         </div>
         <button
           type="button"
@@ -505,7 +504,7 @@ export default function DashboardPage() {
             }
           }}
         >
-          {rulesOpen ? "닫기" : "Rule"}
+          {rulesOpen ? "닫기" : "Rule/Threshold/Action"}
         </button>
       </header>
 
@@ -559,50 +558,57 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
   return (
     <section className={ui.panel}>
       <div className={ui.panelHeading}>
-        <div>
-          <p className={ui.eyebrow}>최근 5회 통신 기반</p>
-          <h2 className={ui.heading}>위성체 Blueprint</h2>
+        <div className="text-center">
+          <p className={ui.eyebrow}>최근 5회 통신 기반 위성체 Blueprint</p>
         </div>
       </div>
 
-      <div className={ui.satelliteMap}>
-        {Object.values(blueprint).map((subsystem) => (
-          <article
-            key={subsystem.name}
-            className={cn(severityCardClass(subsystem.severity), subsystemAreaClass(subsystem.name))}
-          >
-            <div className={ui.subsystemTitle}>
-              <strong>{subsystem.name}</strong>
-              <span className={severityTextClass(subsystem.severity)}>
-                {severityLabel[subsystem.severity]}
-              </span>
-            </div>
-            <div className={ui.codeStack}>
-              {subsystem.detections.length ? (
-                subsystem.detections.slice(-3).map((detection) => (
-                  <button
-                    type="button"
-                    key={`${subsystem.name}-${detection.detect_id}`}
-                    className={ui.codeChip}
-                    onClick={() => onSelect(detection.detect_id)}
-                  >
-                    <span className={ui.muted}>{detection.ma_code}</span>
-                    <b className="text-[var(--accent)] not-italic">P{detection.phase}</b>
-                    <em className="text-[var(--accent)] not-italic">{detection.confidence}%</em>
-                  </button>
-                ))
-              ) : (
-                <span className={ui.muted}>최근 위협 없음</span>
-              )}
-            </div>
-          </article>
-        ))}
+      <div className="grid grid-cols-6 gap-4 w-full">
+  {Object.values(blueprint).map((subsystem, index) => (
+    <article
+      key={subsystem.name}
+      className={cn(
+        // 상단 3개는 6칸 중 2칸씩(col-span-2), 하단 2개는 3칸씩(col-span-3) 차지
+        index < 3 ? "col-span-2" : "col-span-3",
+        "flex flex-col justify-between min-h-[140px]", 
+        severityCardClass(subsystem.severity), 
+        subsystemAreaClass(subsystem.name)
+      )}
+    >
+      {/* 1. 타이틀 영역 */}
+      <div className={ui.subsystemTitle}>
+        <strong>{subsystem.name}</strong>
+        <span className={severityTextClass(subsystem.severity)}>
+          {severityLabel[subsystem.severity]}
+        </span>
       </div>
+      
+      {/* 2. 버튼 및 상태 영역 (생략 없이 복구 완료!) */}
+      <div className={ui.codeStack}>
+        {subsystem.detections.length ? (
+          subsystem.detections.slice(-3).map((detection) => (
+            <button
+              type="button"
+              key={`${subsystem.name}-${detection.detect_id}`}
+              className={ui.codeChip}
+              onClick={() => onSelect(detection.detect_id)}
+            >
+              <span className="text-s font-mono">{detection.ma_code}</span>
+              <b className="text-[var(--accent)] not-italic">P{detection.phase}</b>
+              <em className="text-[var(--accent)] not-italic">{detection.confidence}%</em>
+            </button>
+          ))
+        ) : (
+          <span className={ui.muted}>최근 위협 없음</span>
+        )}
+      </div>
+    </article>
+  ))}
+</div>
 
       <section className={ui.recentThreats}>
         <div className={ui.recentThreatHeading}>
           <h3 className="m-0 mb-3">최근 5회 위협</h3>
-          <span className={ui.recentThreatBadge}>{recentThreats?.length || 0}건</span>
         </div>
         {recentThreats?.length ? (
           <div className={ui.recentThreatTrack}>
@@ -613,7 +619,7 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
                 className={cn(ui.threatRow, severityCardClass(threat.severity))}
                 onClick={() => onSelect(threat.detect_id)}
               >
-                <strong>{threat.ma_code}</strong>
+                <span className="text-s font-mono"><strong>{threat.ma_code}</strong></span>
                 {threat.action_mapping_status === "undefined" ? (
                   <span className={statusPillClass("undefined")}>Action 미매핑</span>
                 ) : null}
@@ -652,7 +658,6 @@ function RightPanel({
     <section className={ui.panel}>
       <div className={ui.selectorRow}>
         <label className={cn(ui.searchBox, "min-w-[360px] flex-[1.2_1_360px]")}>
-          <span>통신</span>
           <select
             className={ui.searchSelect}
             value={selectedCommunicationAt || latest.communicated_at || ""}
@@ -898,11 +903,7 @@ function RulePanel({
   return (
     <section className={cn(ui.panel, ui.rulePanel)}>
       <div className={ui.panelHeading}>
-        <div>
-          <p className={ui.eyebrow}>Rule Lab</p>
-          <h2 className={ui.heading}>Rule / Action / Threshold</h2>
-        </div>
-        <div className={ui.btnRow}>
+        <div className="font-semibold gap-2 flex ml-auto">
           <button type="button" className={ui.btnPill} onClick={onReload}>
             새로고침
           </button>
@@ -941,7 +942,7 @@ function RulePanel({
           </div>
         </div>
         <div>
-          <h3 className="m-0 mb-3">Rule JSON (읽기 전용)</h3>
+          <h3 className="m-0 mb-3">Rule JSON</h3>
           <textarea
             className={cn(ui.jsonArea, ui.jsonAreaReadOnly)}
             value={ruleEditor}
@@ -949,14 +950,10 @@ function RulePanel({
           />
         </div>
         <div>
-          <h3 className="m-0 mb-3">Threshold JSON (읽기 전용)</h3>
+          <h3 className="m-0 mb-3">Threshold JSON</h3>
           <textarea className={cn(ui.jsonArea, ui.jsonAreaReadOnly)} value={ruleDraft} readOnly />
         </div>
       </div>
-
-      <p className={cn(ui.muted, "mt-4 mb-2 text-sm")}>
-        Action 추가·수정·삭제는 Replay 모드에서만 가능합니다.
-      </p>
 
       <div className={ui.ruleGridTwo}>
         <div>
@@ -987,7 +984,7 @@ function RulePanel({
           </div>
         </div>
         <div className="min-w-0">
-          <h3 className="m-0 mb-3">Action JSON (읽기 전용)</h3>
+          <h3 className="m-0 mb-3">Action JSON</h3>
           <textarea className={cn(ui.jsonArea, ui.jsonAreaReadOnly)} value={actionEditor} readOnly />
         </div>
       </div>
@@ -1041,15 +1038,13 @@ function ReplayWorkspace({
         </section>
       ) : null}
       <p className={cn(ui.muted, "m-0 text-sm")}>
-        임시 Rule {ruleCount}개 · Action {actionCount}개
+        Rule {ruleCount}개 · Action {actionCount}개
         {replayDirty ? " · 변경됨 (Replay 실행 필요)" : ""}
         {replayBusy ? " · 서버 처리 중…" : ""}
       </p>
       <section className={cn(ui.panel, ui.rulePanel)}>
         <div className={ui.panelHeading}>
           <div>
-            <p className={ui.eyebrow}>Temporary Rule Edit</p>
-            <h2 className={ui.heading}>Replay</h2>
           </div>
           <div className={ui.btnRow}>
             <button type="button" className={ui.btnPill} onClick={onStartNewRule}>
@@ -1066,7 +1061,7 @@ function ReplayWorkspace({
         <div className={ui.ruleGrid}>
           <div>
             <h3 className="m-0 mb-3">Rule</h3>
-            <div className={ui.ruleList}>
+            <div className={ui.ruleListEdit}>
               {Object.entries(replayRules || {}).map(([ruleId, rule]) => (
                 <button
                   type="button"
@@ -1116,7 +1111,7 @@ function ReplayWorkspace({
           <div>
             <h3 className="m-0 mb-3">Threshold JSON</h3>
             <textarea
-              className={ui.jsonArea}
+              className={ui.jsonAreaEdit}
               value={replayThresholdDraft}
               onChange={(event) => onThresholdDraftChange(event.target.value)}
             />
@@ -1215,23 +1210,12 @@ function ReplayComparison({
       <div className={ui.panelHeading}>
         <div>
           <p className={ui.eyebrow}>Replay Diff</p>
-          <h2 className={ui.heading}>기존 탐지 결과 vs 임시 기준 결과</h2>
+          <h2 className={ui.heading}>기존 탐지 결과 vs Replay 기준 결과</h2>
         </div>
-        <div className={cn(ui.replayStatus, replayBusy && ui.replayStatusBusy)}>
-          {replayBusy ? "Replay 실행 중..." : `미리보기 ${replayUpdatedAt || ""}`}
-        </div>
-      </div>
-
-      <div className={cn(ui.btnRow, "mb-4")}>
         <button type="button" className={ui.btnPill} onClick={onApplyAll} disabled={replayBusy}>
           {replayBusy ? "전체 저장·재분석 중…" : "전체 저장"}
         </button>
       </div>
-      <p className={cn(ui.muted, "m-0 mb-4 text-sm")}>
-        Rule·Threshold·Action을 JSON 파일에 모두 저장하고, 지상국에 쌓인 텔레메트리를
-        MAIntegratedDetector로 처음부터 다시 돌려 운영 대시보드를 갱신합니다. Replay 미리보기와
-        달리 이 단계에서만 실제 파일과 탐지 결과가 바뀝니다.
-      </p>
 
       <div className={ui.comparisonSummary}>
         <span className={ui.comparisonSummaryCell}>기존 {comparison.current_count}개</span>

@@ -10,7 +10,7 @@ export const ui = {
   panelHeading: "flex min-w-0 items-center justify-between gap-4",
   dashboardGrid: "grid w-full grid-cols-1 gap-5",
   btnPill:
-    "cursor-pointer rounded-full border border-[var(--button-border)] bg-[var(--button-bg)] px-4 py-2.5 text-[var(--accent)]",
+    "cursor-pointer rounded-full border border-[var(--button-border)] bg-[var(--button-bg)] px-4 py-2.5 text-[var(--accent)] ",
   btnRow: "flex flex-wrap gap-2",
   errorBanner:
     "mb-4 rounded-2xl border border-red-400/40 bg-red-500/10 p-3.5",
@@ -57,13 +57,15 @@ export const ui = {
     "mt-4 grid items-start gap-2.5 lg:grid-cols-[minmax(260px,0.85fr)_minmax(0,1fr)_minmax(0,1fr)]",
   ruleGridTwo:
     "mt-3 grid items-start gap-2.5 md:grid-cols-[minmax(220px,0.85fr)_minmax(0,1.15fr)]",
-  ruleList: "grid max-h-[360px] gap-2 overflow-auto",
+  ruleList: "grid max-h-[300px] gap-2 overflow-auto",
+  ruleListEdit: "grid max-h-[460px] gap-2 overflow-auto",
   ruleListItem:
     "grid gap-1 rounded-xl border border-transparent bg-[var(--soft-card-bg)] p-2.5 text-left text-[var(--text)]",
   ruleListItemActive:
     "border-cyan-400/45 bg-cyan-400/10",
   jsonArea:
     "min-h-[300px] w-full overflow-auto rounded-xl border border-[var(--line)] bg-[var(--input-bg)] p-3 text-[var(--text)]",
+  jsonAreaEdit: "min-h-[460px] w-full overflow-auto rounded-xl border border-[var(--line)] bg-[var(--input-bg)] p-3 text-[var(--text)]",
   jsonAreaReadOnly: "resize-none",
   ruleIdInput:
     "mb-2.5 w-full rounded-xl border border-[var(--line)] bg-[var(--input-bg)] p-3 text-[var(--text)]",
