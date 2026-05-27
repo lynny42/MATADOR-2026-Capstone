@@ -12,6 +12,7 @@ from typing import Any
 
 from ma_detector.core.baseline import BaselineManager
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.rule_activation import merge_default_activations
 from ma_detector.core.target_context import (
     build_novel_attack_advisory,
     normalize_target_subsystem,
@@ -54,6 +55,7 @@ class MAIntegratedDetector:
                 self._rule_registry,
                 self._threshold_config,
             ) = self._registry_manager.load_all()
+            merge_default_activations(self._rule_registry)
 
             self._baseline_manager = BaselineManager()
             self._evidence_rules = EvidenceRules(self._baseline_manager, self._threshold_config)
@@ -144,6 +146,7 @@ class MAIntegratedDetector:
                 self._rule_registry,
                 self._threshold_config,
             ) = self._registry_manager.load_all()
+            merge_default_activations(self._rule_registry)
             self._evidence_rules = EvidenceRules(self._baseline_manager, self._threshold_config)
         except Exception as error:
             logger.error("reload config failed: %s", error)
@@ -296,7 +299,7 @@ class MAIntegratedDetector:
                 if not rule_def.get("enabled", True):
                     continue
 
-                rule_score = self._evidence_rules.evaluate(rule_id, typed_window)
+                rule_score = self._evidence_rules.evaluate(rule_id, typed_window, rule_def)
                 score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
                 if rule_score <= 0.0 or rule_score < score_threshold:
                     continue
@@ -637,15 +640,90 @@ class MAIntegratedDetector:
             logger.error("unexpected get UI data failure: %s", error)
             return json.dumps({"error": str(error)}, ensure_ascii=False)
 
+    def get_snapshot_series(self, reference_time: str | None = None) -> list[dict[str, Any]]:
+        """Return up to 600 snapshots (1 Hz series) ending at reference_time within the analysis window."""
+        try:
+            evaluation = self._threshold_config.get("evaluation", {})
+            window_seconds = int(evaluation.get("series_seconds", self._window_size_sec))
+            history = sorted(
+                self._gs_tlm_history,
+                key=lambda row: self._timestamp_to_epoch(row.get("UPDATED_AT", 0)),
+            )
+            if not history:
+                return []
+            anchor_epoch = self._timestamp_to_epoch(reference_time) if reference_time else None
+            if anchor_epoch is None:
+                anchor_epoch = self._timestamp_to_epoch(history[-1].get("UPDATED_AT", time.time()))
+            cutoff = anchor_epoch - window_seconds
+            series = [
+                dict(row)
+                for row in history
+                if cutoff <= self._timestamp_to_epoch(row.get("UPDATED_AT", 0)) <= anchor_epoch
+            ]
+            max_points = int(evaluation.get("series_max_points", window_seconds))
+            if len(series) > max_points:
+                series = series[-max_points:]
+            return series
+        except Exception as error:
+            logger.error("snapshot series lookup failed: %s", error)
+            return []
+
+    def get_snapshot_frame(
+        self,
+        reference_time: str | None,
+        snapshot_index: int | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]]]:
+        """Return (previous, current, full_series) for one frame inside the 1-second snapshot series."""
+        try:
+            series = self.get_snapshot_series(reference_time)
+            if not series:
+                return None, None, []
+            index = snapshot_index if snapshot_index is not None else len(series) - 1
+            index = max(0, min(int(index), len(series) - 1))
+            current = series[index]
+            previous = series[index - 1] if index > 0 else None
+            return previous, current, series
+        except Exception as error:
+            logger.error("snapshot frame lookup failed: %s", error)
+            return None, None, []
+
+    def get_step_snapshots_for_time(self, detect_time: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Backward-compatible wrapper that returns the last frame in the snapshot series."""
+        try:
+            previous, current, _series = self.get_snapshot_frame(detect_time, None)
+            return previous, current
+        except Exception as error:
+            logger.error("step snapshot lookup failed: %s", error)
+            return None, None
+
+    def _build_evaluation_window(self) -> list[dict[str, Any]]:
+        """Build rule evaluation window as a 10-minute 1 Hz snapshot series (up to 600 points)."""
+        try:
+            if not self._telemetry_window:
+                return []
+            mode = str(
+                self._threshold_config.get("evaluation", {}).get("default_window_mode", "snapshot_series")
+            ).strip()
+            current = dict(self._telemetry_window[-1])
+            anchor_time = str(current.get("UPDATED_AT") or current.get("DETECTED_AT") or "")
+            if mode == "snapshot_series":
+                series = self.get_snapshot_series(anchor_time)
+                return series if series else [current]
+            return [dict(row) for row in self._telemetry_window]
+        except Exception as error:
+            logger.error("evaluation window build failed: %s", error)
+            return [dict(row) for row in self._telemetry_window]
+
     def _run_pipeline(self) -> None:
         try:
-            snapshot_json = json.dumps(self._telemetry_window, ensure_ascii=False, default=str)
+            evaluation_window = self._build_evaluation_window()
+            snapshot_json = json.dumps(evaluation_window, ensure_ascii=False, default=str)
             rule_result_json = self.evaluate_parallel_rules(snapshot_json)
             confidence = self.verify_attack_sequence(rule_result_json)
             final_input = self._build_final_input(rule_result_json, confidence)
             report_json = self.generate_ma_code(final_input)
             reports = json.loads(report_json)
-            latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            latest = evaluation_window[-1] if evaluation_window else {}
             if isinstance(reports, list):
                 self._latest_novel_advisory = build_novel_attack_advisory(latest, reports)
             else:

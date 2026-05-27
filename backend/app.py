@@ -1,10 +1,10 @@
-"""FastAPI application for the MA integrated detector dashboard."""
+﻿"""FastAPI application for the MA integrated detector dashboard."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -76,9 +76,12 @@ def receive_telemetry(packet: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/detections/{detect_id}")
-def get_detection(detect_id: int) -> dict[str, Any]:
-    """Return detail for a selected MA code."""
-    payload = service.get_detection_detail(detect_id)
+def get_detection(
+    detect_id: int,
+    snapshot_index: int | None = Query(default=None, ge=0),
+) -> dict[str, Any]:
+    """Return detail for a selected MA code at an optional 1-second snapshot index."""
+    payload = service.get_detection_detail(detect_id, snapshot_index)
     if "error" in payload:
         raise HTTPException(status_code=404, detail=payload["error"])
     return payload

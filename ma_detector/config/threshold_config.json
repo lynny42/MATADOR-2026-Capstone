@@ -1,4 +1,9 @@
 {
+  "evaluation": {
+    "default_window_mode": "snapshot_series",
+    "series_seconds": 600,
+    "series_interval_sec": 1
+  },
   "z_score": {
     "SOFT": 2.0,
     "HARD": 3.0,

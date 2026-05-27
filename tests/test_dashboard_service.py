@@ -45,6 +45,9 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertNotIn("error", detail)
         self.assertIn("rule_details", detail)
         self.assertGreaterEqual(len(detail["rule_details"]), 1)
+        self.assertIn("snapshot_frame", detail)
+        self.assertEqual(detail["snapshot_frame"]["mode"], "snapshot_series")
+        self.assertGreaterEqual(detail["snapshot_frame"]["total"], 1)
 
     def test_replay_preview_does_not_change_saved_rules(self) -> None:
         service = DashboardService(create_detector_with_seed())

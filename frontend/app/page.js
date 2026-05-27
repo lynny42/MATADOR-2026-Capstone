@@ -10,11 +10,15 @@ const severityLabel = {
   critical: "위험"
 };
 
-function formatAbnormalLabel(abnormalPercent) {
-  if (abnormalPercent === null || abnormalPercent === undefined) {
+function formatStepMetricLabel(metricPercent) {
+  if (metricPercent === null || metricPercent === undefined) {
     return "Flag";
   }
-  return `${abnormalPercent}%`;
+  const value = Number(metricPercent);
+  if (value > 0) {
+    return `+${value}%`;
+  }
+  return `${value}%`;
 }
 
 function isColumnEvidenceVisible(columnValue) {
@@ -25,7 +29,7 @@ function isColumnEvidenceVisible(columnValue) {
   if (percent === null || percent === undefined) {
     return true;
   }
-  return Number(percent) > 0;
+  return Math.abs(Number(percent)) > 0;
 }
 
 function getVisibleRuleColumns(columns) {
@@ -55,6 +59,7 @@ export default function DashboardPage() {
   const [replayUpdatedAt, setReplayUpdatedAt] = useState("");
   const [replayDirty, setReplayDirty] = useState(false);
   const [error, setError] = useState("");
+  const [snapshotIndex, setSnapshotIndex] = useState(null);
 
   async function loadDashboard(options = {}) {
     try {
@@ -71,6 +76,7 @@ export default function DashboardPage() {
         await loadDetail(targetId);
       } else {
         setSelectedDetail(null);
+        setSnapshotIndex(null);
       }
       setError("");
     } catch (loadError) {
@@ -78,11 +84,20 @@ export default function DashboardPage() {
     }
   }
 
-  async function loadDetail(detectId) {
+  async function loadDetail(detectId, frameIndex = null) {
     try {
-      const detail = await apiGet(`/api/detections/${detectId}`);
+      const query =
+        frameIndex !== null && frameIndex !== undefined
+          ? `?snapshot_index=${frameIndex}`
+          : "";
+      const detail = await apiGet(`/api/detections/${detectId}${query}`);
       setSelectedDetail(detail);
       setSelectedId(detectId);
+      if (detail.snapshot_frame) {
+        setSnapshotIndex(detail.snapshot_frame.index);
+      } else {
+        setSnapshotIndex(null);
+      }
       if (detail.detect_time) {
         setSelectedCommunicationAt(detail.detect_time);
       }
@@ -91,15 +106,29 @@ export default function DashboardPage() {
     }
   }
 
+  function stepSnapshotFrame(direction) {
+    const frame = selectedDetail?.snapshot_frame;
+    if (!frame || selectedId == null) {
+      return;
+    }
+    const nextIndex = Math.max(0, Math.min(frame.index + direction, frame.total - 1));
+    if (nextIndex === frame.index) {
+      return;
+    }
+    loadDetail(selectedId, nextIndex);
+  }
+
   function selectCommunication(communicatedAt) {
     setSelectedCommunicationAt(communicatedAt);
     setSelectedId(null);
     setSelectedDetail(null);
+    setSnapshotIndex(null);
   }
 
   function clearSelectedCode() {
     setSelectedId(null);
     setSelectedDetail(null);
+    setSnapshotIndex(null);
   }
 
   function resetToLatestCommunication() {
@@ -107,6 +136,7 @@ export default function DashboardPage() {
     setSelectedCommunicationAt(latestAt);
     setSelectedId(null);
     setSelectedDetail(null);
+    setSnapshotIndex(null);
   }
 
   async function loadRules(preferredRuleId = selectedRuleId) {
@@ -376,10 +406,13 @@ export default function DashboardPage() {
           selectedCommunicationAt={selectedCommunicationAt}
           selectedId={selectedId}
           selectedDetail={selectedDetail}
+          snapshotIndex={snapshotIndex}
           onSelect={loadDetail}
           onCommunicationSelect={selectCommunication}
           onCodeClear={clearSelectedCode}
           onResetLatest={resetToLatestCommunication}
+          onSnapshotPrev={() => stepSnapshotFrame(-1)}
+          onSnapshotNext={() => stepSnapshotFrame(1)}
         />
       </section>
     </main>
@@ -464,10 +497,13 @@ function RightPanel({
   selectedCommunicationAt,
   selectedId,
   selectedDetail,
+  snapshotIndex,
   onSelect,
   onCommunicationSelect,
   onCodeClear,
-  onResetLatest
+  onResetLatest,
+  onSnapshotPrev,
+  onSnapshotNext
 }) {
   const latest = dashboard.latest_communication;
   return (
@@ -512,7 +548,12 @@ function RightPanel({
       </div>
 
       {selectedDetail ? (
-        <DetailPanel selectedDetail={selectedDetail} />
+        <DetailPanel
+          selectedDetail={selectedDetail}
+          snapshotIndex={snapshotIndex}
+          onSnapshotPrev={onSnapshotPrev}
+          onSnapshotNext={onSnapshotNext}
+        />
       ) : (
         <CommunicationSummary communication={selectedCommunication} onSelect={onSelect} />
       )}
@@ -555,10 +596,16 @@ function CommunicationSummary({ communication, onSelect }) {
   );
 }
 
-function DetailPanel({ selectedDetail }) {
+function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshotNext }) {
   if (!selectedDetail) {
     return <div className="detail-card muted">코드를 선택하면 Rule 근거가 표시됩니다.</div>;
   }
+
+  const frame = selectedDetail.snapshot_frame;
+  const frameLabel =
+    frame && frame.total > 0
+      ? `스냅샷 ${(snapshotIndex ?? frame.index) + 1} / ${frame.total} (10분·1초 시리즈)`
+      : null;
 
   return (
     <div className="detail-card">
@@ -575,6 +622,26 @@ function DetailPanel({ selectedDetail }) {
         <span>대상: {selectedDetail.satellite_filter?.target_subsystem || "-"}</span>
         <span>이벤트: {selectedDetail.satellite_filter?.event_id || "-"}</span>
       </div>
+      {frameLabel ? (
+        <div className="snapshot-nav">
+          <button type="button" onClick={onSnapshotPrev} disabled={!frame || frame.index <= 0}>
+            이전 1초
+          </button>
+          <p className="muted">{frameLabel}</p>
+          <button
+            type="button"
+            onClick={onSnapshotNext}
+            disabled={!frame || frame.index >= frame.total - 1}
+          >
+            다음 1초
+          </button>
+        </div>
+      ) : null}
+      {frame?.current_at ? (
+        <p className="muted">
+          직전 스냅샷: {frame.previous_at || "(없음)"} → 현재: {frame.current_at}
+        </p>
+      ) : null}
 
       <div className="rule-detail-list">
         {(selectedDetail.rule_details || []).map((rule) => (
@@ -589,8 +656,9 @@ function DetailPanel({ selectedDetail }) {
                   <div key={column} className="column-card">
                     <b>{column}</b>
                     <span>관측: {String(value.observed)}</span>
-                    <span>정상: {String(value.normal)}</span>
-                    <em>이상률: {formatAbnormalLabel(value.abnormal_percent)}</em>
+                    <span>직전 스냅샷: {String(value.previous_observed ?? "-")}</span>
+                    <span>비교 기준: {String(value.normal)}</span>
+                    <em>직전 1초 대비 변화율: {formatStepMetricLabel(value.abnormal_percent)}</em>
                   </div>
                 ))}
               </div>

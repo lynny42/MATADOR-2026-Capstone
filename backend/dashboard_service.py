@@ -10,6 +10,7 @@ from typing import Any
 
 from ma_detector import MAIntegratedDetector
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.rule_activation import compute_step_change_percent, merge_default_activations
 from ma_detector.core.target_context import (
     CORE_SUBSYSTEMS,
     normalize_target_subsystem,
@@ -100,18 +101,38 @@ class DashboardService:
             "selected_detection": selected,
         }
 
-    def get_detection_detail(self, detect_id: int) -> dict[str, Any]:
-        """Return UI-ready detail for one dashboard detection."""
+    def get_detection_detail(self, detect_id: int, snapshot_index: int | None = None) -> dict[str, Any]:
+        """Return UI-ready detail for one dashboard detection at a snapshot frame."""
         payload = json.loads(self.detector.get_ui_data(detect_id))
         if "error" in payload:
             return payload
 
         detail_history = payload.get("detail", {}).get("history", [])
         detection = self._dashboard_detection_by_id(detect_id)
+        detect_time = str(detection.get("detect_time") or "")
+        previous_snapshot, current_snapshot, series = self.detector.get_snapshot_frame(
+            detect_time,
+            snapshot_index,
+        )
+        snapshot = current_snapshot or (detail_history[0] if detail_history else {})
+        frame_index = snapshot_index
+        if frame_index is None:
+            frame_index = len(series) - 1 if series else 0
+        evaluation = self.detector.get_threshold_config().get("evaluation", {})
+        payload["snapshot_frame"] = {
+            "mode": "snapshot_series",
+            "index": frame_index,
+            "total": len(series),
+            "window_seconds": int(evaluation.get("series_seconds", self.detector._window_size_sec)),
+            "interval_seconds": int(evaluation.get("series_interval_sec", 1)),
+            "previous_at": (previous_snapshot or {}).get("UPDATED_AT"),
+            "current_at": snapshot.get("UPDATED_AT"),
+        }
         payload["rule_details"] = self._build_rule_details(
             payload.get("evidence_keys", {}),
-            detail_history[0] if detail_history else {},
+            snapshot,
             detection,
+            previous_snapshot,
         )
         payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
         payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
@@ -225,6 +246,7 @@ class DashboardService:
         detector = MAIntegratedDetector()
         detector._action_registry = self.detector.get_action_registry()
         detector._rule_registry = rules
+        merge_default_activations(detector._rule_registry)
         detector._threshold_config = thresholds
         detector._evidence_rules = EvidenceRules(detector._baseline_manager, thresholds)
         detector.build_baseline(_baseline_history())
@@ -420,6 +442,7 @@ class DashboardService:
         evidence_keys: dict[str, str],
         snapshot: dict[str, Any],
         detection: dict[str, Any],
+        previous_snapshot: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         rules = self.detector.get_rule_registry()
         details = []
@@ -429,8 +452,9 @@ class DashboardService:
             column_values = {
                 column: {
                     "observed": snapshot.get(column),
-                    "normal": self._normal_reference(column, snapshot),
-                    "abnormal_percent": self._abnormal_percent(column, snapshot),
+                    "normal": self._normal_reference(column, snapshot, previous_snapshot),
+                    "abnormal_percent": self._metric_percent(column, snapshot, previous_snapshot),
+                    "previous_observed": (previous_snapshot or {}).get(column),
                 }
                 for column in columns
                 if column in snapshot
@@ -444,6 +468,7 @@ class DashboardService:
                     "columns": column_values,
                     "contributes_to": rule.get("contributes_to", {}),
                     "single_sufficient": rule.get("single_sufficient", False),
+                    "activation": rule.get("activation", {}),
                 }
             )
         return details
@@ -476,7 +501,13 @@ class DashboardService:
         return incoming if order.get(incoming, 0) > order.get(current, 0) else current
 
     @staticmethod
-    def _normal_reference(column: str, snapshot: dict[str, Any]) -> Any:
+    def _normal_reference(
+        column: str,
+        snapshot: dict[str, Any],
+        previous_snapshot: dict[str, Any] | None = None,
+    ) -> Any:
+        if previous_snapshot is not None and column in previous_snapshot:
+            return previous_snapshot.get(column)
         if column in {"OBC_P_HASH", "EXPECTED_CRC"}:
             return snapshot.get("EXPECTED_CRC", "expected hash")
         if column.startswith("CH") and "CRC" in column:
@@ -486,6 +517,18 @@ class DashboardService:
         if "UTILCPUAVG" == column:
             return "<= 80.0"
         return "baseline mean"
+
+    @staticmethod
+    def _metric_percent(
+        column: str,
+        snapshot: dict[str, Any],
+        previous_snapshot: dict[str, Any] | None = None,
+    ) -> float | None:
+        if previous_snapshot is not None:
+            step_value = compute_step_change_percent(column, snapshot, previous_snapshot)
+            if step_value is not None:
+                return step_value
+        return DashboardService._abnormal_percent(column, snapshot)
 
     @staticmethod
     def _abnormal_percent(column: str, snapshot: dict[str, Any]) -> float | None:

@@ -1,4 +1,4 @@
-"""Evidence rule scoring functions for MA integrated detection."""
+﻿"""Evidence rule scoring functions for MA integrated detection."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 from typing import Any, Callable
 
 from ma_detector.core.baseline import BaselineManager
+from ma_detector.core.rule_activation import evaluate_rule_activation
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,27 @@ class EvidenceRules:
             self.abs_thr = {}
             self._func_map = {}
 
-    def evaluate(self, rule_id: str, window: list[dict[str, Any]]) -> float:
+    def evaluate(
+        self,
+        rule_id: str,
+        window: list[dict[str, Any]],
+        rule_def: dict[str, Any] | None = None,
+    ) -> float:
         """Evaluate one rule by ID and clamp the result to the 0.0 to 1.0 range."""
         try:
+            activation = (rule_def or {}).get("activation")
+            if activation:
+                return self._clamp(
+                    evaluate_rule_activation(
+                        activation,
+                        window,
+                        self.bm,
+                        self.z_thr,
+                        self.abs_thr,
+                        legacy_evaluator=self._evaluate_legacy,
+                        rule_id=rule_id,
+                    )
+                )
             func = self._func_map.get(rule_id)
             if func is None:
                 logger.warning("unknown evidence rule id: %s", rule_id)
@@ -64,6 +83,16 @@ class EvidenceRules:
             return 0.0
         except Exception as error:
             logger.error("unexpected rule evaluation failure for %s: %s", rule_id, error)
+            return 0.0
+
+    def _evaluate_legacy(self, rule_id: str, window: list[dict[str, Any]]) -> float:
+        try:
+            func = self._func_map.get(rule_id)
+            if func is None:
+                return 0.0
+            return self._clamp(func(window))
+        except Exception as error:
+            logger.error("legacy rule evaluation failed for %s: %s", rule_id, error)
             return 0.0
 
     @staticmethod

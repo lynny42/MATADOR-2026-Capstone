@@ -1,4 +1,4 @@
-"""JSON registry loader and updater for the MA integrated detector."""
+﻿"""JSON registry loader and updater for the MA integrated detector."""
 
 from __future__ import annotations
 
@@ -204,7 +204,7 @@ class RegistryManager:
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:
-        with path.open("r", encoding="utf-8") as file:
+        with path.open("r", encoding="utf-8-sig") as file:
             return json.load(file)
 
     @staticmethod

@@ -527,6 +527,23 @@ button.communication-code {
   gap: 8px;
 }
 
+.snapshot-nav {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 8px;
+}
+
+.snapshot-nav button {
+  flex: 0 0 auto;
+}
+
+.snapshot-nav .muted {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
 .rule-grid {
   align-items: start;
   grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1fr) minmax(0, 1fr);
