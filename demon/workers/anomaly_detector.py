@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,15 +206,21 @@ class AnomalyDetector:
             logger.error("detect_power_anomaly 실패: %s", e)
             return {}
 
-    def verify_hash_on_anomaly(self) -> None:
-        """integrity_target_dir 대상 파일 해시 검증 — 변조 시 PRIORITY=1 이벤트."""
+    def verify_hash_on_anomaly(self) -> bool:
+        """
+        integrity_target_dir 대상 파일 해시 검증.
+
+        Returns:
+            True — 변조·누락 감지(오탐 필터 스킵). INSERT 성공 여부와 무관.
+            False — 이상 없음 또는 검증 대상 없음.
+        """
         try:
             records = self._ctx.db.get_integrity_hash()
             if records is None:
                 logger.warning("verify_hash_on_anomaly: 무결성 레코드 조회 실패")
-                return
+                return False
             if not records:
-                return
+                return False
 
             base_dir = Path(self._ctx.config.integrity_target_dir)
             for rec in records:
@@ -232,12 +237,23 @@ class AnomalyDetector:
                     target = base_dir / file_path
                 actual = self._compute_file_hash(target)
                 if actual is None:
-                    self._insert_integrity_event(file_path, "missing_or_unreadable")
-                    continue
+                    if not self._insert_integrity_event(file_path, "missing_or_unreadable"):
+                        logger.error(
+                            "무결성 이벤트 INSERT 실패(누락) — 오탐 필터는 스킵 path=%s",
+                            file_path,
+                        )
+                    return True
                 if actual.lower() != expected:
-                    self._insert_integrity_event(file_path, "hash_mismatch")
+                    if not self._insert_integrity_event(file_path, "hash_mismatch"):
+                        logger.error(
+                            "무결성 이벤트 INSERT 실패(불일치) — 오탐 필터는 스킵 path=%s",
+                            file_path,
+                        )
+                    return True
+            return False
         except Exception as e:
             logger.error("verify_hash_on_anomaly 실패: %s", e)
+            return False
 
     def _handle_power_anomaly(self, anomaly: dict[str, Any]) -> None:
         """이상 감지 후 무결성 검사 → 오탐 필터 전달 (에피소드당 1회)."""
@@ -250,7 +266,12 @@ class AnomalyDetector:
             if not sw_id_list:
                 return
 
-            self.verify_hash_on_anomaly()
+            if self.verify_hash_on_anomaly():
+                logger.warning(
+                    "무결성 위반 감지 — PRIORITY=1 이벤트 등록, 오탐 필터 스킵 sw_id_list=%s",
+                    sw_id_list,
+                )
+                return
 
             detected_at = self._utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
@@ -388,7 +409,8 @@ class AnomalyDetector:
             logger.error("파일 해시 계산 실패 %s: %s", path, e)
             return None
 
-    def _insert_integrity_event(self, file_path: str, reason: str) -> None:
+    def _insert_integrity_event(self, file_path: str, reason: str) -> bool:
+        """PRIORITY=1 무결성 이벤트 INSERT. 성공 시 True."""
         try:
             detected_at = self._utc_now_iso()
             event_id = self._ctx.db.insert_event({
@@ -400,15 +422,17 @@ class AnomalyDetector:
             })
             if event_id < 0:
                 logger.error("무결성 이벤트 insert 실패 path=%s", file_path)
-                return
+                return False
             logger.warning(
                 "파일 무결성 위반 path=%s reason=%s event_id=%s",
                 file_path,
                 reason,
                 event_id,
             )
+            return True
         except Exception as e:
             logger.error("_insert_integrity_event 실패: %s", e)
+            return False
 
     @staticmethod
     def _utc_now_iso() -> str:
