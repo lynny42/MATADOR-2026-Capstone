@@ -1,0 +1,678 @@
+{
+  "E-01": {
+    "name": "파일 전송 무결성 이상",
+    "subsystems": [
+      "CF"
+    ],
+    "columns": [
+      "CH1_FAULT_CRC",
+      "CH2_FAULT_CRC",
+      "CH1_FAULT_FILE_SIZE_MISMATCH",
+      "CHILDQUEUECOUNT",
+      "FILEWRITEERRCOUNTER"
+    ],
+    "contributes_to": {
+      "A001": 0.4,
+      "A002": 0.3,
+      "A003": 0.3,
+      "A013": 0.2
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "nonzero",
+          "column": "CH1_FAULT_CRC",
+          "weight": 0.35
+        },
+        {
+          "op": "nonzero",
+          "column": "CH1_FAULT_FILE_SIZE_MISMATCH",
+          "weight": 0.25
+        },
+        {
+          "op": "step_delta",
+          "column": "CHILDQUEUECOUNT",
+          "direction": "increase",
+          "weight": 0.2
+        },
+        {
+          "op": "step_delta",
+          "column": "FILEWRITEERRCOUNTER",
+          "direction": "increase",
+          "weight": 0.2
+        }
+      ]
+    }
+  },
+  "E-02": {
+    "name": "명령 처리 이상",
+    "subsystems": [
+      "CI",
+      "SB"
+    ],
+    "columns": [
+      "CMDREJECTEDCOUNTER",
+      "PIPEOVERFLOWRRCNT",
+      "COMBINEDPACKETSSENT"
+    ],
+    "contributes_to": {
+      "A001": 0.3,
+      "A002": 0.5,
+      "A012": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "score_threshold": 0.2,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "step_delta",
+          "column": "CMDREJECTEDCOUNTER",
+          "direction": "increase",
+          "weight": 0.45
+        },
+        {
+          "op": "step_delta",
+          "column": "PIPEOVERFLOWRRCNT",
+          "direction": "increase",
+          "weight": 0.3
+        },
+        {
+          "op": "step_delta",
+          "column": "COMBINEDPACKETSSENT",
+          "direction": "decrease",
+          "weight": 0.25
+        }
+      ]
+    }
+  },
+  "E-03": {
+    "name": "메모리 무결성 이상",
+    "subsystems": [
+      "OBC",
+      "CS"
+    ],
+    "columns": [
+      "OBC_P_HASH",
+      "EXPECTED_CRC",
+      "APPCSERRCOUNTER",
+      "OSCSERRCOUNTER",
+      "LASTVALCRC"
+    ],
+    "contributes_to": {
+      "A003": 0.4,
+      "A004": 0.5,
+      "A008": 0.5,
+      "A010": 0.4
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "mismatch",
+          "left": "OBC_P_HASH",
+          "right": "EXPECTED_CRC",
+          "weight": 0.4
+        },
+        {
+          "op": "step_delta",
+          "column": "APPCSERRCOUNTER",
+          "direction": "increase",
+          "weight": 0.2
+        },
+        {
+          "op": "step_delta",
+          "column": "OSCSERRCOUNTER",
+          "direction": "increase",
+          "weight": 0.2
+        },
+        {
+          "op": "changed_from_baseline",
+          "column": "LASTVALCRC",
+          "weight": 0.2
+        }
+      ]
+    }
+  },
+  "E-04": {
+    "name": "HEAP 및 메모리 사용 이상",
+    "subsystems": [
+      "ES"
+    ],
+    "columns": [
+      "HEAP_FREE",
+      "MEMINUSE",
+      "EXECOUNTS"
+    ],
+    "contributes_to": {
+      "A004": 0.4,
+      "A005": 0.3,
+      "A007": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "step_delta",
+          "column": "HEAP_FREE",
+          "direction": "decrease",
+          "weight": 0.4
+        },
+        {
+          "op": "step_delta",
+          "column": "MEMINUSE",
+          "direction": "increase",
+          "weight": 0.35
+        },
+        {
+          "op": "step_delta",
+          "column": "EXECOUNTS",
+          "direction": "increase",
+          "weight": 0.25
+        }
+      ]
+    }
+  },
+  "E-05": {
+    "name": "리셋 부재 + 무결성 오류 공존",
+    "subsystems": [
+      "OBC",
+      "ES"
+    ],
+    "columns": [
+      "PROCESSOR_RESET_COUNT",
+      "OBC_P_HASH",
+      "APPCSERRCOUNTER",
+      "OBC_S_TICK"
+    ],
+    "contributes_to": {
+      "A003": 0.5,
+      "A008": 0.4,
+      "A010": 0.5
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-06": {
+    "name": "CPU 및 자원 과부하",
+    "subsystems": [
+      "HS",
+      "SCH"
+    ],
+    "columns": [
+      "UTILCPUAVG",
+      "SKIPPEDSLOTSCOUNT",
+      "ERLOGENTRIES"
+    ],
+    "contributes_to": {
+      "A005": 0.4,
+      "A006": 0.3,
+      "A007": 0.4
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "absolute_gt",
+          "column": "UTILCPUAVG",
+          "threshold_key": "UTILCPUAVG_HIGH",
+          "weight": 0.5
+        },
+        {
+          "op": "step_delta",
+          "column": "SKIPPEDSLOTSCOUNT",
+          "direction": "increase",
+          "weight": 0.25
+        },
+        {
+          "op": "step_delta",
+          "column": "ERLOGENTRIES",
+          "direction": "increase",
+          "weight": 0.25
+        }
+      ]
+    }
+  },
+  "E-07": {
+    "name": "Dwell 서비스 이상",
+    "subsystems": [
+      "MD"
+    ],
+    "columns": [
+      "DWELL_MASK",
+      "DWELL_ADDR_COUNT",
+      "DWELL_BYTE_COUNT"
+    ],
+    "contributes_to": {
+      "A005": 0.5,
+      "A007": 0.6
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "changed_from_baseline",
+          "column": "DWELL_MASK",
+          "weight": 0.35
+        },
+        {
+          "op": "step_delta",
+          "column": "DWELL_ADDR_COUNT",
+          "direction": "increase",
+          "weight": 0.35
+        },
+        {
+          "op": "step_delta",
+          "column": "DWELL_BYTE_COUNT",
+          "direction": "increase",
+          "weight": 0.3
+        }
+      ]
+    }
+  },
+  "E-08": {
+    "name": "데이터 외부 송신 이상",
+    "subsystems": [
+      "TO",
+      "HK"
+    ],
+    "columns": [
+      "COMBINEDPACKETSSENT",
+      "ENABLEDROUTES",
+      "FORWARD_ERR_COUNT"
+    ],
+    "contributes_to": {
+      "A006": 0.5,
+      "A007": 0.4,
+      "A014": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "step_delta",
+          "column": "COMBINEDPACKETSSENT",
+          "direction": "increase",
+          "weight": 0.45
+        },
+        {
+          "op": "step_delta",
+          "column": "ENABLEDROUTES",
+          "direction": "increase",
+          "weight": 0.3
+        },
+        {
+          "op": "step_delta",
+          "column": "FORWARD_ERR_COUNT",
+          "direction": "increase",
+          "weight": 0.25
+        }
+      ]
+    }
+  },
+  "E-09": {
+    "name": "ADCS 물리 이상",
+    "subsystems": [
+      "ADCS"
+    ],
+    "columns": [
+      "QERR_0",
+      "QERR_1",
+      "QERR_2",
+      "QERR_3",
+      "TCMD_X",
+      "TCMD_Y",
+      "TCMD_Z",
+      "MOMENTUM_NMS_0",
+      "MOMENTUM_NMS_1",
+      "MOMENTUM_NMS_2",
+      "DEVICE_ERR_RW0",
+      "DEVICE_ERR_RW1",
+      "DEVICE_ERR_RW2"
+    ],
+    "contributes_to": {
+      "A009": 0.5,
+      "A010": 0.3,
+      "A011": 0.3,
+      "A014": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "qerr_spike",
+          "weight": 0.35
+        },
+        {
+          "op": "step_delta",
+          "column": "TCMD_X",
+          "direction": "increase",
+          "weight": 0.083
+        },
+        {
+          "op": "step_delta",
+          "column": "TCMD_Y",
+          "direction": "increase",
+          "weight": 0.083
+        },
+        {
+          "op": "step_delta",
+          "column": "TCMD_Z",
+          "direction": "increase",
+          "weight": 0.084
+        },
+        {
+          "op": "step_delta",
+          "column": "MOMENTUM_NMS_0",
+          "direction": "increase",
+          "weight": 0.083
+        },
+        {
+          "op": "step_delta",
+          "column": "MOMENTUM_NMS_1",
+          "direction": "increase",
+          "weight": 0.083
+        },
+        {
+          "op": "step_delta",
+          "column": "MOMENTUM_NMS_2",
+          "direction": "increase",
+          "weight": 0.084
+        },
+        {
+          "op": "step_delta",
+          "column": "DEVICE_ERR_RW0",
+          "direction": "increase",
+          "weight": 0.05
+        },
+        {
+          "op": "step_delta",
+          "column": "DEVICE_ERR_RW1",
+          "direction": "increase",
+          "weight": 0.05
+        },
+        {
+          "op": "step_delta",
+          "column": "DEVICE_ERR_RW2",
+          "direction": "increase",
+          "weight": 0.05
+        }
+      ]
+    }
+  },
+  "E-10": {
+    "name": "전력 이상",
+    "subsystems": [
+      "EPS"
+    ],
+    "columns": [
+      "BATT_VOLTAGE",
+      "BUS_3P3V",
+      "BUS_5P0V",
+      "SW_0_CURRENT",
+      "SW_1_CURRENT"
+    ],
+    "contributes_to": {
+      "A009": 0.3,
+      "A011": 0.4,
+      "A014": 0.4
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "clauses": [
+        {
+          "op": "step_delta",
+          "column": "BATT_VOLTAGE",
+          "direction": "decrease",
+          "weight": 0.4
+        },
+        {
+          "op": "step_delta",
+          "column": "BUS_3P3V",
+          "direction": "increase",
+          "weight": 0.15
+        },
+        {
+          "op": "step_delta",
+          "column": "BUS_5P0V",
+          "direction": "increase",
+          "weight": 0.15
+        },
+        {
+          "op": "step_delta",
+          "column": "SW_0_CURRENT",
+          "direction": "increase",
+          "weight": 0.15
+        },
+        {
+          "op": "step_delta",
+          "column": "SW_1_CURRENT",
+          "direction": "increase",
+          "weight": 0.15
+        }
+      ]
+    }
+  },
+  "E-11": {
+    "name": "IMU 센서값 고착",
+    "subsystems": [
+      "ADCS"
+    ],
+    "columns": [
+      "IMU_WBN_VARIANCE",
+      "RAW_MAG_VARIANCE",
+      "ST_VALID"
+    ],
+    "contributes_to": {
+      "A011": 0.6,
+      "A014": 0.5
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-12": {
+    "name": "로그 공백 및 타임스탬프 모순",
+    "subsystems": [
+      "DS",
+      "TBL"
+    ],
+    "columns": [
+      "SYSLOGENTRIES",
+      "LASTVALCRC",
+      "IS_SENT"
+    ],
+    "contributes_to": {
+      "A008": 0.4,
+      "A010": 0.4,
+      "A012": 0.6
+    },
+    "single_sufficient": true,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-13": {
+    "name": "통신 에러 카운터 은폐",
+    "subsystems": [
+      "COM",
+      "CS"
+    ],
+    "columns": [
+      "FORWARD_ERR_COUNT",
+      "CH1_FAULT_CRC",
+      "CH2_FAULT_CRC",
+      "ERLOGENTRIES"
+    ],
+    "contributes_to": {
+      "A013": 0.6,
+      "A014": 0.4
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-X1": {
+    "name": "자세-전력 물리 모순 [ADCS↔EPS 연계]",
+    "subsystems": [
+      "ADCS",
+      "EPS"
+    ],
+    "columns": [
+      "TCMD_X",
+      "TCMD_Y",
+      "TCMD_Z",
+      "SW_0_CURRENT",
+      "SW_1_CURRENT",
+      "SW_2_CURRENT",
+      "IMU_WBN_VARIANCE"
+    ],
+    "contributes_to": {
+      "A009": 0.5,
+      "A011": 0.6,
+      "A014": 0.4
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-X2": {
+    "name": "통신-에러 물리 모순 [COM↔CS 연계]",
+    "subsystems": [
+      "COM",
+      "CS"
+    ],
+    "columns": [
+      "FORWARD_ERR_COUNT",
+      "CH1_FAULT_CRC",
+      "CH2_FAULT_CRC",
+      "ERLOGENTRIES"
+    ],
+    "contributes_to": {
+      "A013": 0.5,
+      "A014": 0.4,
+      "A003": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-X3": {
+    "name": "SEU 위장 복합 판별 [OBC↔CF↔ES 연계]",
+    "subsystems": [
+      "OBC",
+      "CF",
+      "ES"
+    ],
+    "columns": [
+      "OBC_P_HASH",
+      "EXPECTED_CRC",
+      "PROCESSOR_RESET_COUNT",
+      "CH1_FAULT_CRC",
+      "CH2_FAULT_CRC",
+      "HEAP_FREE",
+      "UTILCPUAVG"
+    ],
+    "contributes_to": {
+      "A003": 0.6,
+      "A004": 0.4,
+      "A008": 0.3
+    },
+    "single_sufficient": true,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-X4": {
+    "name": "Dwell 기반 덤프-유출 연계 [MD↔TO↔ES 연계]",
+    "subsystems": [
+      "MD",
+      "TO",
+      "ES"
+    ],
+    "columns": [
+      "DWELL_ADDR_COUNT",
+      "DWELL_MASK",
+      "DWELL_BYTE_COUNT",
+      "COMBINEDPACKETSSENT",
+      "UTILCPUAVG"
+    ],
+    "contributes_to": {
+      "A005": 0.5,
+      "A007": 0.7,
+      "A006": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "E-X5": {
+    "name": "Ghost Telemetry 3중 모순 [ADCS↔EPS↔COM 연계]",
+    "subsystems": [
+      "ADCS",
+      "EPS",
+      "COM"
+    ],
+    "columns": [
+      "IMU_WBN_VARIANCE",
+      "BUS_3P3V",
+      "BUS_5P0V",
+      "BUS_12V",
+      "FORWARD_ERR_COUNT",
+      "CH1_FAULT_CRC",
+      "CH2_FAULT_CRC"
+    ],
+    "contributes_to": {
+      "A011": 0.5,
+      "A014": 0.7,
+      "A012": 0.3
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  }
+}

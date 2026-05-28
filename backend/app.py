@@ -1,0 +1,207 @@
+﻿"""FastAPI application for the MA integrated detector dashboard."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from backend.dashboard_service import DashboardService, create_detector_with_seed
+
+app = FastAPI(title="MATADOR MA Integrated Detector API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+service = DashboardService(create_detector_with_seed())
+
+
+class RuleUpsertRequest(BaseModel):
+    """Request body for creating or replacing a rule."""
+
+    rule_id: str = Field(..., min_length=1)
+    definition: dict[str, Any]
+
+
+class ActionUpsertRequest(BaseModel):
+    """Request body for creating or replacing an action."""
+
+    action_id: str = Field(..., min_length=1)
+    definition: dict[str, Any]
+
+
+class ActionUpdateRequest(BaseModel):
+    """Request body for patching an existing action."""
+
+    updates: dict[str, Any]
+
+
+class RuleUpdateRequest(BaseModel):
+    """Request body for patching an existing rule."""
+
+    updates: dict[str, Any]
+
+
+class ThresholdUpdateRequest(BaseModel):
+    """Request body for updating one threshold value."""
+
+    category: str
+    key: str
+    value: float
+
+
+class ReplayRequest(BaseModel):
+    """Request body for running replay analysis."""
+
+    packets: list[dict[str, Any]] | None = None
+
+
+class ReplayConfigRequest(BaseModel):
+    """Request body for temporary replay configuration."""
+
+    rules: dict[str, Any]
+    thresholds: dict[str, Any]
+    actions: dict[str, Any] | None = None
+    packets: list[dict[str, Any]] | None = None
+
+
+class RulesPersistRequest(BaseModel):
+    """Request body for replacing the full rule registry on disk."""
+
+    rules: dict[str, Any]
+
+
+class ThresholdsPersistRequest(BaseModel):
+    """Request body for replacing threshold configuration on disk."""
+
+    thresholds: dict[str, Any]
+
+
+class ActionsPersistRequest(BaseModel):
+    """Request body for replacing the full action registry on disk."""
+
+    actions: dict[str, Any]
+
+
+@app.get("/api/health")
+def health() -> dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "ok"}
+
+
+@app.get("/api/dashboard")
+def get_dashboard() -> dict[str, Any]:
+    """Return the auto-refresh dashboard state."""
+    return service.get_dashboard_state()
+
+
+@app.post("/api/telemetry")
+def receive_telemetry(packet: dict[str, Any]) -> dict[str, Any]:
+    """Receive satellite JSON and refresh dashboard state."""
+    return service.receive_satellite_packet(packet)
+
+
+@app.get("/api/detections/{detect_id}")
+def get_detection(
+    detect_id: int,
+    snapshot_index: int | None = Query(default=None, ge=0),
+) -> dict[str, Any]:
+    """Return detail for a selected MA code at an optional 1-second snapshot index."""
+    payload = service.get_detection_detail(detect_id, snapshot_index)
+    if "error" in payload:
+        raise HTTPException(status_code=404, detail=payload["error"])
+    return payload
+
+
+@app.get("/api/rules")
+def get_rules() -> dict[str, Any]:
+    """Return editable rules, actions, and thresholds."""
+    return service.list_rules()
+
+
+@app.post("/api/rules")
+def upsert_rule(request: RuleUpsertRequest) -> dict[str, Any]:
+    """Create or replace a rule definition."""
+    return service.upsert_rule(request.rule_id, request.definition)
+
+
+@app.patch("/api/rules/{rule_id}")
+def update_rule(rule_id: str, request: RuleUpdateRequest) -> dict[str, Any]:
+    """Patch an existing rule definition."""
+    return service.update_rule(rule_id, request.updates)
+
+
+@app.delete("/api/rules/{rule_id}")
+def delete_rule(rule_id: str) -> dict[str, Any]:
+    """Delete a rule definition."""
+    return service.delete_rule(rule_id)
+
+
+@app.post("/api/actions")
+def upsert_action(request: ActionUpsertRequest) -> dict[str, Any]:
+    """Create or replace an action definition."""
+    return service.upsert_action(request.action_id, request.definition)
+
+
+@app.patch("/api/actions/{action_id}")
+def update_action(action_id: str, request: ActionUpdateRequest) -> dict[str, Any]:
+    """Patch an existing action definition."""
+    return service.update_action(action_id, request.updates)
+
+
+@app.delete("/api/actions/{action_id}")
+def delete_action(action_id: str) -> dict[str, Any]:
+    """Delete an action definition."""
+    return service.delete_action(action_id)
+
+
+@app.patch("/api/thresholds")
+def update_threshold(request: ThresholdUpdateRequest) -> dict[str, Any]:
+    """Update a threshold setting."""
+    return service.update_threshold(request.category, request.key, request.value)
+
+
+@app.post("/api/replay")
+def replay(request: ReplayRequest) -> dict[str, Any]:
+    """Run replay analysis after rule or threshold edits."""
+    return service.run_replay(request.packets)
+
+
+@app.post("/api/replay/preview")
+def replay_preview(request: ReplayConfigRequest) -> dict[str, Any]:
+    """Run a replay with temporary rules and thresholds."""
+    return service.run_replay_preview(
+        request.rules, request.thresholds, request.packets, request.actions
+    )
+
+
+@app.post("/api/replay/apply")
+def replay_apply(request: ReplayConfigRequest) -> dict[str, Any]:
+    """Persist Rule/Action/Threshold JSON and re-run MAIntegratedDetector on all stored telemetry."""
+    return service.apply_replay_config(
+        request.rules, request.thresholds, request.actions
+    )
+
+
+@app.post("/api/config/rules")
+def persist_rules(request: RulesPersistRequest) -> dict[str, Any]:
+    """Persist the full rule registry JSON used by the live detector."""
+    return service.persist_rules(request.rules)
+
+
+@app.post("/api/config/thresholds")
+def persist_thresholds(request: ThresholdsPersistRequest) -> dict[str, Any]:
+    """Persist threshold configuration JSON used by the live detector."""
+    return service.persist_thresholds(request.thresholds)
+
+
+@app.post("/api/config/actions")
+def persist_actions(request: ActionsPersistRequest) -> dict[str, Any]:
+    """Persist the full action registry JSON used by the live detector."""
+    return service.persist_actions(request.actions)

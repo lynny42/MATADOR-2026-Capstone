@@ -1,0 +1,36 @@
+{
+  "evaluation": {
+    "default_window_mode": "snapshot_series",
+    "series_seconds": 600,
+    "series_interval_sec": 1
+  },
+  "z_score": {
+    "SOFT": 2.0,
+    "HARD": 3.0,
+    "SEVERE": 4.0
+  },
+  "absolute": {
+    "IMU_WBN_VARIANCE_MAX": 0.001,
+    "RAW_MAG_VARIANCE_MAX": 0.001,
+    "UTILCPUAVG_HIGH": 80.0,
+    "TCMD_BASELINE_RATIO": 1.1
+  },
+  "confidence": {
+    "CONFIRMED_THRESHOLD": 70.0,
+    "SUSPECTED_THRESHOLD": 40.0
+  },
+  "corroboration": {
+    "CONFIRMED_MIN": 2,
+    "SUSPECTED_MIN": 1
+  },
+  "sequence": {
+    "FULL_MATCH_BONUS": 15.0,
+    "PARTIAL_MATCH_BONUS": 5.0,
+    "NO_RESET_HASH_BONUS": 10.0,
+    "RANDOM_PENALTY": -10.0
+  },
+  "pending_pool": {
+    "TIME_WINDOW_SEC": 300,
+    "UNIQUE_MODULE_MIN": 3
+  }
+}
