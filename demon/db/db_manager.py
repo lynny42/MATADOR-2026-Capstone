@@ -176,6 +176,78 @@ class DBManager:
             logger.error("filter_tlm_current_fields 실패: %s", e)
             return {}
 
+    def _insert_tlm_history_locked(self, tlm_row: dict[str, Any]) -> None:
+        """현재 TLM 스냅샷을 SAT_TLM_HISTORY 에 append (lock 보유 상태에서 호출)."""
+        try:
+            if self._conn is None:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO SAT_TLM_HISTORY (
+                  TLM_ID, UPDATED_AT, MISSION_MODE, OBC_S_TICK, HEAP_FREE,
+                  APPENABLESTATE, DWELL_MASK, ADCS_MODE,
+                  SVB_X, SVB_Y, SVB_Z, WBN_X, WBN_Y, WBN_Z,
+                  DT, TORQUER_PERIOD, SUN_VALID
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(tlm_row.get("TLM_ID", demon_config.SAT_TLM_ID)),
+                    str(tlm_row.get("UPDATED_AT", _utc_now_iso())),
+                    int(tlm_row.get("MISSION_MODE", 0)),
+                    int(tlm_row.get("OBC_S_TICK", 0)),
+                    int(tlm_row.get("HEAP_FREE", 0)),
+                    int(tlm_row.get("APPENABLESTATE", 0)),
+                    int(tlm_row.get("DWELL_MASK", 0)),
+                    int(tlm_row.get("ADCS_MODE", 0)),
+                    float(tlm_row.get("SVB_X", 0.0)),
+                    float(tlm_row.get("SVB_Y", 0.0)),
+                    float(tlm_row.get("SVB_Z", 0.0)),
+                    float(tlm_row.get("WBN_X", 0.0)),
+                    float(tlm_row.get("WBN_Y", 0.0)),
+                    float(tlm_row.get("WBN_Z", 0.0)),
+                    float(tlm_row.get("DT", 0.0)),
+                    int(tlm_row.get("TORQUER_PERIOD", 0)),
+                    int(tlm_row.get("SUN_VALID", 0)),
+                ),
+            )
+        except sqlite3.Error as e:
+            logger.error("SAT_TLM_HISTORY append 실패(SQLite): %s", e)
+        except Exception as e:
+            logger.error("SAT_TLM_HISTORY append 실패: %s", e)
+
+    def _insert_pwr_history_locked(self, pwr_row: dict[str, Any]) -> None:
+        """현재 전력 스냅샷을 SAT_PWR_HISTORY 에 append (lock 보유 상태에서 호출)."""
+        try:
+            if self._conn is None:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO SAT_PWR_HISTORY (
+                  SW_ID, UPDATED_AT, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
+                  PREV_DELTA_V, CURR_DELTA_V, EXCEED_COUNT, CONSECUTIVE_EXCEED,
+                  ANOMALY_FLAG, V_THRESHOLD_LO, V_THRESHOLD_HI
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(pwr_row.get("SW_ID", 0)),
+                    str(pwr_row.get("UPDATED_AT", _utc_now_iso())),
+                    float(pwr_row.get("VOLTAGE", 0.0)),
+                    float(pwr_row.get("PREV_VOLTAGE", 0.0)),
+                    float(pwr_row.get("CURRENT_A", 0.0)),
+                    float(pwr_row.get("PREV_DELTA_V", 0.0)),
+                    float(pwr_row.get("CURR_DELTA_V", 0.0)),
+                    int(pwr_row.get("EXCEED_COUNT", 0)),
+                    int(pwr_row.get("CONSECUTIVE_EXCEED", 0)),
+                    int(pwr_row.get("ANOMALY_FLAG", 0)),
+                    float(pwr_row.get("V_THRESHOLD_LO", 0.0)),
+                    float(pwr_row.get("V_THRESHOLD_HI", 0.0)),
+                ),
+            )
+        except sqlite3.Error as e:
+            logger.error("SAT_PWR_HISTORY append 실패(SQLite): %s", e)
+        except Exception as e:
+            logger.error("SAT_PWR_HISTORY append 실패: %s", e)
+
     def upsert_tlm_current(self, tlm: dict[str, Any]) -> bool:
         """SAT_TLM_CURRENT TLM_ID=1 행 부분 UPDATE."""
         try:
@@ -198,10 +270,17 @@ class DBManager:
                     logger.error("upsert_tlm_current: DB 미연결")
                     return False
                 cur = self._conn.execute(sql, vals)
-                self._conn.commit()
                 if cur.rowcount == 0:
                     logger.warning("upsert_tlm_current: TLM_ID=%s 행 없음", demon_config.SAT_TLM_ID)
                     return False
+                snap_cur = self._conn.execute(
+                    "SELECT * FROM SAT_TLM_CURRENT WHERE TLM_ID = ?",
+                    (demon_config.SAT_TLM_ID,),
+                )
+                snap = _row_to_dict_or_none(snap_cur.fetchone())
+                if snap is not None:
+                    self._insert_tlm_history_locked(snap)
+                self._conn.commit()
             return True
         except sqlite3.Error as e:
             logger.error("upsert_tlm_current 실패(SQLite): %s", e)
@@ -313,6 +392,13 @@ class DBManager:
                         """,
                         (now, prev_v, prev_dv, voltage, current_a, curr_dv, sw_id),
                     )
+                snap_cur = self._conn.execute(
+                    "SELECT * FROM SAT_PWR_META WHERE SW_ID = ?",
+                    (sw_id,),
+                )
+                snap = _row_to_dict_or_none(snap_cur.fetchone())
+                if snap is not None:
+                    self._insert_pwr_history_locked(snap)
                 self._conn.commit()
             return True
         except (KeyError, ValueError, TypeError) as e:
@@ -703,3 +789,63 @@ class DBManager:
         except Exception as e:
             logger.error("update_threshold 실패: %s", e)
             return False
+
+    def delete_tlm_history_by_ids(self, history_ids: list[int]) -> int:
+        """
+        SAT_TLM_HISTORY에서 지정된 HISTORY_ID 목록 삭제.
+
+        삭제 조건 결정은 호출자가 수행하고, 본 메서드는 삭제만 담당.
+        반환: 삭제된 행 수.
+        """
+        try:
+            if not history_ids:
+                return 0
+            ids = [int(v) for v in history_ids]
+            placeholders = ", ".join("?" for _ in ids)
+            sql = f"DELETE FROM SAT_TLM_HISTORY WHERE HISTORY_ID IN ({placeholders})"
+            with self._lock:
+                if self._conn is None:
+                    logger.error("delete_tlm_history_by_ids: DB 미연결")
+                    return 0
+                cur = self._conn.execute(sql, ids)
+                self._conn.commit()
+                return int(cur.rowcount if cur.rowcount is not None else 0)
+        except (ValueError, TypeError) as e:
+            logger.error("delete_tlm_history_by_ids 입력 오류: %s", e)
+            return 0
+        except sqlite3.Error as e:
+            logger.error("delete_tlm_history_by_ids 실패(SQLite): %s", e)
+            return 0
+        except Exception as e:
+            logger.error("delete_tlm_history_by_ids 실패: %s", e)
+            return 0
+
+    def delete_pwr_history_by_ids(self, history_ids: list[int]) -> int:
+        """
+        SAT_PWR_HISTORY에서 지정된 HISTORY_ID 목록 삭제.
+
+        삭제 조건 결정은 호출자가 수행하고, 본 메서드는 삭제만 담당.
+        반환: 삭제된 행 수.
+        """
+        try:
+            if not history_ids:
+                return 0
+            ids = [int(v) for v in history_ids]
+            placeholders = ", ".join("?" for _ in ids)
+            sql = f"DELETE FROM SAT_PWR_HISTORY WHERE HISTORY_ID IN ({placeholders})"
+            with self._lock:
+                if self._conn is None:
+                    logger.error("delete_pwr_history_by_ids: DB 미연결")
+                    return 0
+                cur = self._conn.execute(sql, ids)
+                self._conn.commit()
+                return int(cur.rowcount if cur.rowcount is not None else 0)
+        except (ValueError, TypeError) as e:
+            logger.error("delete_pwr_history_by_ids 입력 오류: %s", e)
+            return 0
+        except sqlite3.Error as e:
+            logger.error("delete_pwr_history_by_ids 실패(SQLite): %s", e)
+            return 0
+        except Exception as e:
+            logger.error("delete_pwr_history_by_ids 실패: %s", e)
+            return 0
