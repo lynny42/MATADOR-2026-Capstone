@@ -27,8 +27,8 @@ _DEFAULT_GS_CMD_RECOVERY = "RECOVERY"
 _DEFAULT_GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 _DEFAULT_GS_CMD_UPDATE_HASH = "UPDATE_HASH"
 _DEFAULT_GS_CMD_ACK = "ACK"
-_DEFAULT_GS_PACKET_TLM = "SAT_TLM_CURRENT"
-_DEFAULT_GS_PACKET_PWR = "SAT_PWR_META"
+_DEFAULT_GS_PACKET_TLM_HISTORY = "SAT_TLM_HISTORY"
+_DEFAULT_GS_PACKET_PWR_HISTORY = "SAT_PWR_HISTORY"
 _DEFAULT_GS_PACKET_EVENT = "SAT_EVENT_QUEUE"
 _DEFAULT_GS_PACKET_INTEGRITY = "SAT_INTEGRITY_HASH"
 _DEFAULT_GS_CMD_LISTEN_HOST = "0.0.0.0"
@@ -167,50 +167,60 @@ class GScomms:
             return -1
 
     def transmit_all(self) -> None:
-        """교신 윈도우 — tlm → pwr → events → integrity 순차 송신."""
+        """교신 윈도우 — tlm_history → pwr_history → events → integrity 순차 송신."""
         try:
-            self.transmit_tlm()
-            self.transmit_pwr_meta()
+            self.transmit_tlm_history()
+            self.transmit_pwr_history()
             self.transmit_event_queue()
             self.transmit_integrity()
         except Exception as e:
             logger.error("transmit_all 실패: %s", e)
 
-    def transmit_tlm(self) -> None:
-        """SAT_TLM_CURRENT 1행 송신."""
+    def transmit_tlm_history(self) -> None:
+        """SAT_TLM_HISTORY 전체 송신 — ACK 시 delete_tlm_history."""
         try:
-            row = self._ctx.db.get_tlm_current()
-            if not row:
+            records = self._ctx.db.get_tlm_history()
+            if not records:
                 return
             payload = {
-                "packet_type": self._config_str("GS_PACKET_TYPE_TLM", _DEFAULT_GS_PACKET_TLM),
-                "data": row,
+                "packet_type": self._config_str(
+                    "GS_PACKET_TYPE_TLM_HISTORY",
+                    _DEFAULT_GS_PACKET_TLM_HISTORY,
+                ),
+                "records": records,
             }
 
             def on_ack(_ack: dict[str, Any]) -> None:
-                logger.info("SAT_TLM_CURRENT 송신 ACK 수신")
+                if not self._ctx.db.delete_tlm_history():
+                    logger.warning("delete_tlm_history 실패")
 
-            self.send_with_retry(payload, on_ack)
+            if not self.send_with_retry(payload, on_ack):
+                logger.warning("SAT_TLM_HISTORY 송신 실패 — 삭제하지 않음")
         except Exception as e:
-            logger.error("transmit_tlm 실패: %s", e)
+            logger.error("transmit_tlm_history 실패: %s", e)
 
-    def transmit_pwr_meta(self) -> None:
-        """SAT_PWR_META 전 채널 배열 송신 — ACK 시 카운터 초기화."""
+    def transmit_pwr_history(self) -> None:
+        """SAT_PWR_HISTORY 전체 송신 — ACK 시 delete_pwr_history."""
         try:
-            channels = self._ctx.db.get_pwr_meta_all()
-            if not channels:
+            records = self._ctx.db.get_pwr_history()
+            if not records:
                 return
             payload = {
-                "packet_type": self._config_str("GS_PACKET_TYPE_PWR", _DEFAULT_GS_PACKET_PWR),
-                "channels": channels,
+                "packet_type": self._config_str(
+                    "GS_PACKET_TYPE_PWR_HISTORY",
+                    _DEFAULT_GS_PACKET_PWR_HISTORY,
+                ),
+                "records": records,
             }
 
             def on_ack(_ack: dict[str, Any]) -> None:
-                self._reset_pwr_meta_counters()
+                if not self._ctx.db.delete_pwr_history():
+                    logger.warning("delete_pwr_history 실패")
 
-            self.send_with_retry(payload, on_ack)
+            if not self.send_with_retry(payload, on_ack):
+                logger.warning("SAT_PWR_HISTORY 송신 실패 — 삭제하지 않음")
         except Exception as e:
-            logger.error("transmit_pwr_meta 실패: %s", e)
+            logger.error("transmit_pwr_history 실패: %s", e)
 
     def transmit_event_queue(self) -> None:
         """미전송 이벤트 개별 순차 송신 — ACK 시 delete_event."""
@@ -584,24 +594,6 @@ class GScomms:
         except Exception as e:
             logger.error("_is_ack_packet 실패: %s", e)
             return False
-
-    def _reset_pwr_meta_counters(self) -> None:
-        try:
-            for row in self._ctx.db.get_pwr_meta_all():
-                sw_id = int(row.get("SW_ID", -1))
-                if sw_id < 0:
-                    continue
-                info = {
-                    "sw_id": sw_id,
-                    "exceed_count": 0,
-                    "consecutive_exceed": 0,
-                    "anomaly_flag": 0,
-                }
-                if not self._ctx.db.update_pwr_exceed_meta(info):
-                    logger.warning("전력 카운터 초기화 실패 sw_id=%s", sw_id)
-            logger.info("SAT_PWR_META 카운터 초기화 완료")
-        except Exception as e:
-            logger.error("_reset_pwr_meta_counters 실패: %s", e)
 
     def _db_insert_event_flexible(self, event: dict[str, Any]) -> int:
         """
