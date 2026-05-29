@@ -124,9 +124,32 @@ def _evaluate_clause(
                 any(abs(_numeric(snapshot, f"QERR_{index}")) > threshold for index in range(4))
                 for snapshot in window
             ) else 0.0
+        if op == "repeat_ratio":
+            column = str(clause.get("column", ""))
+            min_ratio = float(clause.get("min_ratio", 0.1) or 0.1)
+            return repeat_ratio_score(window, column, min_ratio)
         return 0.0
     except Exception as error:
         logger.error("clause evaluation failed: %s", error)
+        return 0.0
+
+
+def repeat_ratio_score(
+    window: list[dict[str, Any]],
+    column: str,
+    min_ratio: float = 0.1,
+) -> float:
+    """Return 0..1 score from the fraction of snapshots where column is non-zero."""
+    try:
+        if not window or not column:
+            return 0.0
+        hits = sum(1 for snapshot in window if _numeric(snapshot, column) > 0.0)
+        ratio = hits / len(window)
+        if ratio < min_ratio:
+            return min(0.35, ratio / max(min_ratio, 1e-6))
+        return min(1.0, ratio / max(min_ratio * 2.0, min_ratio + 1e-6))
+    except Exception as error:
+        logger.error("repeat ratio score failed for %s: %s", column, error)
         return 0.0
 
 
@@ -240,7 +263,7 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-01": {
             "window_mode": series_mode,
             "clauses": [
-                {"op": "nonzero", "column": "CH1_FAULT_CRC", "weight": 0.35},
+                {"op": "repeat_ratio", "column": "CH1_FAULT_CRC", "min_ratio": 0.1, "weight": 0.35},
                 {"op": "nonzero", "column": "CH1_FAULT_FILE_SIZE_MISMATCH", "weight": 0.25},
                 {"op": "step_delta", "column": "CHILDQUEUECOUNT", "direction": "increase", "weight": 0.20},
                 {"op": "step_delta", "column": "FILEWRITEERRCOUNTER", "direction": "increase", "weight": 0.20},
@@ -266,9 +289,8 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-04": {
             "window_mode": series_mode,
             "clauses": [
-                {"op": "step_delta", "column": "HEAP_FREE", "direction": "decrease", "weight": 0.40},
-                {"op": "step_delta", "column": "MEMINUSE", "direction": "increase", "weight": 0.35},
-                {"op": "step_delta", "column": "EXECOUNTS", "direction": "increase", "weight": 0.25},
+                {"op": "step_delta", "column": "HEAP_FREE", "direction": "decrease", "weight": 0.60},
+                {"op": "step_delta", "column": "EXECOUNTS", "direction": "increase", "weight": 0.40},
             ],
         },
         "E-05": {"window_mode": series_mode, "op": "legacy_builtin"},
@@ -283,9 +305,7 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-07": {
             "window_mode": series_mode,
             "clauses": [
-                {"op": "changed_from_baseline", "column": "DWELL_MASK", "weight": 0.35},
-                {"op": "step_delta", "column": "DWELL_ADDR_COUNT", "direction": "increase", "weight": 0.35},
-                {"op": "step_delta", "column": "DWELL_BYTE_COUNT", "direction": "increase", "weight": 0.30},
+                {"op": "changed_from_baseline", "column": "DWELL_MASK", "weight": 1.0},
             ],
         },
         "E-08": {
@@ -314,11 +334,8 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-10": {
             "window_mode": series_mode,
             "clauses": [
-                {"op": "step_delta", "column": "BATT_VOLTAGE", "direction": "decrease", "weight": 0.40},
-                {"op": "step_delta", "column": "BUS_3P3V", "direction": "increase", "weight": 0.15},
-                {"op": "step_delta", "column": "BUS_5P0V", "direction": "increase", "weight": 0.15},
-                {"op": "step_delta", "column": "SW_0_CURRENT", "direction": "increase", "weight": 0.15},
-                {"op": "step_delta", "column": "SW_1_CURRENT", "direction": "increase", "weight": 0.15},
+                {"op": "step_delta", "column": "SW_0_CURRENT", "direction": "increase", "weight": 0.50},
+                {"op": "step_delta", "column": "SW_1_CURRENT", "direction": "increase", "weight": 0.50},
             ],
         },
         "E-11": {"window_mode": series_mode, "op": "legacy_builtin"},
@@ -329,4 +346,7 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-X3": {"window_mode": series_mode, "op": "legacy_builtin"},
         "E-X4": {"window_mode": series_mode, "op": "legacy_builtin"},
         "E-X5": {"window_mode": series_mode, "op": "legacy_builtin"},
+        "P1-X01": {"window_mode": series_mode, "op": "legacy_builtin"},
+        "P3-X01": {"window_mode": series_mode, "op": "legacy_builtin"},
+        "S2-X01": {"window_mode": series_mode, "op": "legacy_builtin"},
     }

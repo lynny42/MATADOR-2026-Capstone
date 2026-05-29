@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import statistics
 from typing import Any, Callable
 
 from ma_detector.core.baseline import BaselineManager
-from ma_detector.core.rule_activation import evaluate_rule_activation
+from ma_detector.core.rule_activation import evaluate_rule_activation, repeat_ratio_score
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,9 @@ class EvidenceRules:
                 "E-X3": self._ex3,
                 "E-X4": self._ex4,
                 "E-X5": self._ex5,
+                "P1-X01": self._p1_x01,
+                "P3-X01": self._p3_x01,
+                "S2-X01": self._s2_x01,
             }
         except KeyError as error:
             logger.error("threshold config missing key: %s", error)
@@ -161,7 +165,7 @@ class EvidenceRules:
     def _e01(self, window: list[dict[str, Any]]) -> float:
         try:
             return (
-                self._flag_nonzero(window, "CH1_FAULT_CRC") * 0.35
+                repeat_ratio_score(window, "CH1_FAULT_CRC", 0.1) * 0.35
                 + self._flag_nonzero(window, "CH1_FAULT_FILE_SIZE_MISMATCH") * 0.25
                 + self._z_max(window, "CHILDQUEUECOUNT", "increase") * 0.20
                 + self._z_max(window, "FILEWRITEERRCOUNTER", "increase") * 0.20
@@ -207,13 +211,19 @@ class EvidenceRules:
     def _e05(self, window: list[dict[str, Any]]) -> float:
         try:
             scores = []
-            for snapshot in window:
+            for index, snapshot in enumerate(window):
                 integrity_fault = (
                     snapshot.get("OBC_P_HASH") != snapshot.get("EXPECTED_CRC")
                     or self._numeric(snapshot, "APPCSERRCOUNTER") > 0
+                    or self._numeric(snapshot, "IS_VIOLATED") == 1
                 )
-                reset_stats = self.bm.get_stats(snapshot, "PROCESSOR_RESET_COUNT")
-                no_reset = self._numeric(snapshot, "PROCESSOR_RESET_COUNT") == reset_stats.mean
+
+                if index > 0:
+                    prev_reset = self._numeric(window[index - 1], "PROCESSOR_RESET_COUNT")
+                    no_reset = self._numeric(snapshot, "PROCESSOR_RESET_COUNT") == prev_reset
+                else:
+                    reset_stats = self.bm.get_stats(snapshot, "PROCESSOR_RESET_COUNT")
+                    no_reset = self._numeric(snapshot, "PROCESSOR_RESET_COUNT") == reset_stats.mean
 
                 if not (integrity_fault and no_reset):
                     scores.append(0.0)
@@ -424,12 +434,21 @@ class EvidenceRules:
     def _ex3(self, window: list[dict[str, Any]]) -> float:
         try:
             scores = []
-            for snapshot in window:
-                hash_mismatch = snapshot.get("OBC_P_HASH") != snapshot.get("EXPECTED_CRC")
-                no_reset = self._numeric(snapshot, "PROCESSOR_RESET_COUNT") == self.bm.get_stats(
-                    snapshot,
-                    "PROCESSOR_RESET_COUNT",
-                ).mean
+            for index, snapshot in enumerate(window):
+                if "OBC_P_HASH" in snapshot and "EXPECTED_CRC" in snapshot:
+                    hash_mismatch = snapshot.get("OBC_P_HASH") != snapshot.get("EXPECTED_CRC")
+                else:
+                    hash_mismatch = self._numeric(snapshot, "IS_VIOLATED") == 1
+
+                if index > 0:
+                    prev_reset = self._numeric(window[index - 1], "PROCESSOR_RESET_COUNT")
+                    no_reset = self._numeric(snapshot, "PROCESSOR_RESET_COUNT") == prev_reset
+                else:
+                    no_reset = (
+                        self._numeric(snapshot, "PROCESSOR_RESET_COUNT")
+                        == self.bm.get_stats(snapshot, "PROCESSOR_RESET_COUNT").mean
+                    )
+
                 file_crc = self._numeric(snapshot, "CH1_FAULT_CRC") > 0 or self._numeric(snapshot, "CH2_FAULT_CRC") > 0
                 hit_count = sum([hash_mismatch, no_reset, file_crc])
                 if hit_count == 0:
@@ -521,4 +540,126 @@ class EvidenceRules:
             return 0.0
         except Exception as error:
             logger.error("unexpected E-X5 scoring failure: %s", error)
+            return 0.0
+
+    def _p1_x01(self, window: list[dict[str, Any]]) -> float:
+        """CF file fault AND TBL security flag change in same window (simultaneous required)."""
+        try:
+            cf_crc_ratio = repeat_ratio_score(window, "CH1_FAULT_CRC", 0.1)
+            cf_size_flag = self._flag_nonzero(window, "CH1_FAULT_FILE_SIZE_MISMATCH")
+            write_err_score = self._z_max(window, "FILEWRITEERRCOUNTER", "increase")
+
+            cf_active = (
+                cf_crc_ratio > 0.0
+                or cf_size_flag > 0.0
+                or write_err_score > 0.0
+            )
+            tbl_active = self._flag_changed_from_baseline(window, "LASTVALCRC") > 0.0
+
+            if not (cf_active and tbl_active):
+                return 0.0
+
+            return (
+                cf_crc_ratio * 0.35
+                + cf_size_flag * 0.20
+                + write_err_score * 0.20
+                + 1.0 * 0.25
+            )
+        except Exception as error:
+            logger.error("P1-X01 scoring failed: %s", error)
+            return 0.0
+
+    def _p3_x01(self, window: list[dict[str, Any]]) -> float:
+        """ADCS tamper: valid star tracker flag, attitude error spike, excessive torque."""
+        try:
+            qerr_threshold = 0.3
+            torquer_high = float(self.abs_thr.get("TORQUER_PERCENT_HIGH", 75.0))
+            tcmd_ratio = float(self.abs_thr.get("TCMD_BASELINE_RATIO", 1.1))
+            scores: list[float] = []
+            for snapshot in window:
+                st_valid = self._numeric(snapshot, "ST_VALID", 1.0) == 1.0
+                qerr_spike = any(
+                    abs(self._numeric(snapshot, f"QERR_{index}")) > qerr_threshold for index in range(4)
+                )
+                if not (st_valid and qerr_spike):
+                    scores.append(0.0)
+                    continue
+
+                tcmd_mag = max(abs(self._numeric(snapshot, f"TCMD_{axis}")) for axis in ["X", "Y", "Z"])
+                base_tcmd = max(
+                    abs(self.bm.get_stats(snapshot, f"TCMD_{axis}").mean) for axis in ["X", "Y", "Z"]
+                )
+                tcmd_high = tcmd_mag >= max(base_tcmd * tcmd_ratio, 0.02)
+
+                torquer_on = max(
+                    self._numeric(snapshot, f"TORQUER_PERCENT_ON_{index}") for index in range(3)
+                )
+                torquer_high = torquer_on >= torquer_high
+
+                qerr_score = min(
+                    max(abs(self._numeric(snapshot, f"QERR_{index}")) for index in range(4)) / 0.5,
+                    1.0,
+                )
+                tcmd_score = 0.85 if tcmd_high else 0.2
+                torquer_score = 0.9 if torquer_high else 0.15
+                scores.append(min(qerr_score * 0.40 + tcmd_score * 0.35 + torquer_score * 0.25, 1.0))
+            return max(scores) if scores else 0.0
+        except Exception as error:
+            logger.error("P3-X01 scoring failed: %s", error)
+            return 0.0
+
+    def _s2_x01(self, window: list[dict[str, Any]]) -> float:
+        """Attitude-sensor mismatch: body rate stuck while QERR spikes (uses TLM WBN_*)."""
+        try:
+            if len(window) < 2:
+                return 0.0
+            wbn_stuck_max = float(self.abs_thr.get("WBN_STUCK_RANGE_MAX", 0.002))
+            qerr_threshold = 0.3
+            imu_var_max = float(self.abs_thr.get("IMU_WBN_VARIANCE_MAX", 0.001))
+            scores: list[float] = []
+
+            for snapshot in window:
+                qerr_spike = any(
+                    abs(self._numeric(snapshot, f"QERR_{index}")) > qerr_threshold
+                    for index in range(4)
+                )
+                if not qerr_spike:
+                    scores.append(0.0)
+                    continue
+
+                wbn_stdevs: list[float] = []
+                for axis in ["X", "Y", "Z"]:
+                    values = [self._numeric(item, f"WBN_{axis}") for item in window]
+                    if len(values) >= 2:
+                        try:
+                            wbn_stdevs.append(statistics.stdev(values))
+                        except statistics.StatisticsError:
+                            wbn_stdevs.append(0.0)
+                    else:
+                        wbn_stdevs.append(0.0)
+                wbn_stuck = all(std_value <= wbn_stuck_max for std_value in wbn_stdevs)
+
+                imu_variance = self._numeric(snapshot, "IMU_WBN_VARIANCE", 1.0)
+                imu_frozen = (
+                    imu_variance < imu_var_max
+                    if "IMU_WBN_VARIANCE" in snapshot
+                    else wbn_stuck
+                )
+
+                svb_mag = sum(
+                    abs(self._numeric(snapshot, f"SVB_{axis}")) for axis in ["X", "Y", "Z"]
+                )
+                svb_present = svb_mag > 0.1
+
+                qerr_score = min(
+                    max(abs(self._numeric(snapshot, f"QERR_{index}")) for index in range(4)) / 0.5,
+                    1.0,
+                )
+                stuck_score = 0.9 if (wbn_stuck or imu_frozen) else 0.0
+                svb_score = 0.1 if svb_present else 0.0
+                scores.append(min(qerr_score * 0.55 + stuck_score * 0.35 + svb_score, 1.0))
+
+            return max(scores) if scores else 0.0
+        except Exception as error:
+            logger.error("S2-X01 scoring failed: %s", error)
             return 0.0

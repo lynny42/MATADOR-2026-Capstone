@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.core.rule_activation import merge_default_activations
 from ma_detector.core.target_context import (
     build_novel_attack_advisory,
+    infer_target_from_sw_ids,
     normalize_target_subsystem,
     report_matches_target,
     sort_reports_by_target,
@@ -710,11 +712,47 @@ class MAIntegratedDetector:
             anchor_time = str(current.get("UPDATED_AT") or current.get("DETECTED_AT") or "")
             if mode == "snapshot_series":
                 series = self.get_snapshot_series(anchor_time)
+                series = self._compute_imu_variance(series)
                 return series if series else [current]
-            return [dict(row) for row in self._telemetry_window]
+            series = self._compute_imu_variance([dict(row) for row in self._telemetry_window])
+            return series
         except Exception as error:
             logger.error("evaluation window build failed: %s", error)
             return [dict(row) for row in self._telemetry_window]
+
+    def _compute_imu_variance(self, window: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Compute IMU_WBN_VARIANCE from IMU_WBN_X/Y/Z series when not provided in telemetry."""
+        try:
+            if len(window) < 2:
+                for snap in window:
+                    snap.setdefault("IMU_WBN_VARIANCE", 0.0)
+                return window
+
+            axis_values: dict[str, list[float]] = {"X": [], "Y": [], "Z": []}
+            for snap in window:
+                for axis in ["X", "Y", "Z"]:
+                    val = snap.get(f"IMU_WBN_{axis}")
+                    if isinstance(val, (int, float)):
+                        axis_values[axis].append(float(val))
+
+            variances: list[float] = []
+            for axis in ["X", "Y", "Z"]:
+                vals = axis_values[axis]
+                if len(vals) >= 2:
+                    try:
+                        variances.append(statistics.variance(vals))
+                    except statistics.StatisticsError:
+                        variances.append(0.0)
+                else:
+                    variances.append(0.0)
+
+            imu_variance = sum(variances) / len(variances) if variances else 0.0
+            for snap in window:
+                snap["IMU_WBN_VARIANCE"] = imu_variance
+            return window
+        except Exception as error:
+            logger.error("IMU variance computation failed: %s", error)
+            return window
 
     def _run_pipeline(self) -> None:
         try:
@@ -747,31 +785,114 @@ class MAIntegratedDetector:
 
     def _merge_packet_sections(self, packet: dict[str, Any]) -> dict[str, Any]:
         try:
-            normalized = dict(packet)
-            section_keys = [
-                "telemetry",
-                "tlm",
-                "power",
-                "pwr_meta",
-                "adcs",
-                "system",
-                "integrity",
-                "event",
-                "counters",
-                "evidence",
-                "ma_payload",
-                "SAT_TLM_CURRENT",
-                "SAT_PWR_META",
-                "SAT_ADCS_FILTER",
-                "SAT_EVENT_QUEUE",
-                "SAT_INTEGRITY_HASH",
-                "GS_TLM_HISTORY",
-                "GS_PWR_META",
-            ]
-            for section_key in section_keys:
-                section = packet.get(section_key)
-                if isinstance(section, dict):
-                    normalized.update(section)
+            normalized: dict[str, Any] = {}
+            packet_type = str(packet.get("packet_type", "")).strip()
+
+            if packet_type == "SAT_TLM_CURRENT":
+                data = packet.get("data", packet)
+                if isinstance(data, dict):
+                    normalized.update(data)
+                normalized["packet_type"] = packet_type
+
+            elif packet_type == "SAT_PWR_META":
+                normalized["packet_type"] = packet_type
+                normalized["UPDATED_AT"] = packet.get("UPDATED_AT", "")
+                channels = packet.get("channels", [])
+                has_anomaly = False
+                anomaly_sw_ids: list[int] = []
+                if isinstance(channels, list):
+                    for ch in channels:
+                        if not isinstance(ch, dict):
+                            continue
+                        sw_id = ch.get("SW_ID", 0)
+                        normalized[f"SW_{sw_id}_VOLTAGE"] = ch.get("VOLTAGE")
+                        normalized[f"SW_{sw_id}_CURRENT_A"] = ch.get("CURRENT_A")
+                        normalized[f"SW_{sw_id}_CURRENT"] = ch.get("CURRENT_A")
+                        normalized[f"SW_{sw_id}_PREV_VOLTAGE"] = ch.get("PREV_VOLTAGE")
+                        normalized[f"SW_{sw_id}_CURR_DELTA_V"] = ch.get("CURR_DELTA_V")
+                        normalized[f"SW_{sw_id}_EXCEED_COUNT"] = ch.get("EXCEED_COUNT")
+                        normalized[f"SW_{sw_id}_CONSECUTIVE_EXCEED"] = ch.get("CONSECUTIVE_EXCEED")
+                        normalized[f"SW_{sw_id}_ANOMALY_FLAG"] = ch.get("ANOMALY_FLAG")
+                        if ch.get("ANOMALY_FLAG", 0) == 1:
+                            has_anomaly = True
+                            anomaly_sw_ids.append(int(sw_id))
+                normalized["HAS_PWR_ANOMALY"] = has_anomaly
+                normalized["SW_ID_LIST"] = anomaly_sw_ids
+
+            elif packet_type == "SAT_EVENT_QUEUE":
+                event = packet.get("event", packet)
+                if isinstance(event, dict):
+                    normalized.update(event)
+                normalized["packet_type"] = packet_type
+
+                combined_crc = normalized.get("CH1_CH2_FAULT_CRC", 0)
+                normalized["CH1_FAULT_CRC"] = combined_crc
+                normalized["CH2_FAULT_CRC"] = combined_crc
+
+                event_type = str(normalized.get("EVENT_TYPE", ""))
+                weight = normalized.get("WEIGHT", 0)
+                normalized["IS_ANOMALY"] = (
+                    event_type == "ATTACK_CONFIRMED"
+                    or int(weight or 0) >= 50
+                )
+                normalized["FALSE_POSITIVE_RESULT"] = "Y" if normalized["IS_ANOMALY"] else "N"
+                normalized["FALSE_POSITIVE_WEIGHT"] = weight
+                normalized["FALSE_POSITIVE_EXCEPTION"] = normalized.get("EXCEPTION_CODE", "")
+
+                if not normalized.get("TARGET_SUBSYSTEM"):
+                    sw_id = normalized.get("SW_ID")
+                    if sw_id is not None:
+                        normalized["TARGET_SUBSYSTEM"] = infer_target_from_sw_ids([sw_id])
+
+            elif packet_type == "SAT_INTEGRITY_HASH":
+                normalized["packet_type"] = packet_type
+                records = packet.get("records", [packet])
+                if not isinstance(records, list):
+                    records = [packet]
+                for rec in records:
+                    if not isinstance(rec, dict):
+                        continue
+                    normalized["IS_VIOLATED"] = rec.get("IS_VIOLATED", 0)
+                    normalized["EXPECTED_HASH"] = rec.get("EXPECTED_HASH")
+                    normalized["EXPECTED_CRC"] = rec.get("EXPECTED_HASH")
+                    normalized["OBC_P_HASH"] = rec.get("EXPECTED_HASH")
+                    normalized["LAST_VERIFIED_AT"] = rec.get("LAST_VERIFIED_AT")
+                    normalized["UPDATED_AT"] = rec.get("UPDATED_AT", "")
+                    break
+
+            elif packet_type == "SAT_ADCS_FILTER":
+                normalized.update(packet)
+                normalized["packet_type"] = packet_type
+                if "RESETSPERFORMED" in packet:
+                    normalized["PROCESSOR_RESET_COUNT"] = packet["RESETSPERFORMED"]
+                normalized.setdefault("IMU_WBN_VARIANCE", 0.0)
+
+            else:
+                normalized.update(packet)
+                section_keys = [
+                    "data",
+                    "event",
+                    "telemetry",
+                    "tlm",
+                    "SAT_TLM_CURRENT",
+                    "SAT_PWR_META",
+                    "SAT_EVENT_QUEUE",
+                    "SAT_INTEGRITY_HASH",
+                    "SAT_ADCS_FILTER",
+                ]
+                for key in section_keys:
+                    section = packet.get(key)
+                    if isinstance(section, dict):
+                        normalized.update(section)
+
+            normalized.setdefault(
+                "UPDATED_AT",
+                packet.get("UPDATED_AT")
+                or packet.get("DETECTED_AT")
+                or packet.get("TIMESTAMP")
+                or normalized.get("UPDATED_AT")
+                or "",
+            )
             return normalized
         except TypeError as error:
             logger.error("packet section merge failed: %s", error)
@@ -781,15 +902,36 @@ class MAIntegratedDetector:
             return dict(packet)
 
     def _validate_attack_packet(self, packet: dict[str, Any]) -> str | None:
-        """Require satellite 1st-pass target when false-positive filter says attack (Y)."""
+        """Require attack target; infer from SW_ID_LIST or SW_ID when missing."""
         try:
             if not packet.get("IS_ANOMALY", False):
                 return None
+
             target = normalize_target_subsystem(packet.get("TARGET_SUBSYSTEM"))
+
+            if not target:
+                sw_id_list = packet.get("SW_ID_LIST", [])
+                if sw_id_list:
+                    target = infer_target_from_sw_ids(sw_id_list)
+                    if target:
+                        packet["TARGET_SUBSYSTEM"] = target
+                        return None
+
             if target:
                 packet["TARGET_SUBSYSTEM"] = target
                 return None
-            message = "TARGET_SUBSYSTEM is required when false_positive_result indicates attack (Y)"
+
+            sw_id = packet.get("SW_ID")
+            if sw_id is not None:
+                target = infer_target_from_sw_ids([sw_id])
+                if target:
+                    packet["TARGET_SUBSYSTEM"] = target
+                    return None
+
+            message = (
+                "TARGET_SUBSYSTEM could not be determined "
+                "from packet; provide TARGET_SUBSYSTEM or SW_ID_LIST"
+            )
             return message
         except Exception as error:
             logger.error("attack packet validation failed: %s", error)

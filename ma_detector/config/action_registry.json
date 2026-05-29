@@ -1,4 +1,4 @@
-{
+﻿{
   "A001": {
     "name": "MALICIOUS_PAYLOAD_INJECT",
     "module": "CF",
@@ -96,5 +96,19 @@
     "phase": 2,
     "weight": 1.9,
     "description": "복수 서브시스템 센서 데이터 위조"
+  },
+  "B001": {
+    "name": "ADCS_SENSOR_PHYSICS_MISMATCH",
+    "module": "ADCS",
+    "phase": 1,
+    "weight": 1.7,
+    "description": "IMU 고착 및 QERR 급변 동시 발생 (공격2 시나리오)"
+  },
+  "B002": {
+    "name": "ADCS_ATTITUDE_VECTOR_DIVERGENCE",
+    "module": "ADCS",
+    "phase": 1,
+    "weight": 1.4,
+    "description": "자세 벡터와 센서 출력 불일치"
   }
 }

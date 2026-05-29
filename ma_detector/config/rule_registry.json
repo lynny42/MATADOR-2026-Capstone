@@ -1,4 +1,4 @@
-{
+﻿{
   "E-01": {
     "name": "파일 전송 무결성 이상",
     "subsystems": [
@@ -23,8 +23,9 @@
       "window_mode": "step",
       "clauses": [
         {
-          "op": "nonzero",
+          "op": "repeat_ratio",
           "column": "CH1_FAULT_CRC",
+          "min_ratio": 0.1,
           "weight": 0.35
         },
         {
@@ -147,7 +148,6 @@
     ],
     "columns": [
       "HEAP_FREE",
-      "MEMINUSE",
       "EXECOUNTS"
     ],
     "contributes_to": {
@@ -164,19 +164,13 @@
           "op": "step_delta",
           "column": "HEAP_FREE",
           "direction": "decrease",
-          "weight": 0.4
-        },
-        {
-          "op": "step_delta",
-          "column": "MEMINUSE",
-          "direction": "increase",
-          "weight": 0.35
+          "weight": 0.6
         },
         {
           "op": "step_delta",
           "column": "EXECOUNTS",
           "direction": "increase",
-          "weight": 0.25
+          "weight": 0.4
         }
       ]
     }
@@ -253,9 +247,7 @@
       "MD"
     ],
     "columns": [
-      "DWELL_MASK",
-      "DWELL_ADDR_COUNT",
-      "DWELL_BYTE_COUNT"
+      "DWELL_MASK"
     ],
     "contributes_to": {
       "A005": 0.5,
@@ -269,19 +261,7 @@
         {
           "op": "changed_from_baseline",
           "column": "DWELL_MASK",
-          "weight": 0.35
-        },
-        {
-          "op": "step_delta",
-          "column": "DWELL_ADDR_COUNT",
-          "direction": "increase",
-          "weight": 0.35
-        },
-        {
-          "op": "step_delta",
-          "column": "DWELL_BYTE_COUNT",
-          "direction": "increase",
-          "weight": 0.3
+          "weight": 1.0
         }
       ]
     }
@@ -426,9 +406,6 @@
       "EPS"
     ],
     "columns": [
-      "BATT_VOLTAGE",
-      "BUS_3P3V",
-      "BUS_5P0V",
       "SW_0_CURRENT",
       "SW_1_CURRENT"
     ],
@@ -444,33 +421,15 @@
       "clauses": [
         {
           "op": "step_delta",
-          "column": "BATT_VOLTAGE",
-          "direction": "decrease",
-          "weight": 0.4
-        },
-        {
-          "op": "step_delta",
-          "column": "BUS_3P3V",
-          "direction": "increase",
-          "weight": 0.15
-        },
-        {
-          "op": "step_delta",
-          "column": "BUS_5P0V",
-          "direction": "increase",
-          "weight": 0.15
-        },
-        {
-          "op": "step_delta",
           "column": "SW_0_CURRENT",
           "direction": "increase",
-          "weight": 0.15
+          "weight": 0.5
         },
         {
           "op": "step_delta",
           "column": "SW_1_CURRENT",
           "direction": "increase",
-          "weight": 0.15
+          "weight": 0.5
         }
       ]
     }
@@ -669,6 +628,89 @@
       "A012": 0.3
     },
     "single_sufficient": false,
+    "enabled": false,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "P1-X01": {
+    "name": "파일 오류 + 보안 플래그 동시 변화 [CF↔TBL]",
+    "subsystems": [
+      "CF",
+      "TBL"
+    ],
+    "columns": [
+      "CH1_FAULT_CRC",
+      "CH1_FAULT_FILE_SIZE_MISMATCH",
+      "FILEWRITEERRCOUNTER",
+      "LASTVALCRC"
+    ],
+    "contributes_to": {
+      "A001": 0.4,
+      "A002": 0.5,
+      "A003": 0.5
+    },
+    "single_sufficient": false,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "P3-X01": {
+    "name": "ADCS 변조 3단 인과관계 [ST_VALID 정상+QERR 급변+과도 토크]",
+    "subsystems": [
+      "ADCS"
+    ],
+    "columns": [
+      "ST_VALID",
+      "QERR_0",
+      "QERR_1",
+      "QERR_2",
+      "QERR_3",
+      "TCMD_X",
+      "TCMD_Y",
+      "TCMD_Z",
+      "TORQUER_PERCENT_ON_0",
+      "TORQUER_PERCENT_ON_1",
+      "TORQUER_PERCENT_ON_2"
+    ],
+    "contributes_to": {
+      "A009": 0.8,
+      "A008": 0.4
+    },
+    "single_sufficient": true,
+    "enabled": true,
+    "activation": {
+      "window_mode": "step",
+      "op": "legacy_builtin"
+    }
+  },
+  "S2-X01": {
+    "name": "자세-센서 물리 불일치 [IMU 고착+QERR 급변]",
+    "subsystems": [
+      "ADCS"
+    ],
+    "columns": [
+      "WBN_X",
+      "WBN_Y",
+      "WBN_Z",
+      "IMU_WBN_VARIANCE",
+      "ST_VALID",
+      "QERR_0",
+      "QERR_1",
+      "QERR_2",
+      "QERR_3",
+      "SVB_X",
+      "SVB_Y",
+      "SVB_Z"
+    ],
+    "contributes_to": {
+      "B001": 0.8,
+      "B002": 0.5
+    },
+    "single_sufficient": true,
     "enabled": true,
     "activation": {
       "window_mode": "step",

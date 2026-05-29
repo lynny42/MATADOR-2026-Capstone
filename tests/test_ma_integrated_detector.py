@@ -209,6 +209,7 @@ class MAIntegratedDetectorTest(unittest.TestCase):
 
         packet = _official_satellite_packet("Y")
         packet["target_subsystem"] = ""
+        packet["sw_id_list"] = []
 
         error = detector.receive_telemetry(json.dumps(packet))
 
