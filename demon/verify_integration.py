@@ -47,6 +47,14 @@ def test_db_manager_api(tmp_db: Path) -> None:
     if m0 is None or abs(m0["CURR_DELTA_V"] - 0.3) > 1e-6:
         _fail(f"pwr delta expected 0.3 got {None if m0 is None else m0['CURR_DELTA_V']}")
     _ok("upsert_pwr_meta delta sliding window")
+    conn = sqlite3.connect(tmp_db)
+    pwr_hist_rows = conn.execute(
+        "SELECT COUNT(*) FROM SAT_PWR_HISTORY WHERE SW_ID = 0",
+    ).fetchone()[0]
+    conn.close()
+    if pwr_hist_rows < 2:
+        _fail(f"SAT_PWR_HISTORY append count={pwr_hist_rows}")
+    _ok("SAT_PWR_HISTORY append")
 
     db.update_pwr_exceed_meta(
         {"sw_id": 0, "exceed_count": 3, "consecutive_exceed": 2, "anomaly_flag": 1},
@@ -67,6 +75,12 @@ def test_db_manager_api(tmp_db: Path) -> None:
     if not db.is_sunlight_window():
         _fail("is_sunlight_window")
     _ok("upsert_tlm_current + is_sunlight_window")
+    conn = sqlite3.connect(tmp_db)
+    tlm_hist_rows = conn.execute("SELECT COUNT(*) FROM SAT_TLM_HISTORY").fetchone()[0]
+    conn.close()
+    if tlm_hist_rows < 1:
+        _fail(f"SAT_TLM_HISTORY append count={tlm_hist_rows}")
+    _ok("SAT_TLM_HISTORY append")
 
     db.insert_adcs_filter({"QBN_0": 1.0, "SUN_VALID": 1, "_ADCS_HK_CMD_CNT": 10})
     adcs = db.get_adcs_filter(1)
