@@ -269,22 +269,41 @@ class DBManager:
             logger.error("insert_tlm_history 실패: %s", e)
             return False
 
-    def insert_pwr_history(self, pwr: dict[str, Any]) -> bool:
-        """SAT_PWR_HISTORY append."""
+    def insert_pwr_history_snapshot(self) -> int:
+        """
+        SAT_PWR_META 4채널을 한 스냅샷(HISTORY_ID)으로 SAT_PWR_HISTORY에 append.
+
+        Returns: HISTORY_ID (실패 시 -1).
+        """
         try:
+            now = _utc_now_iso()
             with self._lock:
                 if self._conn is None:
-                    logger.error("insert_pwr_history: DB 미연결")
-                    return False
-                self._insert_pwr_history_locked(pwr)
+                    logger.error("insert_pwr_history_snapshot: DB 미연결")
+                    return -1
+                cur = self._conn.execute(
+                    "INSERT INTO SAT_PWR_HISTORY (UPDATED_AT) VALUES (?)",
+                    (now,),
+                )
+                history_id = int(cur.lastrowid)
+                for sw_id in range(demon_config.PWR_SW_ID_COUNT):
+                    meta = self._get_pwr_meta_locked(sw_id)
+                    if meta is None:
+                        continue
+                    self._insert_pwr_history_channel_locked(history_id, meta)
                 self._conn.commit()
-            return True
+            return history_id
         except sqlite3.Error as e:
-            logger.error("insert_pwr_history 실패(SQLite): %s", e)
-            return False
+            logger.error("insert_pwr_history_snapshot 실패(SQLite): %s", e)
+            return -1
         except Exception as e:
-            logger.error("insert_pwr_history 실패: %s", e)
-            return False
+            logger.error("insert_pwr_history_snapshot 실패: %s", e)
+            return -1
+
+    def insert_pwr_history(self, pwr: dict[str, Any]) -> bool:
+        """하위 호환 — 단일 채널 dict 대신 insert_pwr_history_snapshot() 사용 권장."""
+        del pwr
+        return self.insert_pwr_history_snapshot() >= 0
 
     def _insert_tlm_history_locked(self, tlm_row: dict[str, Any]) -> None:
         """현재 TLM 스냅샷을 SAT_TLM_HISTORY 에 append (lock 보유 상태에서 호출)."""
@@ -325,22 +344,43 @@ class DBManager:
         except Exception as e:
             logger.error("SAT_TLM_HISTORY append 실패: %s", e)
 
-    def _insert_pwr_history_locked(self, pwr_row: dict[str, Any]) -> None:
-        """현재 전력 스냅샷을 SAT_PWR_HISTORY 에 append (lock 보유 상태에서 호출)."""
+    def _get_pwr_meta_locked(self, sw_id: int) -> dict[str, Any] | None:
+        """lock 보유 상태에서 SAT_PWR_META 1행 조회."""
+        try:
+            if self._conn is None:
+                return None
+            cur = self._conn.execute(
+                "SELECT * FROM SAT_PWR_META WHERE SW_ID = ?",
+                (int(sw_id),),
+            )
+            return _row_to_dict_or_none(cur.fetchone())
+        except sqlite3.Error as e:
+            logger.error("_get_pwr_meta_locked 실패(SQLite) sw_id=%s: %s", sw_id, e)
+            return None
+        except Exception as e:
+            logger.error("_get_pwr_meta_locked 실패 sw_id=%s: %s", sw_id, e)
+            return None
+
+    def _insert_pwr_history_channel_locked(
+        self,
+        history_id: int,
+        pwr_row: dict[str, Any],
+    ) -> None:
+        """스냅샷 HISTORY_ID에 채널 1행 append (lock 보유)."""
         try:
             if self._conn is None:
                 return
             self._conn.execute(
                 """
-                INSERT INTO SAT_PWR_HISTORY (
-                  SW_ID, UPDATED_AT, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
+                INSERT INTO SAT_PWR_HISTORY_CHANNEL (
+                  HISTORY_ID, SW_ID, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
                   PREV_DELTA_V, CURR_DELTA_V, EXCEED_COUNT, CONSECUTIVE_EXCEED,
                   ANOMALY_FLAG, V_THRESHOLD_LO, V_THRESHOLD_HI
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    int(history_id),
                     int(pwr_row.get("SW_ID", 0)),
-                    str(pwr_row.get("UPDATED_AT", _utc_now_iso())),
                     float(pwr_row.get("VOLTAGE", 0.0)),
                     float(pwr_row.get("PREV_VOLTAGE", 0.0)),
                     float(pwr_row.get("CURRENT_A", 0.0)),
@@ -354,9 +394,9 @@ class DBManager:
                 ),
             )
         except sqlite3.Error as e:
-            logger.error("SAT_PWR_HISTORY append 실패(SQLite): %s", e)
+            logger.error("SAT_PWR_HISTORY_CHANNEL append 실패(SQLite): %s", e)
         except Exception as e:
-            logger.error("SAT_PWR_HISTORY append 실패: %s", e)
+            logger.error("SAT_PWR_HISTORY_CHANNEL append 실패: %s", e)
 
     def upsert_tlm_current(self, tlm: dict[str, Any]) -> bool:
         """SAT_TLM_CURRENT TLM_ID=1 행 부분 UPDATE."""
@@ -952,16 +992,41 @@ class DBManager:
             return []
 
     def get_pwr_history(self) -> list[dict[str, Any]]:
-        """SAT_PWR_HISTORY 전체 — HISTORY_ID 순. 실패 시 []."""
+        """
+        SAT_PWR_HISTORY 스냅샷 목록 — HISTORY_ID별 4채널 channels 배열 포함.
+
+        각 항목: {HISTORY_ID, UPDATED_AT, channels: [dict, ...]}
+        """
         try:
             with self._lock:
                 if self._conn is None:
                     logger.error("get_pwr_history: DB 미연결")
                     return []
-                cur = self._conn.execute(
-                    "SELECT * FROM SAT_PWR_HISTORY ORDER BY HISTORY_ID ASC",
+                header_cur = self._conn.execute(
+                    "SELECT HISTORY_ID, UPDATED_AT FROM SAT_PWR_HISTORY ORDER BY HISTORY_ID ASC",
                 )
-                return [_row_to_dict(r) for r in cur.fetchall()]
+                snapshots: list[dict[str, Any]] = []
+                for header in header_cur.fetchall():
+                    hid = int(header["HISTORY_ID"])
+                    ch_cur = self._conn.execute(
+                        """
+                        SELECT SW_ID, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
+                               PREV_DELTA_V, CURR_DELTA_V, EXCEED_COUNT,
+                               CONSECUTIVE_EXCEED, ANOMALY_FLAG,
+                               V_THRESHOLD_LO, V_THRESHOLD_HI
+                        FROM SAT_PWR_HISTORY_CHANNEL
+                        WHERE HISTORY_ID = ?
+                        ORDER BY SW_ID ASC
+                        """,
+                        (hid,),
+                    )
+                    channels = [_row_to_dict(r) for r in ch_cur.fetchall()]
+                    snapshots.append({
+                        "HISTORY_ID": hid,
+                        "UPDATED_AT": str(header["UPDATED_AT"]),
+                        "channels": channels,
+                    })
+                return snapshots
         except sqlite3.Error as e:
             logger.error("get_pwr_history 실패(SQLite): %s", e)
             return []
@@ -1122,22 +1187,27 @@ class DBManager:
 
     def delete_pwr_history_by_ids(self, history_ids: list[int]) -> int:
         """
-        SAT_PWR_HISTORY에서 지정된 HISTORY_ID 목록 삭제.
+        SAT_PWR_HISTORY 스냅샷(HISTORY_ID) 및 채널 행 삭제.
 
-        삭제 조건 결정은 호출자가 수행하고, 본 메서드는 삭제만 담당.
-        반환: 삭제된 행 수.
+        반환: 삭제된 스냅샷 수.
         """
         try:
             if not history_ids:
                 return 0
             ids = [int(v) for v in history_ids]
             placeholders = ", ".join("?" for _ in ids)
-            sql = f"DELETE FROM SAT_PWR_HISTORY WHERE HISTORY_ID IN ({placeholders})"
             with self._lock:
                 if self._conn is None:
                     logger.error("delete_pwr_history_by_ids: DB 미연결")
                     return 0
-                cur = self._conn.execute(sql, ids)
+                self._conn.execute(
+                    f"DELETE FROM SAT_PWR_HISTORY_CHANNEL WHERE HISTORY_ID IN ({placeholders})",
+                    ids,
+                )
+                cur = self._conn.execute(
+                    f"DELETE FROM SAT_PWR_HISTORY WHERE HISTORY_ID IN ({placeholders})",
+                    ids,
+                )
                 self._conn.commit()
                 return int(cur.rowcount if cur.rowcount is not None else 0)
         except (ValueError, TypeError) as e:

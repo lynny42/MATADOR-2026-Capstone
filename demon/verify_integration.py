@@ -42,24 +42,22 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok(f"SAT_PWR_META {pwr_rows} rows seeded")
 
     db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.1, "current_a": 0.4})
-    m0 = db.get_pwr_meta(0)
-    if m0 is not None:
-        db.insert_pwr_history(m0)
     db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.4, "current_a": 0.5})
     m0 = db.get_pwr_meta(0)
     if m0 is None or abs(m0["CURR_DELTA_V"] - 0.3) > 1e-6:
         _fail(f"pwr delta expected 0.3 got {None if m0 is None else m0['CURR_DELTA_V']}")
     _ok("upsert_pwr_meta delta sliding window")
-    if m0 is not None:
-        db.insert_pwr_history(m0)
-    conn = sqlite3.connect(tmp_db)
-    pwr_hist_rows = conn.execute(
-        "SELECT COUNT(*) FROM SAT_PWR_HISTORY WHERE SW_ID = 0",
-    ).fetchone()[0]
-    conn.close()
-    if pwr_hist_rows < 2:
-        _fail(f"SAT_PWR_HISTORY append count={pwr_hist_rows}")
-    _ok("SAT_PWR_HISTORY append")
+
+    hid1 = db.insert_pwr_history_snapshot()
+    hid2 = db.insert_pwr_history_snapshot()
+    if hid1 < 1 or hid2 < 2:
+        _fail(f"insert_pwr_history_snapshot ids={hid1},{hid2}")
+    pwr_snapshots = db.get_pwr_history()
+    if len(pwr_snapshots) != 2:
+        _fail(f"get_pwr_history snapshot count={len(pwr_snapshots)}")
+    if len(pwr_snapshots[0].get("channels", [])) != demon_config.PWR_SW_ID_COUNT:
+        _fail(f"channels per snapshot={len(pwr_snapshots[0].get('channels', []))}")
+    _ok("SAT_PWR_HISTORY snapshot (4 channels per HISTORY_ID)")
 
     db.update_pwr_exceed_meta(
         {"sw_id": 0, "exceed_count": 3, "consecutive_exceed": 2, "anomaly_flag": 1},
@@ -228,14 +226,7 @@ def test_serial_reader_parsing(tmp_db: Path) -> None:
     m0 = db.get_pwr_meta(0)
     if m0 is None or abs(float(m0["VOLTAGE"]) - 3.5) > 1e-6:
         _fail(f"dispatch power line {m0}")
-    conn = sqlite3.connect(tmp_db)
-    pwr_hist = conn.execute(
-        "SELECT COUNT(*) FROM SAT_PWR_HISTORY WHERE SW_ID = 0",
-    ).fetchone()[0]
-    conn.close()
-    if pwr_hist < 1:
-        _fail(f"SAT_PWR_HISTORY after dispatch count={pwr_hist}")
-    _ok("dispatch_line power → upsert_pwr_meta + history")
+    _ok("dispatch_line power → upsert_pwr_meta")
 
     reader._dispatch_line("L,dark,80000")
     if reader.get_light_state() != "dark":

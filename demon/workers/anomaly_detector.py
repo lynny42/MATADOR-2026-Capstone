@@ -26,6 +26,13 @@ class FalsePositiveFilterLike(Protocol):
         ...
 
 
+class GScommsLike(Protocol):
+    """ADCS 누적 스냅샷 즉시 송신용 (set_gs_comms)."""
+
+    def transmit_adcs_filter(self) -> None:
+        ...
+
+
 class AnomalyDetector:
     """전력 이상 탐지 — 1초 주기 SAT_PWR_META 채널 0~3 스캔."""
 
@@ -33,7 +40,8 @@ class AnomalyDetector:
         self._ctx = ctx
         self._attack_mode = False
         self._false_positive_filter: FalsePositiveFilterLike | None = None
-        self._anomaly_active = False
+        self._gs_comms: GScommsLike | None = None
+        self._fpf_dispatched = False
         self._adcs_series: deque[dict[str, Any]] = deque(maxlen=5)
         self._tlm_series: deque[dict[str, Any]] = deque(maxlen=5)
 
@@ -43,6 +51,13 @@ class AnomalyDetector:
             self._false_positive_filter = fpf
         except Exception as e:
             logger.error("set_false_positive_filter 실패: %s", e)
+
+    def set_gs_comms(self, gs: GScommsLike) -> None:
+        """에피소드 종료 시 ADCS 누적 송신용 GScomms 주입."""
+        try:
+            self._gs_comms = gs
+        except Exception as e:
+            logger.error("set_gs_comms 실패: %s", e)
 
     def set_attack_mode(self, enabled: bool) -> None:
         """True 이면 전압 임계 범위 10% 축소(민감도 상승)."""
@@ -74,11 +89,18 @@ class AnomalyDetector:
             self._refresh_series_buffers()
             for sw_id in range(demon_config.PWR_SW_ID_COUNT):
                 self._process_channel(sw_id)
+            if self._ctx.db.insert_pwr_history_snapshot() < 0:
+                logger.warning("insert_pwr_history_snapshot 실패")
+
             anomaly = self.detect_power_anomaly()
             if anomaly:
-                self._handle_power_anomaly(anomaly)
+                self._persist_adcs_on_anomaly()
+                if not self._fpf_dispatched:
+                    self._handle_power_anomaly_first(anomaly)
             else:
-                self._anomaly_active = False
+                if self._fpf_dispatched:
+                    self._transmit_adcs_episode_end()
+                self._fpf_dispatched = False
         except Exception as e:
             logger.error("_tick 실패: %s", e)
 
@@ -268,13 +290,9 @@ class AnomalyDetector:
             logger.error("verify_hash_on_anomaly 실패: %s", e)
             return False
 
-    def _handle_power_anomaly(self, anomaly: dict[str, Any]) -> None:
-        """이상 감지 후 무결성 검사 → 오탐 필터 전달 (에피소드당 1회)."""
+    def _handle_power_anomaly_first(self, anomaly: dict[str, Any]) -> None:
+        """이상 에피소드 최초 1회 — 무결성 검사 → 오탐 필터 전달."""
         try:
-            if self._anomaly_active:
-                return
-            self._anomaly_active = True
-
             sw_id_list = list(anomaly.get("sw_id_list", []))
             if not sw_id_list:
                 return
@@ -284,12 +302,11 @@ class AnomalyDetector:
                     "무결성 위반 감지 — PRIORITY=1 이벤트 등록, 오탐 필터 스킵 sw_id_list=%s",
                     sw_id_list,
                 )
+                self._fpf_dispatched = True
                 return
 
             detected_at = self._utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
-
-            self._persist_adcs_snapshot()
 
             adcs_row = self._ctx.db.get_adcs_filter()
             channel1 = int(
@@ -312,20 +329,30 @@ class AnomalyDetector:
                     "FalsePositiveFilter 미주입 — on_anomaly_detected 스킵 sw_id=%s",
                     primary_sw_id,
                 )
+                self._fpf_dispatched = True
                 return
 
             self._false_positive_filter.on_anomaly_detected(key_set)
+            self._fpf_dispatched = True
             logger.info(
                 "전력 이상 → 오탐필터 전달 sw_id_list=%s channel1=%s",
                 sw_id_list,
                 channel1,
             )
         except Exception as e:
-            logger.error("_handle_power_anomaly 실패: %s", e)
+            logger.error("_handle_power_anomaly_first 실패: %s", e)
 
-    def _persist_adcs_snapshot(self) -> None:
-        """이상 시점 ADCS 스냅샷을 SAT_ADCS_FILTER 에 저장."""
+    def _persist_adcs_on_anomaly(self) -> None:
+        """이상 구간 동안 ADCS 스냅샷을 SAT_ADCS_FILTER에 누적."""
         try:
+            if not self._fpf_dispatched:
+                for snap in self._adcs_series:
+                    payload = dict(snap)
+                    payload.pop("CHENNEL1", None)
+                    if payload:
+                        payload.setdefault("TIMESTAMP", self._utc_now_iso())
+                        if not self._ctx.db.insert_adcs_filter(payload):
+                            logger.warning("insert_adcs_filter 실패(시리즈)")
             if self._adcs_series:
                 payload = dict(self._adcs_series[-1])
             else:
@@ -338,7 +365,18 @@ class AnomalyDetector:
             if not self._ctx.db.insert_adcs_filter(payload):
                 logger.warning("insert_adcs_filter 실패")
         except Exception as e:
-            logger.error("_persist_adcs_snapshot 실패: %s", e)
+            logger.error("_persist_adcs_on_anomaly 실패: %s", e)
+
+    def _transmit_adcs_episode_end(self) -> None:
+        """이상 해제 시 누적 ADCS 스냅샷 전체를 지상국으로 송신."""
+        try:
+            if self._gs_comms is None:
+                logger.warning("GScomms 미주입 — ADCS 에피소드 종료 송신 스킵")
+                return
+            self._gs_comms.transmit_adcs_filter()
+            logger.info("이상 에피소드 종료 — SAT_ADCS_FILTER 누적 송신")
+        except Exception as e:
+            logger.error("_transmit_adcs_episode_end 실패: %s", e)
 
     def _effective_thresholds(self, sw_id: int) -> tuple[float, float]:
         """공격 모드 시 정상 범위 폭 10% 축소."""

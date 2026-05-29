@@ -289,9 +289,6 @@ class SerialReader:
             if not self._ctx.db.upsert_pwr_meta(sample):
                 logger.warning("upsert_pwr_meta 실패 sw_id=%s", sample.get("sw_id"))
                 return
-            pwr_row = self._ctx.db.get_pwr_meta(int(sample["sw_id"]))
-            if pwr_row is not None:
-                self._ctx.db.insert_pwr_history(pwr_row)
             if demon_config.SERIAL_LOG_PARSED:
                 logger.info(
                     "serial pwr sw_id=%s V=%.3f A=%.4f",

@@ -75,6 +75,7 @@ class MatadorDaemon:
 
             gs_comms.set_anomaly_detector(anomaly_detector)
             gs_comms.set_serial_reader(serial_reader)
+            anomaly_detector.set_gs_comms(gs_comms)
 
             false_positive_filter = self._try_create_false_positive_filter(ctx, gs_comms)
             if false_positive_filter is not None:

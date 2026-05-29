@@ -162,6 +162,7 @@ class GScomms:
                 sw_id,
                 chennel1,
             )
+            self.transmit_adcs_filter()
             return event_id
         except (ValueError, TypeError) as e:
             logger.error("insert_event 입력 오류: %s", e)
@@ -209,7 +210,7 @@ class GScomms:
             logger.error("transmit_tlm_history 실패: %s", e)
 
     def transmit_pwr_history(self) -> None:
-        """SAT_PWR_HISTORY 전체 송신 — ACK 시 delete_pwr_history."""
+        """SAT_PWR_HISTORY 스냅샷(HISTORY_ID별 4채널) 송신 — ACK 시 delete_pwr_history."""
         try:
             records = self._ctx.db.get_pwr_history()
             if not records:

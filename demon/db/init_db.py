@@ -116,12 +116,19 @@ DDL_STATEMENTS: list[str] = [
       V_THRESHOLD_HI REAL NOT NULL
     )
     """,
-    # SAT_PWR_HISTORY — SAT_PWR_META 누적 히스토리
+    # SAT_PWR_HISTORY — 스냅샷 헤더 (HISTORY_ID 1건 = 4채널 1세트)
     """
     CREATE TABLE IF NOT EXISTS SAT_PWR_HISTORY (
       HISTORY_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      UPDATED_AT TEXT NOT NULL
+    )
+    """,
+    # SAT_PWR_HISTORY_CHANNEL — 스냅샷별 SW_ID 0~3 채널 행
+    """
+    CREATE TABLE IF NOT EXISTS SAT_PWR_HISTORY_CHANNEL (
+      CHANNEL_ROW_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      HISTORY_ID INTEGER NOT NULL,
       SW_ID INTEGER NOT NULL,
-      UPDATED_AT TEXT NOT NULL,
       VOLTAGE REAL NOT NULL,
       PREV_VOLTAGE REAL NOT NULL,
       CURRENT_A REAL NOT NULL,
@@ -135,8 +142,8 @@ DDL_STATEMENTS: list[str] = [
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS IDX_PWR_HISTORY_SW_ID_UPDATED_AT
-    ON SAT_PWR_HISTORY(SW_ID, UPDATED_AT)
+    CREATE INDEX IF NOT EXISTS IDX_PWR_HISTORY_CHANNEL_HISTORY_ID
+    ON SAT_PWR_HISTORY_CHANNEL(HISTORY_ID)
     """,
     # SAT_INTEGRITY_HASH — 파일 무결성
     """
@@ -252,6 +259,94 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
         return False
 
 
+def _migrate_pwr_history_snapshot_schema(conn: sqlite3.Connection) -> None:
+    """구 단일 테이블(SW_ID 컬럼) → 스냅샷+채널 2테이블 구조."""
+    try:
+        cur = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='SAT_PWR_HISTORY'",
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return
+        ch_tbl = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SAT_PWR_HISTORY_CHANNEL'",
+        ).fetchone()
+        if ch_tbl is not None:
+            return
+        if "SW_ID" not in str(row[0]):
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS SAT_PWR_HISTORY_NEW (
+              HISTORY_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              UPDATED_AT TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS SAT_PWR_HISTORY_CHANNEL (
+              CHANNEL_ROW_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              HISTORY_ID INTEGER NOT NULL,
+              SW_ID INTEGER NOT NULL,
+              VOLTAGE REAL NOT NULL,
+              PREV_VOLTAGE REAL NOT NULL,
+              CURRENT_A REAL NOT NULL,
+              PREV_DELTA_V REAL NOT NULL,
+              CURR_DELTA_V REAL NOT NULL,
+              EXCEED_COUNT INTEGER NOT NULL,
+              CONSECUTIVE_EXCEED INTEGER NOT NULL,
+              ANOMALY_FLAG INTEGER NOT NULL,
+              V_THRESHOLD_LO REAL NOT NULL,
+              V_THRESHOLD_HI REAL NOT NULL
+            )
+            """
+        )
+        old_rows = conn.execute(
+            """
+            SELECT HISTORY_ID, SW_ID, UPDATED_AT, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
+                   PREV_DELTA_V, CURR_DELTA_V, EXCEED_COUNT, CONSECUTIVE_EXCEED,
+                   ANOMALY_FLAG, V_THRESHOLD_LO, V_THRESHOLD_HI
+            FROM SAT_PWR_HISTORY ORDER BY UPDATED_AT, HISTORY_ID
+            """
+        ).fetchall()
+        snapshot_map: dict[str, int] = {}
+        for old in old_rows:
+            ts = str(old[2])
+            if ts not in snapshot_map:
+                cur_ins = conn.execute(
+                    "INSERT INTO SAT_PWR_HISTORY_NEW (UPDATED_AT) VALUES (?)",
+                    (ts,),
+                )
+                snapshot_map[ts] = int(cur_ins.lastrowid)
+            hid = snapshot_map[ts]
+            conn.execute(
+                """
+                INSERT INTO SAT_PWR_HISTORY_CHANNEL (
+                  HISTORY_ID, SW_ID, VOLTAGE, PREV_VOLTAGE, CURRENT_A,
+                  PREV_DELTA_V, CURR_DELTA_V, EXCEED_COUNT, CONSECUTIVE_EXCEED,
+                  ANOMALY_FLAG, V_THRESHOLD_LO, V_THRESHOLD_HI
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (hid, old[1], old[3], old[4], old[5], old[6], old[7], old[8], old[9], old[10], old[11], old[12]),
+            )
+        conn.execute("DROP TABLE SAT_PWR_HISTORY")
+        conn.execute("ALTER TABLE SAT_PWR_HISTORY_NEW RENAME TO SAT_PWR_HISTORY")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS IDX_PWR_HISTORY_CHANNEL_HISTORY_ID
+            ON SAT_PWR_HISTORY_CHANNEL(HISTORY_ID)
+            """
+        )
+        logger.info("SAT_PWR_HISTORY: 스냅샷+채널 2테이블 마이그레이션 완료")
+    except sqlite3.Error as e:
+        logger.error("SAT_PWR_HISTORY 스키마 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_PWR_HISTORY 스키마 마이그레이션 실패: %s", e)
+        raise
+
+
 def _migrate_event_queue_columns(conn: sqlite3.Connection) -> None:
     """SAT_EVENT_QUEUE 확장 컬럼 — 기존 DB 호환."""
     try:
@@ -353,6 +448,7 @@ def init_db(db_path: Path) -> None:
         for stmt in DDL_STATEMENTS:
             conn.execute(stmt)
         _migrate_integrity_hash_column(conn)
+        _migrate_pwr_history_snapshot_schema(conn)
         _migrate_event_queue_columns(conn)
         _migrate_adcs_filter_autoincrement(conn)
         _seed_sat_tlm_current(conn)
