@@ -44,18 +44,28 @@ UDP_RECV_BUFFER_BYTES = 65535
 # ============================================================
 # 지상국 TCP (송수신)
 # ============================================================
-GS_HOST = "10.0.1.2"
+GS_HOST = "192.168.0.12"
 GS_PORT = 6000
 GS_SEND_RETRY_MAX = 3
 GS_SEND_RETRY_BASE_SEC = 1.0
 # 지상국 → 위성 커맨드 이름 (GScomms.dispatch_command)
 GS_CMD_ATTACK_SIM = "ATTACK_SIM"
+GS_CMD_ATTACK_HASH = "ATTACK_HASH"
 GS_CMD_RECOVERY = "RECOVERY"
 GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 GS_CMD_UPDATE_HASH = "UPDATE_HASH"
 GS_CMD_ACK = "ACK"
 GS_CMD_LISTEN_HOST = "0.0.0.0"
 GS_CMD_LISTEN_PORT_OFFSET = 1
+# 지상국 → 위성 커맨드 송신 목적 (GScomms 수신 포트 = GS_PORT + OFFSET)
+# 현재 동일 PC 테스트: 127.0.0.1 / 추후 위성: 192.168.0.7
+GS_CMD_SAT_HOST = "127.0.0.1"
+GS_CMD_SAT_PORT = GS_PORT + GS_CMD_LISTEN_PORT_OFFSET
+# 지상국 bulk 송신: 조도 L,dark → L,light 엣지 1회 (SUN_VALID 미사용)
+GS_TRANSMIT_ON_LIGHT_EDGE = True
+GS_POLL_INTERVAL_SEC = 1.0
+# PWR/TLM history 송신 배치 크기 (HISTORY_ID 건수, 패킷 분할)
+GS_HISTORY_BATCH_SIZE = 30
 
 # ============================================================
 # DB
@@ -109,9 +119,11 @@ VOLTAGE_MAX = 6.0
 CURRENT_MAX = 5.0
 
 # ============================================================
-# 무결성 검증
+# 무결성 검증 (cFS cpu2 cf — 폴더 매니페스트 해시 1건)
 # ============================================================
-INTEGRITY_TARGET_DIR = "/cf"
+INTEGRITY_TARGET_DIR = "~/cfs/cpu2/cf"
+INTEGRITY_DIR_FILE_ID = 1
+INTEGRITY_DIR_FILE_PATH = "."
 
 # ============================================================
 # 이상탐지 기준
@@ -128,10 +140,14 @@ ATTACK_MODE_THRESHOLD_SHRINK_RATIO = 0.1
 ATTACK_SIM_PWR_BIAS = True
 ATTACK_SIM_ENABLE_GYRO = True
 ATTACK_SIM_ENABLE_SERVO = True
-ATTACK_SIM_SERVO_REPEATS = 3
+ATTACK_SIM_SERVO_REPEATS = 5
 ATTACK_SIM_SERVO_ANGLE = 90
 # 논리: SAT_ADCS_FILTER / SAT_TLM_CURRENT 에 오탐필터용 이상 스냅샷 주입
 ATTACK_SIM_INJECT_LOGICAL = True
+# cf 무결성 — ATTACK_HASH 전용 (ATTACK_SIM 과 분리)
+ATTACK_HASH_SERVO_REPEATS = 5
+ATTACK_HASH_CF_FILENAME = "matador_gs_inject.txt"
+ATTACK_HASH_CF_PAYLOAD = "MATADOR ground-station cf file injection\n"
 
 # ============================================================
 # 로깅

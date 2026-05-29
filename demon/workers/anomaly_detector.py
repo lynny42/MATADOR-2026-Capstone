@@ -9,6 +9,10 @@ from typing import Any, Protocol
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
+from ..integrity_dir_hash import (
+    INTEGRITY_DIR_FILE_PATH,
+    compute_directory_manifest_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ class AnomalyDetector:
     def __init__(self, ctx: RuntimeContext) -> None:
         self._ctx = ctx
         self._attack_mode = False
+        self._hash_attack_mode = False
         self._false_positive_filter: FalsePositiveFilterLike | None = None
         self._gs_comms: GScommsLike | None = None
         self._fpf_dispatched = False
@@ -66,6 +71,14 @@ class AnomalyDetector:
             logger.info("AnomalyDetector attack_mode=%s", self._attack_mode)
         except Exception as e:
             logger.error("set_attack_mode 실패: %s", e)
+
+    def set_hash_attack_mode(self, enabled: bool) -> None:
+        """True 이면 ATTACK_HASH — 전력 이상 최초 1회 시 폴더 hash 검사."""
+        try:
+            self._hash_attack_mode = bool(enabled)
+            logger.info("AnomalyDetector hash_attack_mode=%s", self._hash_attack_mode)
+        except Exception as e:
+            logger.error("set_hash_attack_mode 실패: %s", e)
 
     def run(self) -> None:
         """anomaly_detector_thread — 1초 주기 탐지 루프."""
@@ -232,78 +245,107 @@ class AnomalyDetector:
 
     def verify_hash_on_anomaly(self) -> bool:
         """
-        integrity_target_dir 대상 파일 해시 검증.
+        integrity_target_dir 폴더 매니페스트 해시 검증.
 
         Returns:
-            True — 변조·누락 감지(오탐 필터 스킵). INSERT 성공 여부와 무관.
-            False — 이상 없음 또는 검증 대상 없음.
+            True — 변조·누락 감지(오탐 필터 스킵).
+            False — 통과 또는 기대 해시 미등록(검사 스킵).
         """
         try:
-            records = self._ctx.db.get_integrity_hash()
-            if records is None:
-                logger.warning("verify_hash_on_anomaly: 무결성 레코드 조회 실패")
-                return False
-            if not records:
+            file_id = int(getattr(demon_config, "INTEGRITY_DIR_FILE_ID", 1))
+            rec = self._ctx.db.get_integrity_hash(file_id)
+            if rec is None:
+                rows = self._ctx.db.get_integrity_hash()
+                if rows is None:
+                    logger.warning("폴더 hash 검사 실패: DB 조회 오류")
+                    return False
+                if isinstance(rows, list) and rows:
+                    rec = rows[0]
+                else:
+                    logger.info(
+                        "폴더 hash 검사 스킵: baseline 없음 "
+                        "(python3 -m demon.tools.seed_cf_integrity)",
+                    )
+                    return False
+
+            if int(rec.get("IS_VIOLATED", 0)) == 1:
+                logger.warning("폴더 hash 검사: 이미 IS_VIOLATED=1 (이전 위반)")
+                return True
+
+            expected = str(rec.get("EXPECTED_HASH", "")).strip().lower()
+            if not expected:
+                logger.warning("폴더 hash 검사 스킵: EXPECTED_HASH 비어 있음")
                 return False
 
-            base_dir = Path(self._ctx.config.integrity_target_dir)
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                if int(rec.get("IS_VIOLATED", 0)) == 1:
-                    continue
-                file_path = str(rec.get("FILE_PATH", "")).strip()
-                expected = str(rec.get("EXPECTED_HASH", "")).strip().lower()
-                if not file_path or not expected:
-                    continue
-                target = Path(file_path)
-                if not target.is_absolute():
-                    target = base_dir / file_path
-                actual = self._compute_file_hash(target)
-                if actual is None:
-                    self._ctx.db.update_integrity_result(file_path, 1)
-                    if not self._insert_integrity_event(
-                        file_path,
-                        "missing_or_unreadable",
-                        _EXCEPTION_CODE_HASH_MISSING,
-                    ):
-                        logger.error(
-                            "무결성 이벤트 INSERT 실패(누락) — 오탐 필터는 스킵 path=%s",
-                            file_path,
-                        )
-                    return True
-                if actual.lower() != expected:
-                    self._ctx.db.update_integrity_result(file_path, 1)
-                    if not self._insert_integrity_event(
-                        file_path,
-                        "hash_mismatch",
-                        _EXCEPTION_CODE_HASH_MISMATCH,
-                    ):
-                        logger.error(
-                            "무결성 이벤트 INSERT 실패(불일치) — 오탐 필터는 스킵 path=%s",
-                            file_path,
-                        )
-                    return True
-                self._ctx.db.update_integrity_result(file_path, 0)
+            db_path_key = str(rec.get("FILE_PATH", INTEGRITY_DIR_FILE_PATH)).strip()
+            base_dir = Path(self._ctx.config.integrity_target_dir).expanduser()
+            file_count = sum(1 for p in base_dir.rglob("*") if p.is_file()) if base_dir.is_dir() else 0
+            actual = compute_directory_manifest_hash(base_dir)
+
+            if actual is None:
+                logger.warning(
+                    "폴더 hash 검사 불통과: 디렉터리 없음 dir=%s",
+                    base_dir,
+                )
+                self._ctx.db.update_integrity_result(db_path_key, 1)
+                if not self._insert_integrity_event(
+                    str(base_dir),
+                    "directory_missing",
+                    _EXCEPTION_CODE_HASH_MISSING,
+                ):
+                    logger.error("무결성 이벤트 INSERT 실패(디렉터리 없음)")
+                return True
+
+            if actual.lower() != expected:
+                logger.warning(
+                    "폴더 hash 검사 불통과 dir=%s files=%s "
+                    "expected=%s actual=%s",
+                    base_dir,
+                    file_count,
+                    expected,
+                    actual,
+                )
+                self._ctx.db.update_integrity_result(db_path_key, 1)
+                if not self._insert_integrity_event(
+                    str(base_dir),
+                    "directory_hash_mismatch",
+                    _EXCEPTION_CODE_HASH_MISMATCH,
+                ):
+                    logger.error("무결성 이벤트 INSERT 실패(폴더 해시 불일치)")
+                return True
+
+            self._ctx.db.update_integrity_result(db_path_key, 0)
+            logger.info(
+                "폴더 hash 검사 통과 dir=%s files=%s "
+                "manifest_sha256=%s (baseline 일치)",
+                base_dir,
+                file_count,
+                actual,
+            )
             return False
         except Exception as e:
             logger.error("verify_hash_on_anomaly 실패: %s", e)
             return False
 
     def _handle_power_anomaly_first(self, anomaly: dict[str, Any]) -> None:
-        """이상 에피소드 최초 1회 — 무결성 검사 → 오탐 필터 전달."""
+        """이상 에피소드 최초 1회 — (hash) cf 주입·무결성 검사 또는 오탐 필터."""
         try:
             sw_id_list = list(anomaly.get("sw_id_list", []))
             if not sw_id_list:
                 return
 
-            if self.verify_hash_on_anomaly():
-                logger.warning(
-                    "무결성 위반 감지 — PRIORITY=1 이벤트 등록, 오탐 필터 스킵 sw_id_list=%s",
-                    sw_id_list,
-                )
-                self._fpf_dispatched = True
-                return
+            if self._attack_mode or self._hash_attack_mode:
+                scenario = "ATTACK_HASH" if self._hash_attack_mode else "ATTACK_SIM"
+                logger.info("%s: 전력 이상 확정 — 폴더 hash 검사", scenario)
+                if self.verify_hash_on_anomaly():
+                    logger.warning(
+                        "%s: hash 불통과 — PRIORITY=1 이벤트, 오탐 필터 스킵 sw_id_list=%s",
+                        scenario,
+                        sw_id_list,
+                    )
+                    self._fpf_dispatched = True
+                    return
+                logger.info("%s: hash 통과 — 오탐 필터 진행", scenario)
 
             detected_at = self._utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
@@ -369,13 +411,14 @@ class AnomalyDetector:
             logger.error("_persist_adcs_on_anomaly 실패: %s", e)
 
     def _transmit_adcs_episode_end(self) -> None:
-        """이상 해제 시 누적 ADCS 스냅샷 전체를 지상국으로 송신."""
+        """이상 해제 — SAT_ADCS_FILTER 누적은 조도 dark→light 시 GScomms.transmit_all 에서 송신."""
         try:
-            if self._gs_comms is None:
-                logger.warning("GScomms 미주입 — ADCS 에피소드 종료 송신 스킵")
-                return
-            self._gs_comms.transmit_adcs_filter()
-            logger.info("이상 에피소드 종료 — SAT_ADCS_FILTER 누적 송신")
+            rows = self._ctx.db.get_adcs_filter_all()
+            n = len(rows) if rows else 0
+            logger.info(
+                "이상 에피소드 종료 — SAT_ADCS_FILTER %s행 대기 (조도 dark→light 시 송신)",
+                n,
+            )
         except Exception as e:
             logger.error("_transmit_adcs_episode_end 실패: %s", e)
 

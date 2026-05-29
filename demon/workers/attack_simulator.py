@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from .. import config as demon_config
@@ -16,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 class AnomalyDetectorLike(Protocol):
     def set_attack_mode(self, enabled: bool) -> None:
+        ...
+
+    def set_hash_attack_mode(self, enabled: bool) -> None:
         ...
 
 
@@ -32,21 +37,24 @@ class SerialReaderLike(Protocol):
 
 class AttackSimulator:
     """
-    GScomms.handle_attack_sim / handle_recovery 에서 호출.
+    GScomms.handle_attack_sim / handle_attack_hash / handle_recovery 에서 호출.
 
-    start(): attack_mode + 시리얼(JSON) + (선택) ADCS/TLM 주입
-    stop():  시리얼 해제 + attack_mode 복구
+    start(): ATTACK_SIM — attack_mode + 시리얼(JSON) + ADCS/TLM (물리·논리)
+    start_hash(): ATTACK_HASH — 물리(모터·바이어스) → cf 파일 → 전력 이상 시 hash 검사
+    stop():  시리얼 해제 + cf 주입 파일 삭제 + attack_mode 복구
     """
 
     def __init__(self, ctx: RuntimeContext) -> None:
         self._ctx = ctx
         self._anomaly_detector: AnomalyDetectorLike | None = None
         self._serial_reader: SerialReaderLike | None = None
-        self._active = False
+        self._physical_active = False
+        self._hash_active = False
+        self._injected_cf_path: Path | None = None
 
     @property
     def is_active(self) -> bool:
-        return self._active
+        return self._physical_active or self._hash_active
 
     def set_anomaly_detector(self, detector: AnomalyDetectorLike) -> None:
         try:
@@ -60,20 +68,16 @@ class AttackSimulator:
         except Exception as e:
             logger.error("AttackSimulator.set_serial_reader 실패: %s", e)
 
-    def start(self) -> bool:
-        """ATTACK_SIM — 데몬이 아두이노에 JSON 명령을 순서대로 전송."""
+    def start(self, cmd: dict[str, Any] | None = None) -> bool:
+        """ATTACK_SIM — 물리(시리얼) + 논리(DB). cf 파일 주입 없음."""
         try:
-            if self._active:
-                logger.warning("AttackSimulator 이미 활성 — start 스킵")
+            if self._physical_active:
+                logger.warning("ATTACK_SIM 이미 활성 — start 스킵")
                 return True
 
             ok_any = False
-
-            if self._anomaly_detector is not None:
-                self._anomaly_detector.set_attack_mode(True)
-                ok_any = True
-            else:
-                logger.error("AnomalyDetector 미주입 — attack_mode 스킵")
+            self._set_attack_mode(True)
+            self._set_hash_attack_mode(False)
 
             if self._run_physical_attack():
                 ok_any = True
@@ -83,39 +87,103 @@ class AttackSimulator:
                     ok_any = True
 
             if ok_any:
-                self._active = True
-                logger.info("AttackSimulator 시작 (active=True)")
+                self._physical_active = True
+                logger.info("ATTACK_SIM 시작 (physical_active=True)")
             else:
-                logger.error("AttackSimulator 시작 실패 — 동작 없음")
+                logger.error("ATTACK_SIM 시작 실패 — 동작 없음")
             return ok_any
         except Exception as e:
             logger.error("AttackSimulator.start 실패: %s", e)
             return False
 
-    def stop(self) -> bool:
-        """RECOVERY — 바이어스·자이로 해제."""
+    def start_hash(self, cmd: dict[str, Any] | None = None) -> bool:
+        """
+        ATTACK_HASH — (1) 물리 공격 (2) cf 파일 생성 (3) 전력 이상 최초 1회 시 hash 검사.
+
+        ADCS 논리 주입 없음.
+        """
         try:
-            if not self._active and self._anomaly_detector is None:
+            options = cmd if isinstance(cmd, dict) else {}
+            ok_any = False
+            self._set_attack_mode(True)
+            self._set_hash_attack_mode(True)
+
+            if not self._physical_active:
+                hash_repeats = int(getattr(demon_config, "ATTACK_HASH_SERVO_REPEATS", 5))
+                if self._run_physical_attack(servo_repeats=hash_repeats):
+                    self._physical_active = True
+                    ok_any = True
+                    logger.info("ATTACK_HASH [1/3] 물리 공격(모터·바이어스) 시작")
+                else:
+                    logger.error("ATTACK_HASH — 물리 공격 실패")
+                    self._set_hash_attack_mode(False)
+                    return False
+            else:
+                ok_any = True
+                logger.info("ATTACK_HASH: 물리 공격 이미 활성")
+
+            if self._inject_cf_file_attack(options):
+                ok_any = True
+                self._hash_active = True
+                logger.info("ATTACK_HASH [2/3] cf 파일 생성 완료 — 전력 이상 시 hash 검사")
+            else:
+                logger.error("ATTACK_HASH [2/3] cf 파일 생성 실패")
+                self._set_hash_attack_mode(False)
+                return False
+
+            logger.info("ATTACK_HASH [3/3] 전력 이상 대기 중")
+            return ok_any
+        except Exception as e:
+            logger.error("AttackSimulator.start_hash 실패: %s", e)
+            return False
+
+    def stop(self, cmd: dict[str, Any] | None = None) -> bool:
+        """RECOVERY — 물리·hash 공격 모두 해제."""
+        try:
+            if not self.is_active and self._anomaly_detector is None:
                 logger.warning("AttackSimulator 비활성 — stop 스킵")
                 return False
 
             ok_any = False
 
-            if self._run_physical_recovery():
+            if self._remove_injected_cf_file():
                 ok_any = True
+            self._hash_active = False
+            self._set_hash_attack_mode(False)
 
-            if self._anomaly_detector is not None:
-                self._anomaly_detector.set_attack_mode(False)
+            if self._physical_active and self._run_physical_recovery():
                 ok_any = True
+            self._physical_active = False
 
-            self._active = False
-            logger.info("AttackSimulator 종료 (active=False)")
+            self._set_attack_mode(False)
+            ok_any = True
+
+            logger.info("AttackSimulator RECOVERY 완료")
             return ok_any
         except Exception as e:
             logger.error("AttackSimulator.stop 실패: %s", e)
             return False
 
-    def _run_physical_attack(self) -> bool:
+    def _set_attack_mode(self, enabled: bool) -> None:
+        try:
+            if self._anomaly_detector is not None:
+                self._anomaly_detector.set_attack_mode(enabled)
+            elif enabled:
+                logger.error("AnomalyDetector 미주입 — attack_mode 스킵")
+        except Exception as e:
+            logger.error("_set_attack_mode 실패: %s", e)
+
+    def _set_hash_attack_mode(self, enabled: bool) -> None:
+        try:
+            if self._anomaly_detector is not None:
+                if hasattr(self._anomaly_detector, "set_hash_attack_mode"):
+                    self._anomaly_detector.set_hash_attack_mode(enabled)
+            elif enabled:
+                logger.error("AnomalyDetector 미주입 — hash_attack_mode 스킵")
+        except Exception as e:
+            logger.error("_set_hash_attack_mode 실패: %s", e)
+
+    def _run_physical_attack(self, servo_repeats: int | None = None) -> bool:
         """앱 → 아두이노: pwr_bias on, gyro on, (선택) servo."""
         try:
             if self._serial_reader is None:
@@ -137,7 +205,10 @@ class AttackSimulator:
                     ok_any = True
 
             if self._config_bool("ATTACK_SIM_ENABLE_SERVO", True):
-                repeats = int(getattr(demon_config, "ATTACK_SIM_SERVO_REPEATS", 3))
+                if servo_repeats is not None:
+                    repeats = int(servo_repeats)
+                else:
+                    repeats = int(getattr(demon_config, "ATTACK_SIM_SERVO_REPEATS", 3))
                 angle = int(getattr(demon_config, "ATTACK_SIM_SERVO_ANGLE", 90))
                 if self._serial_reader.run_servo_motion(repeats, angle):
                     logger.info('UART {"num":%s,"angle":%s}', repeats, angle)
@@ -170,6 +241,59 @@ class AttackSimulator:
             return ok_any
         except Exception as e:
             logger.error("_run_physical_recovery 실패: %s", e)
+            return False
+
+    def _inject_cf_file_attack(self, cmd: dict[str, Any]) -> bool:
+        """~/cfs/cpu2/cf 에 파일 생성 — seed baseline 대비 폴더 해시 변경."""
+        try:
+            base = Path(self._ctx.config.integrity_target_dir).expanduser()
+            base.mkdir(parents=True, exist_ok=True)
+            name = str(
+                cmd.get("cf_filename")
+                or cmd.get("CF_FILENAME")
+                or getattr(demon_config, "ATTACK_HASH_CF_FILENAME", "matador_gs_inject.txt"),
+            ).strip()
+            if not name or "/" in name or "\\" in name:
+                logger.error("cf 파일명 비정상: %s", name)
+                return False
+            payload = str(
+                cmd.get("cf_content")
+                or cmd.get("CF_CONTENT")
+                or getattr(
+                    demon_config,
+                    "ATTACK_HASH_CF_PAYLOAD",
+                    "MATADOR cf injection\n",
+                ),
+            )
+            stamp = datetime.now(timezone.utc).isoformat()
+            body = f"{payload.rstrip()}\n# injected_at={stamp}\n"
+            target = base / name
+            target.write_text(body, encoding="utf-8")
+            self._injected_cf_path = target
+            logger.info("cf 파일 주입 공격: %s (%s bytes)", target, target.stat().st_size)
+            return True
+        except OSError as e:
+            logger.error("cf 파일 주입 실패(OS): %s", e)
+            return False
+        except Exception as e:
+            logger.error("cf 파일 주입 실패: %s", e)
+            return False
+
+    def _remove_injected_cf_file(self) -> bool:
+        try:
+            path = self._injected_cf_path
+            if path is None or not path.is_file():
+                self._injected_cf_path = None
+                return False
+            path.unlink()
+            logger.info("cf 주입 파일 삭제(RECOVERY): %s", path)
+            self._injected_cf_path = None
+            return True
+        except OSError as e:
+            logger.error("cf 주입 파일 삭제 실패(OS) %s: %s", path, e)
+            return False
+        except Exception as e:
+            logger.error("cf 주입 파일 삭제 실패: %s", e)
             return False
 
     def _inject_logical_attack(self) -> bool:

@@ -24,6 +24,7 @@ _OPTIONAL_EVENT_COLS: tuple[str, ...] = (
 
 # config.py 에 GS_CMD_* / GS_PACKET_TYPE_* 정의 권장 — 미정의 시 아래 기본값
 _DEFAULT_GS_CMD_ATTACK_SIM = "ATTACK_SIM"
+_DEFAULT_GS_CMD_ATTACK_HASH = "ATTACK_HASH"
 _DEFAULT_GS_CMD_RECOVERY = "RECOVERY"
 _DEFAULT_GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 _DEFAULT_GS_CMD_UPDATE_HASH = "UPDATE_HASH"
@@ -53,9 +54,12 @@ class SerialReaderLike(Protocol):
     def set_gyro_enabled(self, enabled: bool) -> bool:
         ...
 
+    def get_light_state(self) -> str | None:
+        ...
+
 
 class GScomms:
-    """지상국(COSMOS) TCP 송수신 — 일광 윈도우 송신·커맨드 수신·오탐 결과 이벤트 등록."""
+    """지상국(COSMOS) TCP 송수신 — 조도 엣지 bulk 송신·커맨드 수신·오탐 결과 이벤트 등록."""
 
     def __init__(self, ctx: RuntimeContext) -> None:
         self._ctx = ctx
@@ -64,7 +68,7 @@ class GScomms:
         self._attack_simulator: object | None = None
         self._listen_sock: socket.socket | None = None
         self._recv_thread: threading.Thread | None = None
-        self._last_transmit_sun_valid: bool = False
+        self._prev_light_state: str | None = None
 
     def set_anomaly_detector(self, detector: AnomalyDetectorLike) -> None:
         try:
@@ -86,14 +90,14 @@ class GScomms:
             logger.error("set_attack_simulator 실패: %s", e)
 
     def run(self) -> None:
-        """gs_comms_thread — 수신 스레드 기동 + 일광 윈도우 송신 루프."""
+        """gs_comms_thread — 수신 스레드 기동 + 조도 엣지 bulk 송신 루프."""
         logger.info("GScomms started")
         try:
             self._start_command_listener()
             poll_sec = self._gs_poll_interval_sec()
             while not self._ctx.shutdown_event.is_set():
                 try:
-                    self._poll_sunlight_transmit()
+                    self._poll_light_edge_transmit()
                 except Exception as e:
                     logger.error("GScomms poll 실패: %s", e)
                 if self._ctx.shutdown_event.wait(timeout=poll_sec):
@@ -166,14 +170,14 @@ class GScomms:
                 return -1
 
             logger.info(
-                "오탐필터 이벤트 INSERT event_id=%s type=%s weight=%s sw_id=%s chennel1=%s",
+                "오탐필터 이벤트 INSERT event_id=%s type=%s weight=%s sw_id=%s chennel1=%s "
+                "(조도 dark→light 시 송신)",
                 event_id,
                 event_type,
                 weight,
                 sw_id,
                 chennel1,
             )
-            self.transmit_adcs_filter()
             return event_id
         except (ValueError, TypeError) as e:
             logger.error("insert_event 입력 오류: %s", e)
@@ -183,69 +187,137 @@ class GScomms:
             return -1
 
     def transmit_all(self) -> None:
-        """교신 윈도우 — tlm/pwr history → adcs filter → events → integrity 순차 송신."""
+        """조도 dark→light 엣지 — 미전송 이벤트 있으면 우선, 없으면 history부터 순차 송신."""
         try:
-            self.transmit_tlm_history()
-            self.transmit_pwr_history()
-            self.transmit_adcs_filter()
-            self.transmit_event_queue()
-            self.transmit_integrity()
+            if self._has_pending_events():
+                self.transmit_event_queue()
+                self.transmit_adcs_filter()
+                self.transmit_tlm_history()
+                self.transmit_pwr_history()
+            else:
+                self.transmit_tlm_history()
+                self.transmit_pwr_history()
+                self.transmit_adcs_filter()
+            if self._should_transmit_integrity():
+                self.transmit_integrity()
         except Exception as e:
             logger.error("transmit_all 실패: %s", e)
 
+    def _should_transmit_integrity(self) -> bool:
+        """무결성 해시 패킷 — INTEGRITY 이벤트·위반 시에만 (attack 경로)."""
+        try:
+            pending = self._ctx.db.get_pending_events()
+            if pending:
+                for ev in pending:
+                    if not isinstance(ev, dict):
+                        continue
+                    event_type = str(ev.get("EVENT_TYPE", ""))
+                    if event_type.startswith("INTEGRITY_"):
+                        return True
+            records = self._ctx.db.get_integrity_hash()
+            if records is None:
+                return False
+            if isinstance(records, dict):
+                records = [records]
+            if isinstance(records, list):
+                for rec in records:
+                    if isinstance(rec, dict) and int(rec.get("IS_VIOLATED", 0)) == 1:
+                        return True
+            return False
+        except Exception as e:
+            logger.error("_should_transmit_integrity 실패: %s", e)
+            return False
+
+    def _has_pending_events(self) -> bool:
+        """SAT_EVENT_QUEUE IS_SENT=0 존재 여부."""
+        try:
+            pending = self._ctx.db.get_pending_events()
+            return bool(pending)
+        except Exception as e:
+            logger.error("_has_pending_events 실패: %s", e)
+            return False
+
     def transmit_tlm_history(self) -> None:
-        """SAT_TLM_HISTORY 전체 송신 — ACK 시 delete_tlm_history."""
+        """SAT_TLM_HISTORY 배치 송신 — ACK 시 해당 배치만 delete_tlm_history."""
         try:
             records = self._ctx.db.get_tlm_history()
             if not records:
                 return
-            history_ids = self._ctx.db.history_ids_from_records(records)
-            payload = {
-                "packet_type": self._config_str(
-                    "GS_PACKET_TYPE_TLM_HISTORY",
-                    _DEFAULT_GS_PACKET_TLM_HISTORY,
-                ),
-                "records": records,
-            }
-
-            def on_ack(
-                _ack: dict[str, Any],
-                ids: list[int] = history_ids,
-            ) -> None:
-                if not self._ctx.db.delete_tlm_history(ids):
-                    logger.warning("delete_tlm_history 실패 ids=%s", ids)
-
-            if not self.send_with_retry(payload, on_ack):
-                logger.warning("SAT_TLM_HISTORY 송신 실패 — 삭제하지 않음")
+            packet_type = self._config_str(
+                "GS_PACKET_TYPE_TLM_HISTORY",
+                _DEFAULT_GS_PACKET_TLM_HISTORY,
+            )
+            self._transmit_history_in_batches(
+                records,
+                packet_type,
+                self._ctx.db.delete_tlm_history,
+                "SAT_TLM_HISTORY",
+            )
         except Exception as e:
             logger.error("transmit_tlm_history 실패: %s", e)
 
     def transmit_pwr_history(self) -> None:
-        """SAT_PWR_HISTORY 스냅샷(HISTORY_ID별 4채널) 송신 — ACK 시 delete_pwr_history."""
+        """SAT_PWR_HISTORY 배치 송신 — ACK 시 해당 배치만 delete_pwr_history."""
         try:
             records = self._ctx.db.get_pwr_history()
             if not records:
                 return
-            history_ids = self._ctx.db.history_ids_from_records(records)
-            payload = {
-                "packet_type": self._config_str(
-                    "GS_PACKET_TYPE_PWR_HISTORY",
-                    _DEFAULT_GS_PACKET_PWR_HISTORY,
-                ),
-                "records": records,
-            }
-
-            def on_ack(
-                _ack: dict[str, Any],
-                ids: list[int] = history_ids,
-            ) -> None:
-                if not self._ctx.db.delete_pwr_history(ids):
-                    logger.warning("delete_pwr_history 실패 ids=%s", ids)
-
-            if not self.send_with_retry(payload, on_ack):
-                logger.warning("SAT_PWR_HISTORY 송신 실패 — 삭제하지 않음")
+            packet_type = self._config_str(
+                "GS_PACKET_TYPE_PWR_HISTORY",
+                _DEFAULT_GS_PACKET_PWR_HISTORY,
+            )
+            self._transmit_history_in_batches(
+                records,
+                packet_type,
+                self._ctx.db.delete_pwr_history,
+                "SAT_PWR_HISTORY",
+            )
         except Exception as e:
             logger.error("transmit_pwr_history 실패: %s", e)
+
+    def _transmit_history_in_batches(
+        self,
+        records: list[dict[str, Any]],
+        packet_type: str,
+        delete_fn: Callable[[list[int]], bool],
+        label: str,
+    ) -> None:
+        """history records 를 GS_HISTORY_BATCH_SIZE 건씩 나눠 송신."""
+        try:
+            batch_size = int(
+                getattr(self._ctx.config, "gs_history_batch_size", 30),
+            )
+            if batch_size < 1:
+                batch_size = 30
+            total = len(records)
+            for start in range(0, total, batch_size):
+                chunk = records[start : start + batch_size]
+                history_ids = self._ctx.db.history_ids_from_records(chunk)
+                payload = {
+                    "packet_type": packet_type,
+                    "records": chunk,
+                }
+
+                def on_ack(
+                    _ack: dict[str, Any],
+                    ids: list[int] = history_ids,
+                    _delete: Callable[[list[int]], bool] = delete_fn,
+                ) -> None:
+                    if not _delete(ids):
+                        logger.warning("%s delete 실패 ids=%s", label, ids)
+
+                logger.info(
+                    "%s 배치 송신 %s~%s / %s",
+                    label,
+                    start + 1,
+                    min(start + len(chunk), total),
+                    total,
+                )
+                if not self.send_with_retry(payload, on_ack):
+                    logger.warning("%s 배치 송신 실패 — 이후 배치 중단", label)
+                    break
+        except Exception as e:
+            logger.error("_transmit_history_in_batches 실패 label=%s: %s", label, e)
 
     def transmit_adcs_filter(self) -> None:
         """SAT_ADCS_FILTER 전체 송신 — ACK 시 delete_adcs_filter."""
@@ -334,6 +406,10 @@ class GScomms:
                 return
 
             attack_sim = self._config_str("GS_CMD_ATTACK_SIM", _DEFAULT_GS_CMD_ATTACK_SIM).upper()
+            attack_hash = self._config_str(
+                "GS_CMD_ATTACK_HASH",
+                _DEFAULT_GS_CMD_ATTACK_HASH,
+            ).upper()
             recovery = self._config_str("GS_CMD_RECOVERY", _DEFAULT_GS_CMD_RECOVERY).upper()
             update_thr = self._config_str(
                 "GS_CMD_UPDATE_THRESHOLD",
@@ -348,10 +424,13 @@ class GScomms:
             if name == ack_cmd:
                 return
             if name == attack_sim:
-                self.handle_attack_sim()
+                self.handle_attack_sim(cmd)
+                return
+            if name == attack_hash:
+                self.handle_attack_hash(cmd)
                 return
             if name == recovery:
-                self.handle_recovery()
+                self.handle_recovery(cmd)
                 return
             if name == update_thr:
                 self.update_threshold(cmd)
@@ -364,22 +443,33 @@ class GScomms:
         except Exception as e:
             logger.error("dispatch_command 실패: %s", e)
 
-    def handle_attack_sim(self) -> None:
+    def handle_attack_sim(self, cmd: dict[str, Any] | None = None) -> None:
         try:
             sim = self._attack_simulator
             if sim is not None and hasattr(sim, "start"):
-                if not bool(sim.start()):
+                if not bool(sim.start(cmd)):
                     logger.error("AttackSimulator.start 실패")
                 return
             self._handle_attack_sim_legacy()
         except Exception as e:
             logger.error("handle_attack_sim 실패: %s", e)
 
-    def handle_recovery(self) -> None:
+    def handle_attack_hash(self, cmd: dict[str, Any] | None = None) -> None:
+        try:
+            sim = self._attack_simulator
+            if sim is not None and hasattr(sim, "start_hash"):
+                if not bool(sim.start_hash(cmd)):
+                    logger.error("AttackSimulator.start_hash 실패")
+                return
+            logger.error("AttackSimulator 미주입 — ATTACK_HASH 스킵")
+        except Exception as e:
+            logger.error("handle_attack_hash 실패: %s", e)
+
+    def handle_recovery(self, cmd: dict[str, Any] | None = None) -> None:
         try:
             sim = self._attack_simulator
             if sim is not None and hasattr(sim, "stop"):
-                if not bool(sim.stop()):
+                if not bool(sim.stop(cmd)):
                     logger.error("AttackSimulator.stop 실패")
                 return
             self._handle_recovery_legacy()
@@ -542,15 +632,26 @@ class GScomms:
             logger.error("send_with_retry 실패: %s", e)
             return False
 
-    def _poll_sunlight_transmit(self) -> None:
+    def _poll_light_edge_transmit(self) -> None:
+        """조도 L,dark → L,light 엣지 1회에 transmit_all."""
         try:
-            sun_ok = self._ctx.db.is_sunlight_window()
-            if sun_ok and not self._last_transmit_sun_valid:
-                logger.info("일광 윈도우 진입 — transmit_all 시작")
+            if not getattr(self._ctx.config, "gs_transmit_on_light_edge", True):
+                return
+            if self._serial_reader is None:
+                return
+            curr = self._serial_reader.get_light_state()
+            if curr is None:
+                return
+            prev = self._prev_light_state
+            dark = demon_config.SERIAL_LIGHT_STATE_DARK
+            light = demon_config.SERIAL_LIGHT_STATE_LIGHT
+            if curr == light and prev == dark:
+                logger.info("조도 dark→light — transmit_all 시작")
                 self.transmit_all()
-            self._last_transmit_sun_valid = sun_ok
+            if curr in (dark, light):
+                self._prev_light_state = curr
         except Exception as e:
-            logger.error("_poll_sunlight_transmit 실패: %s", e)
+            logger.error("_poll_light_edge_transmit 실패: %s", e)
 
     def _start_command_listener(self) -> None:
         try:

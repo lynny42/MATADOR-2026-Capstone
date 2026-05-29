@@ -46,6 +46,11 @@ class DaemonConfig:
     gs_port: int = demon_config.GS_PORT
     gs_send_retry_max: int = demon_config.GS_SEND_RETRY_MAX
     gs_send_retry_base_sec: float = demon_config.GS_SEND_RETRY_BASE_SEC
+    gs_cmd_sat_host: str = demon_config.GS_CMD_SAT_HOST
+    gs_cmd_sat_port: int = demon_config.GS_CMD_SAT_PORT
+    gs_transmit_on_light_edge: bool = demon_config.GS_TRANSMIT_ON_LIGHT_EDGE
+    gs_poll_interval_sec: float = demon_config.GS_POLL_INTERVAL_SEC
+    gs_history_batch_size: int = demon_config.GS_HISTORY_BATCH_SIZE
 
     # --- 수집 주기 ---
     collect_interval_sec: float = demon_config.COLLECT_INTERVAL_SEC

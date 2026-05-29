@@ -196,6 +196,7 @@ class DBManager:
                 )
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 self._seed_sat_pwr_meta()
+                self._sync_sat_pwr_meta_thresholds()
                 self._conn.commit()
             return True
         except sqlite3.Error as e:
@@ -241,6 +242,30 @@ class DBManager:
             raise
         except Exception as e:
             logger.error("SAT_PWR_META 시드 실패: %s", e)
+            raise
+
+    def _sync_sat_pwr_meta_thresholds(self) -> None:
+        """기존 DB 행의 V_THRESHOLD_LO/HI를 demon/config.py 와 맞춘다 (INSERT OR IGNORE 보완)."""
+        if self._conn is None:
+            return
+        try:
+            for sw_id in range(demon_config.PWR_SW_ID_COUNT):
+                lo = float(demon_config.V_THRESHOLD_LO[sw_id])
+                hi = float(demon_config.V_THRESHOLD_HI[sw_id])
+                self._conn.execute(
+                    """
+                    UPDATE SAT_PWR_META SET
+                      V_THRESHOLD_LO = ?,
+                      V_THRESHOLD_HI = ?
+                    WHERE SW_ID = ?
+                    """,
+                    (lo, hi, sw_id),
+                )
+        except sqlite3.Error as e:
+            logger.error("SAT_PWR_META 임계치 동기화 실패(SQLite): %s", e)
+            raise
+        except Exception as e:
+            logger.error("SAT_PWR_META 임계치 동기화 실패: %s", e)
             raise
 
     @staticmethod
@@ -705,6 +730,80 @@ class DBManager:
         except Exception as e:
             logger.error("get_integrity_hash 실패: %s", e)
             return None
+
+    def upsert_integrity_hash(
+        self,
+        file_id: int,
+        file_path: str,
+        expected_hash: str,
+    ) -> bool:
+        """SAT_INTEGRITY_HASH INSERT/UPDATE — 기대 해시 등록·갱신."""
+        try:
+            now = _utc_now_iso()
+            path_str = str(file_path).strip()
+            hash_str = str(expected_hash).strip().lower()
+            if not path_str or not hash_str:
+                logger.error("upsert_integrity_hash: FILE_PATH/EXPECTED_HASH 비어 있음")
+                return False
+            with self._lock:
+                if self._conn is None:
+                    logger.error("upsert_integrity_hash: DB 미연결")
+                    return False
+                self._conn.execute(
+                    """
+                    INSERT INTO SAT_INTEGRITY_HASH (
+                      FILE_ID, FILE_PATH, EXPECTED_HASH,
+                      LAST_VERIFIED_AT, UPDATED_AT, IS_VIOLATED
+                    ) VALUES (?, ?, ?, ?, ?, 0)
+                    ON CONFLICT(FILE_ID) DO UPDATE SET
+                      FILE_PATH = excluded.FILE_PATH,
+                      EXPECTED_HASH = excluded.EXPECTED_HASH,
+                      UPDATED_AT = excluded.UPDATED_AT,
+                      IS_VIOLATED = 0
+                    """,
+                    (int(file_id), path_str, hash_str, now, now),
+                )
+                self._conn.commit()
+            return True
+        except (ValueError, TypeError) as e:
+            logger.error("upsert_integrity_hash 입력 오류: %s", e)
+            return False
+        except sqlite3.Error as e:
+            logger.error("upsert_integrity_hash 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("upsert_integrity_hash 실패: %s", e)
+            return False
+
+    def update_integrity_hash(
+        self,
+        file_id: int | None = None,
+        file_path: str | None = None,
+        expected_hash: str | None = None,
+        cmd: dict[str, Any] | None = None,
+    ) -> bool:
+        """지상국 UPDATE_HASH — 단일 행 upsert (cmd dict 호환)."""
+        try:
+            payload = dict(cmd) if isinstance(cmd, dict) else {}
+            if file_id is not None:
+                payload["file_id"] = file_id
+            if file_path is not None:
+                payload["file_path"] = file_path
+            if expected_hash is not None:
+                payload["expected_hash"] = expected_hash
+            fid = payload.get("file_id", payload.get("FILE_ID"))
+            fpath = payload.get("file_path", payload.get("FILE_PATH"))
+            ehash = payload.get("expected_hash", payload.get("EXPECTED_HASH"))
+            if fid is None or fpath is None or ehash is None:
+                logger.error("update_integrity_hash: file_id/file_path/expected_hash 필수")
+                return False
+            return self.upsert_integrity_hash(int(fid), str(fpath), str(ehash))
+        except (ValueError, TypeError) as e:
+            logger.error("update_integrity_hash 입력 오류: %s", e)
+            return False
+        except Exception as e:
+            logger.error("update_integrity_hash 실패: %s", e)
+            return False
 
     def _telemetry_event_counters(self) -> dict[str, int]:
         """get_tlm_current / get_adcs_filter 기반 이벤트 카운터 기본값."""
