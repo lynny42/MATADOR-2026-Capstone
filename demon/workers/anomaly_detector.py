@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 # config.py 에 정의 권장 — 미정의 시 명세 기본값 사용
 _DEFAULT_ANOMALY_DELTA_V = 0.1
 _DEFAULT_ATTACK_THRESHOLD_SHRINK = 0.1
+_EXCEPTION_CODE_HASH_MISMATCH = 1
+_EXCEPTION_CODE_HASH_MISSING = 2
 
 
 class FalsePositiveFilterLike(Protocol):
@@ -237,19 +239,30 @@ class AnomalyDetector:
                     target = base_dir / file_path
                 actual = self._compute_file_hash(target)
                 if actual is None:
-                    if not self._insert_integrity_event(file_path, "missing_or_unreadable"):
+                    self._ctx.db.update_integrity_result(file_path, 1)
+                    if not self._insert_integrity_event(
+                        file_path,
+                        "missing_or_unreadable",
+                        _EXCEPTION_CODE_HASH_MISSING,
+                    ):
                         logger.error(
                             "무결성 이벤트 INSERT 실패(누락) — 오탐 필터는 스킵 path=%s",
                             file_path,
                         )
                     return True
                 if actual.lower() != expected:
-                    if not self._insert_integrity_event(file_path, "hash_mismatch"):
+                    self._ctx.db.update_integrity_result(file_path, 1)
+                    if not self._insert_integrity_event(
+                        file_path,
+                        "hash_mismatch",
+                        _EXCEPTION_CODE_HASH_MISMATCH,
+                    ):
                         logger.error(
                             "무결성 이벤트 INSERT 실패(불일치) — 오탐 필터는 스킵 path=%s",
                             file_path,
                         )
                     return True
+                self._ctx.db.update_integrity_result(file_path, 0)
             return False
         except Exception as e:
             logger.error("verify_hash_on_anomaly 실패: %s", e)
@@ -275,24 +288,19 @@ class AnomalyDetector:
 
             detected_at = self._utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
-            event_id = self._ctx.db.insert_event({
-                "DETECTED_AT": detected_at,
-                "TIMESTAMP": detected_at,
-                "EVENT_TYPE": "POWER_ANOMALY",
-                "PRIORITY": 0,
-                "IS_SENT": 0,
-            })
-            if event_id < 0:
-                logger.error("POWER_ANOMALY insert_event 실패")
-                event_id = 0
 
             self._persist_adcs_snapshot()
+
+            adcs_row = self._ctx.db.get_adcs_filter()
+            channel1 = int(
+                (adcs_row or {}).get("CHENNEL1", demon_config.SAT_ADCS_FILTER_CHANNEL_ID),
+            )
 
             key_set: dict[str, Any] = {
                 "tlm_id": demon_config.SAT_TLM_ID,
                 "sw_id": primary_sw_id,
-                "channel1": demon_config.SAT_ADCS_FILTER_CHANNEL_ID,
-                "event_id": event_id,
+                "channel1": channel1,
+                "event_id": 0,
                 "detected_at": detected_at,
                 "adcs_series": list(self._adcs_series),
                 "tlm_series": list(self._tlm_series),
@@ -301,16 +309,16 @@ class AnomalyDetector:
 
             if self._false_positive_filter is None:
                 logger.warning(
-                    "FalsePositiveFilter 미주입 — on_anomaly_detected 스킵 event_id=%s",
-                    event_id,
+                    "FalsePositiveFilter 미주입 — on_anomaly_detected 스킵 sw_id=%s",
+                    primary_sw_id,
                 )
                 return
 
             self._false_positive_filter.on_anomaly_detected(key_set)
             logger.info(
-                "전력 이상 → 오탐필터 전달 sw_id_list=%s event_id=%s",
+                "전력 이상 → 오탐필터 전달 sw_id_list=%s channel1=%s",
                 sw_id_list,
-                event_id,
+                channel1,
             )
         except Exception as e:
             logger.error("_handle_power_anomaly 실패: %s", e)
@@ -325,8 +333,8 @@ class AnomalyDetector:
                 payload = dict(row) if row else {}
             if not payload:
                 return
-            payload.setdefault("CHENNEL1", demon_config.SAT_ADCS_FILTER_CHANNEL_ID)
             payload.setdefault("TIMESTAMP", self._utc_now_iso())
+            payload.pop("CHENNEL1", None)
             if not self._ctx.db.insert_adcs_filter(payload):
                 logger.warning("insert_adcs_filter 실패")
         except Exception as e:
@@ -409,7 +417,12 @@ class AnomalyDetector:
             logger.error("파일 해시 계산 실패 %s: %s", path, e)
             return None
 
-    def _insert_integrity_event(self, file_path: str, reason: str) -> bool:
+    def _insert_integrity_event(
+        self,
+        file_path: str,
+        reason: str,
+        exception_code: int,
+    ) -> bool:
         """PRIORITY=1 무결성 이벤트 INSERT. 성공 시 True."""
         try:
             detected_at = self._utc_now_iso()
@@ -419,6 +432,10 @@ class AnomalyDetector:
                 "EVENT_TYPE": f"INTEGRITY_{reason}",
                 "PRIORITY": 1,
                 "IS_SENT": 0,
+                "SW_ID": 0,
+                "WEIGHT": 100,
+                "EXCEPTION_CODE": int(exception_code),
+                "CHENNEL1": 0,
             })
             if event_id < 0:
                 logger.error("무결성 이벤트 insert 실패 path=%s", file_path)

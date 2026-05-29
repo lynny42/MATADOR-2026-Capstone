@@ -45,7 +45,83 @@ _EVENT_INT_DEFAULTS: dict[str, int] = {
     "PROCESSOR_RESET_COUNT": 0,
     "IS_SENT": 0,
     "PRIORITY": 0,
+    "SW_ID": 0,
+    "WEIGHT": 0,
+    "EXCEPTION_CODE": 0,
+    "CHENNEL1": 0,
 }
+
+_EVENT_COUNTER_COLS: tuple[str, ...] = (
+    "PIPEOVERFLOWRRCNT",
+    "CHILDQUEUECOUNT",
+    "FILEWRITEERRCOUNTER",
+    "CMDREJECTEDCOUNTER",
+    "CH1_CH2_FAULT_CRC",
+    "CH1_FAULT_FILE_SIZE_MISMATCH",
+    "PROCESSOR_RESET_COUNT",
+)
+
+_ADCS_FILTER_INSERT_COLS: tuple[str, ...] = (
+    "TIMESTAMP",
+    "CMDCOUNTER",
+    "QBN_0",
+    "QBN_1",
+    "QBN_2",
+    "QBN_3",
+    "ST_QBN_0",
+    "ST_QBN_1",
+    "ST_QBN_2",
+    "ST_QBN_3",
+    "Q_VALID",
+    "THERR_X",
+    "THERR_Y",
+    "THERR_Z",
+    "CMD_WBN_X",
+    "CMD_WBN_Y",
+    "CMD_WBN_Z",
+    "BDOT_X",
+    "BDOT_Y",
+    "BDOT_Z",
+    "H_MGMTON",
+    "SUN_VALID",
+    "DEVICE_ENABLED_RW0",
+    "DEVICE_ENABLED_RW1",
+    "DEVICE_ENABLED_RW2",
+    "IMU_WBN_X",
+    "IMU_WBN_Y",
+    "IMU_WBN_Z",
+    "IMU_ACC_X",
+    "IMU_ACC_Y",
+    "IMU_ACC_Z",
+    "QERR_0",
+    "QERR_1",
+    "QERR_2",
+    "QERR_3",
+    "TCMD_X",
+    "TCMD_Y",
+    "TCMD_Z",
+    "MCMD_X",
+    "MCMD_Y",
+    "MCMD_Z",
+    "WERR_X",
+    "WERR_Y",
+    "WERR_Z",
+    "MOMENTUM_NMS_0",
+    "MOMENTUM_NMS_1",
+    "MOMENTUM_NMS_2",
+    "ST_VALID",
+    "COMBINEDPACKETSSENT",
+    "ERLOGENTRIES",
+    "SKIPPEDSLOTSCOUNT",
+    "LASTVALCRC",
+    "ENABLEDROUTES",
+    "FORWARD_ERR_COUNT",
+    "APPCSERRCOUNTER",
+    "OSCSERRCOUNTER",
+    "SYSLOGENTRIES",
+    "RESETSPERFORMED",
+    "EXECOUNTS",
+)
 
 
 def _utc_now_iso() -> str:
@@ -176,6 +252,40 @@ class DBManager:
             logger.error("filter_tlm_current_fields 실패: %s", e)
             return {}
 
+    def insert_tlm_history(self, tlm: dict[str, Any]) -> bool:
+        """SAT_TLM_HISTORY append."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("insert_tlm_history: DB 미연결")
+                    return False
+                self._insert_tlm_history_locked(tlm)
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("insert_tlm_history 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("insert_tlm_history 실패: %s", e)
+            return False
+
+    def insert_pwr_history(self, pwr: dict[str, Any]) -> bool:
+        """SAT_PWR_HISTORY append."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("insert_pwr_history: DB 미연결")
+                    return False
+                self._insert_pwr_history_locked(pwr)
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("insert_pwr_history 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("insert_pwr_history 실패: %s", e)
+            return False
+
     def _insert_tlm_history_locked(self, tlm_row: dict[str, Any]) -> None:
         """현재 TLM 스냅샷을 SAT_TLM_HISTORY 에 append (lock 보유 상태에서 호출)."""
         try:
@@ -273,13 +383,6 @@ class DBManager:
                 if cur.rowcount == 0:
                     logger.warning("upsert_tlm_current: TLM_ID=%s 행 없음", demon_config.SAT_TLM_ID)
                     return False
-                snap_cur = self._conn.execute(
-                    "SELECT * FROM SAT_TLM_CURRENT WHERE TLM_ID = ?",
-                    (demon_config.SAT_TLM_ID,),
-                )
-                snap = _row_to_dict_or_none(snap_cur.fetchone())
-                if snap is not None:
-                    self._insert_tlm_history_locked(snap)
                 self._conn.commit()
             return True
         except sqlite3.Error as e:
@@ -392,13 +495,6 @@ class DBManager:
                         """,
                         (now, prev_v, prev_dv, voltage, current_a, curr_dv, sw_id),
                     )
-                snap_cur = self._conn.execute(
-                    "SELECT * FROM SAT_PWR_META WHERE SW_ID = ?",
-                    (sw_id,),
-                )
-                snap = _row_to_dict_or_none(snap_cur.fetchone())
-                if snap is not None:
-                    self._insert_pwr_history_locked(snap)
                 self._conn.commit()
             return True
         except (KeyError, ValueError, TypeError) as e:
@@ -492,20 +588,15 @@ class DBManager:
         return self.get_pwr_meta_all()
 
     def get_adcs_filter(self, channel1: int | None = None) -> dict[str, Any] | None:
-        """SAT_ADCS_FILTER 단일 행 (CHENNEL1=channel1). 없거나 실패 시 None."""
+        """SAT_ADCS_FILTER 최신 1행 (CHENNEL1 DESC). channel1 인자는 하위 호환용 무시."""
+        del channel1
         try:
-            ch = (
-                int(channel1)
-                if channel1 is not None
-                else int(demon_config.SAT_ADCS_FILTER_CHANNEL_ID)
-            )
             with self._lock:
                 if self._conn is None:
                     logger.error("get_adcs_filter: DB 미연결")
                     return None
                 cur = self._conn.execute(
-                    "SELECT * FROM SAT_ADCS_FILTER WHERE CHENNEL1 = ?",
-                    (ch,),
+                    "SELECT * FROM SAT_ADCS_FILTER ORDER BY CHENNEL1 DESC LIMIT 1",
                 )
                 return _row_to_dict_or_none(cur.fetchone())
         except (ValueError, TypeError) as e:
@@ -575,6 +666,33 @@ class DBManager:
             logger.error("get_integrity_hash 실패: %s", e)
             return None
 
+    def _telemetry_event_counters(self) -> dict[str, int]:
+        """get_tlm_current / get_adcs_filter 기반 이벤트 카운터 기본값."""
+        try:
+            counters = {col: int(_EVENT_INT_DEFAULTS.get(col, 0)) for col in _EVENT_COUNTER_COLS}
+            tlm = self.get_tlm_current()
+            if tlm is None:
+                return counters
+            adcs = self.get_adcs_filter()
+            if adcs is None:
+                return counters
+            counters["PIPEOVERFLOWRRCNT"] = int(adcs.get("SKIPPEDSLOTSCOUNT", 0))
+            counters["CHILDQUEUECOUNT"] = int(adcs.get("ERLOGENTRIES", 0))
+            counters["FILEWRITEERRCOUNTER"] = int(adcs.get("FORWARD_ERR_COUNT", 0))
+            counters["CMDREJECTEDCOUNTER"] = int(adcs.get("APPCSERRCOUNTER", 0))
+            counters["CH1_CH2_FAULT_CRC"] = int(adcs.get("OSCSERRCOUNTER", 0))
+            counters["CH1_FAULT_FILE_SIZE_MISMATCH"] = int(adcs.get("SKIPPEDSLOTSCOUNT", 0))
+            counters["PROCESSOR_RESET_COUNT"] = int(adcs.get("RESETSPERFORMED", 0))
+            if tlm.get("OBC_S_TICK") is not None:
+                counters["CHILDQUEUECOUNT"] = int(tlm.get("OBC_S_TICK", counters["CHILDQUEUECOUNT"]))
+            return counters
+        except (ValueError, TypeError) as e:
+            logger.error("_telemetry_event_counters 변환 오류: %s", e)
+            return {col: int(_EVENT_INT_DEFAULTS.get(col, 0)) for col in _EVENT_COUNTER_COLS}
+        except Exception as e:
+            logger.error("_telemetry_event_counters 실패: %s", e)
+            return {col: int(_EVENT_INT_DEFAULTS.get(col, 0)) for col in _EVENT_COUNTER_COLS}
+
     def insert_event(self, event: dict[str, Any]) -> int:
         """SAT_EVENT_QUEUE INSERT. 성공 시 event_id, 실패 시 -1."""
         try:
@@ -584,21 +702,46 @@ class DBManager:
             event_type = str(event.get("EVENT_TYPE", "UNKNOWN"))
             priority = int(event.get("PRIORITY", 0))
             is_sent = int(event.get("IS_SENT", 0))
+            sw_id = int(event.get("SW_ID", _EVENT_INT_DEFAULTS["SW_ID"]))
+            weight = int(event.get("WEIGHT", _EVENT_INT_DEFAULTS["WEIGHT"]))
+            exception_code = int(event.get("EXCEPTION_CODE", _EVENT_INT_DEFAULTS["EXCEPTION_CODE"]))
+            module_scores = str(event.get("MODULE_SCORES", ""))
+            chennel1 = int(event.get("CHENNEL1", _EVENT_INT_DEFAULTS["CHENNEL1"]))
 
-            counter_cols = [
-                "PIPEOVERFLOWRRCNT",
-                "CHILDQUEUECOUNT",
-                "FILEWRITEERRCOUNTER",
-                "CMDREJECTEDCOUNTER",
-                "CH1_CH2_FAULT_CRC",
-                "CH1_FAULT_FILE_SIZE_MISMATCH",
-                "PROCESSOR_RESET_COUNT",
+            telemetry_counters = self._telemetry_event_counters()
+            counter_vals: list[int] = []
+            for col in _EVENT_COUNTER_COLS:
+                if col in event:
+                    counter_vals.append(int(event[col]))
+                else:
+                    counter_vals.append(int(telemetry_counters.get(col, 0)))
+
+            cols = [
+                "DETECTED_AT",
+                *_EVENT_COUNTER_COLS,
+                "IS_SENT",
+                "TIMESTAMP",
+                "PRIORITY",
+                "EVENT_TYPE",
+                "SW_ID",
+                "WEIGHT",
+                "EXCEPTION_CODE",
+                "MODULE_SCORES",
+                "CHENNEL1",
             ]
-            cols = ["DETECTED_AT", *counter_cols, "IS_SENT", "TIMESTAMP", "PRIORITY", "EVENT_TYPE"]
-            vals: list[Any] = [detected_at]
-            for col in counter_cols:
-                vals.append(int(event.get(col, _EVENT_INT_DEFAULTS.get(col, 0))))
-            vals.extend([is_sent, timestamp, priority, event_type])
+            vals: list[Any] = [
+                detected_at,
+                *counter_vals,
+                is_sent,
+                timestamp,
+                priority,
+                event_type,
+                sw_id,
+                weight,
+                exception_code,
+                module_scores,
+                chennel1,
+            ]
 
             placeholders = ", ".join("?" * len(cols))
             col_names = ", ".join(cols)
@@ -685,13 +828,11 @@ class DBManager:
             return False
 
     def insert_adcs_filter(self, data: dict[str, Any]) -> bool:
-        """이상 감지 시점 ADCS 스냅샷 — SAT_ADCS_FILTER INSERT OR REPLACE (CHENNEL1당 1행)."""
+        """이상 감지 시점 ADCS 스냅샷 — SAT_ADCS_FILTER INSERT (CHENNEL1 AUTOINCREMENT)."""
         try:
-            channel = int(data.get("CHENNEL1", demon_config.SAT_ADCS_FILTER_CHANNEL_ID))
             ts = str(data.get("TIMESTAMP", _utc_now_iso()))
 
             row: dict[str, Any] = {
-                "CHENNEL1": channel,
                 "TIMESTAMP": ts,
                 "CMDCOUNTER": 0,
                 "Q_VALID": 0,
@@ -733,6 +874,8 @@ class DBManager:
             for src_key, val in data.items():
                 if val is None:
                     continue
+                if src_key == "CHENNEL1":
+                    continue
                 col = _ADCS_FILTER_KEY_ALIASES.get(src_key, src_key)
                 if col in row or col in _ADCS_FILTER_NULLABLE_COLS:
                     row[col] = val
@@ -741,10 +884,10 @@ class DBManager:
                 if col not in row:
                     row[col] = None
 
-            col_names = list(row.keys())
+            col_names = [c for c in _ADCS_FILTER_INSERT_COLS if c in row]
             placeholders = ", ".join("?" * len(col_names))
             sql = (
-                f"INSERT OR REPLACE INTO SAT_ADCS_FILTER ({', '.join(col_names)}) "
+                f"INSERT INTO SAT_ADCS_FILTER ({', '.join(col_names)}) "
                 f"VALUES ({placeholders})"
             )
             vals = [row[c] for c in col_names]
@@ -788,6 +931,163 @@ class DBManager:
             return False
         except Exception as e:
             logger.error("update_threshold 실패: %s", e)
+            return False
+
+    def get_tlm_history(self) -> list[dict[str, Any]]:
+        """SAT_TLM_HISTORY 전체 — HISTORY_ID 순. 실패 시 []."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("get_tlm_history: DB 미연결")
+                    return []
+                cur = self._conn.execute(
+                    "SELECT * FROM SAT_TLM_HISTORY ORDER BY HISTORY_ID ASC",
+                )
+                return [_row_to_dict(r) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_tlm_history 실패(SQLite): %s", e)
+            return []
+        except Exception as e:
+            logger.error("get_tlm_history 실패: %s", e)
+            return []
+
+    def get_pwr_history(self) -> list[dict[str, Any]]:
+        """SAT_PWR_HISTORY 전체 — HISTORY_ID 순. 실패 시 []."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("get_pwr_history: DB 미연결")
+                    return []
+                cur = self._conn.execute(
+                    "SELECT * FROM SAT_PWR_HISTORY ORDER BY HISTORY_ID ASC",
+                )
+                return [_row_to_dict(r) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_pwr_history 실패(SQLite): %s", e)
+            return []
+        except Exception as e:
+            logger.error("get_pwr_history 실패: %s", e)
+            return []
+
+    def get_adcs_filter_all(self) -> list[dict[str, Any]]:
+        """SAT_ADCS_FILTER 전체 — CHENNEL1 순. 실패 시 []."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("get_adcs_filter_all: DB 미연결")
+                    return []
+                cur = self._conn.execute(
+                    "SELECT * FROM SAT_ADCS_FILTER ORDER BY CHENNEL1 ASC",
+                )
+                return [_row_to_dict(r) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_adcs_filter_all 실패(SQLite): %s", e)
+            return []
+        except Exception as e:
+            logger.error("get_adcs_filter_all 실패: %s", e)
+            return []
+
+    def delete_adcs_filter(self) -> bool:
+        """SAT_ADCS_FILTER 전체 삭제 (ACK 후)."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("delete_adcs_filter: DB 미연결")
+                    return False
+                self._conn.execute("DELETE FROM SAT_ADCS_FILTER")
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("delete_adcs_filter 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("delete_adcs_filter 실패: %s", e)
+            return False
+
+    def update_integrity_result(self, file_path: str, is_violated: int) -> bool:
+        """SAT_INTEGRITY_HASH 무결성 검증 결과 갱신."""
+        try:
+            now = _utc_now_iso()
+            with self._lock:
+                if self._conn is None:
+                    logger.error("update_integrity_result: DB 미연결")
+                    return False
+                cur = self._conn.execute(
+                    """
+                    UPDATE SAT_INTEGRITY_HASH SET
+                      IS_VIOLATED = ?,
+                      LAST_VERIFIED_AT = ?,
+                      UPDATED_AT = ?
+                    WHERE FILE_PATH = ?
+                    """,
+                    (int(is_violated), now, now, str(file_path)),
+                )
+                self._conn.commit()
+                if cur.rowcount == 0:
+                    logger.warning("update_integrity_result: FILE_PATH 없음 path=%s", file_path)
+                    return False
+            return True
+        except sqlite3.Error as e:
+            logger.error("update_integrity_result 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("update_integrity_result 실패: %s", e)
+            return False
+
+    @staticmethod
+    def history_ids_from_records(records: list[dict[str, Any]]) -> list[int]:
+        """history 행 dict 목록에서 HISTORY_ID 추출."""
+        try:
+            ids: list[int] = []
+            for row in records:
+                if not isinstance(row, dict):
+                    continue
+                raw = row.get("HISTORY_ID")
+                if raw is None:
+                    continue
+                ids.append(int(raw))
+            return ids
+        except (ValueError, TypeError) as e:
+            logger.error("history_ids_from_records 변환 오류: %s", e)
+            return []
+        except Exception as e:
+            logger.error("history_ids_from_records 실패: %s", e)
+            return []
+
+    def delete_tlm_history(self, history_ids: list[int] | None = None) -> bool:
+        """
+        SAT_TLM_HISTORY 삭제 — delete_tlm_history_by_ids 래퍼.
+
+        history_ids 가 None 이면 현재 테이블 전체 ID 를 대상으로 한다.
+        """
+        try:
+            ids = history_ids
+            if ids is None:
+                ids = self.history_ids_from_records(self.get_tlm_history())
+            if not ids:
+                return True
+            deleted = self.delete_tlm_history_by_ids(ids)
+            return deleted == len(ids)
+        except Exception as e:
+            logger.error("delete_tlm_history 실패: %s", e)
+            return False
+
+    def delete_pwr_history(self, history_ids: list[int] | None = None) -> bool:
+        """
+        SAT_PWR_HISTORY 삭제 — delete_pwr_history_by_ids 래퍼.
+
+        history_ids 가 None 이면 현재 테이블 전체 ID 를 대상으로 한다.
+        """
+        try:
+            ids = history_ids
+            if ids is None:
+                ids = self.history_ids_from_records(self.get_pwr_history())
+            if not ids:
+                return True
+            deleted = self.delete_pwr_history_by_ids(ids)
+            return deleted == len(ids)
+        except Exception as e:
+            logger.error("delete_pwr_history 실패: %s", e)
             return False
 
     def delete_tlm_history_by_ids(self, history_ids: list[int]) -> int:

@@ -164,13 +164,18 @@ DDL_STATEMENTS: list[str] = [
       IS_SENT INTEGER NOT NULL,
       TIMESTAMP TEXT NOT NULL,
       PRIORITY INTEGER NOT NULL,
-      EVENT_TYPE TEXT NOT NULL
+      EVENT_TYPE TEXT NOT NULL,
+      SW_ID INTEGER NOT NULL DEFAULT 0,
+      WEIGHT INTEGER NOT NULL DEFAULT 0,
+      EXCEPTION_CODE INTEGER NOT NULL DEFAULT 0,
+      MODULE_SCORES TEXT NOT NULL DEFAULT '',
+      CHENNEL1 INTEGER NOT NULL DEFAULT 0
     )
     """,
     # SAT_ADCS_FILTER — CHENNEL1·TIMESTAMP는 명세 표기 유지; NULL 허용은 명세 Yes/No에 따름
     """
     CREATE TABLE IF NOT EXISTS SAT_ADCS_FILTER (
-      CHENNEL1 INTEGER NOT NULL PRIMARY KEY,
+      CHENNEL1 INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
       TIMESTAMP TEXT NOT NULL,
       CMDCOUNTER INTEGER NOT NULL,
       QBN_0 REAL,
@@ -247,6 +252,75 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
         return False
 
 
+def _migrate_event_queue_columns(conn: sqlite3.Connection) -> None:
+    """SAT_EVENT_QUEUE 확장 컬럼 — 기존 DB 호환."""
+    try:
+        additions: list[tuple[str, str]] = [
+            ("SW_ID", "INTEGER NOT NULL DEFAULT 0"),
+            ("WEIGHT", "INTEGER NOT NULL DEFAULT 0"),
+            ("EXCEPTION_CODE", "INTEGER NOT NULL DEFAULT 0"),
+            ("MODULE_SCORES", "TEXT NOT NULL DEFAULT ''"),
+            ("CHENNEL1", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for col, col_def in additions:
+            if _table_has_column(conn, "SAT_EVENT_QUEUE", col):
+                continue
+            conn.execute(f"ALTER TABLE SAT_EVENT_QUEUE ADD COLUMN {col} {col_def}")
+            logger.info("SAT_EVENT_QUEUE: %s 컬럼 추가", col)
+    except sqlite3.Error as e:
+        logger.error("SAT_EVENT_QUEUE 컬럼 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_EVENT_QUEUE 컬럼 마이그레이션 실패: %s", e)
+        raise
+
+
+def _migrate_adcs_filter_autoincrement(conn: sqlite3.Connection) -> None:
+    """SAT_ADCS_FILTER.CHENNEL1 을 AUTOINCREMENT PK 로 재구성 (구 스키마 호환)."""
+    try:
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='SAT_ADCS_FILTER'",
+        ).fetchone()
+        if schema_row is not None and schema_row[0] and "AUTOINCREMENT" in str(schema_row[0]).upper():
+            return
+        cur = conn.execute("PRAGMA table_info(SAT_ADCS_FILTER)")
+        rows = cur.fetchall()
+        if not rows:
+            return
+        channel_col = next((r for r in rows if r[1] == "CHENNEL1"), None)
+        if channel_col is None:
+            return
+        col_defs: list[str] = []
+        select_cols: list[str] = []
+        for r in rows:
+            name = r[1]
+            ctype = r[2] or "INTEGER"
+            notnull = " NOT NULL" if r[3] else ""
+            dflt = f" DEFAULT {r[4]}" if r[4] is not None else ""
+            if name == "CHENNEL1":
+                col_defs.append("CHENNEL1 INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT")
+                select_cols.append("CHENNEL1")
+            else:
+                col_defs.append(f"{name} {ctype}{notnull}{dflt}")
+                select_cols.append(name)
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS SAT_ADCS_FILTER_NEW ({', '.join(col_defs)})",
+        )
+        conn.execute(
+            f"INSERT INTO SAT_ADCS_FILTER_NEW ({', '.join(select_cols)}) "
+            f"SELECT {', '.join(select_cols)} FROM SAT_ADCS_FILTER",
+        )
+        conn.execute("DROP TABLE SAT_ADCS_FILTER")
+        conn.execute("ALTER TABLE SAT_ADCS_FILTER_NEW RENAME TO SAT_ADCS_FILTER")
+        logger.info("SAT_ADCS_FILTER: CHENNEL1 AUTOINCREMENT 마이그레이션 완료")
+    except sqlite3.Error as e:
+        logger.error("SAT_ADCS_FILTER 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_ADCS_FILTER 마이그레이션 실패: %s", e)
+        raise
+
+
 def _migrate_integrity_hash_column(conn: sqlite3.Connection) -> None:
     """구 스키마 LAST_VERIFIEDA_AT → LAST_VERIFIED_AT 컬럼명 정리."""
     try:
@@ -279,6 +353,8 @@ def init_db(db_path: Path) -> None:
         for stmt in DDL_STATEMENTS:
             conn.execute(stmt)
         _migrate_integrity_hash_column(conn)
+        _migrate_event_queue_columns(conn)
+        _migrate_adcs_filter_autoincrement(conn)
         _seed_sat_tlm_current(conn)
         conn.commit()
     except sqlite3.Error as e:

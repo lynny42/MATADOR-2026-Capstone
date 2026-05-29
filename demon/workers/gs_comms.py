@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 _OPTIONAL_EVENT_COLS: tuple[str, ...] = (
     "EXCEPTION_CODE",
     "SW_ID",
-    "CHANNEL1",
+    "WEIGHT",
+    "CHENNEL1",
     "MODULE_SCORES",
 )
 
@@ -29,6 +30,7 @@ _DEFAULT_GS_CMD_UPDATE_HASH = "UPDATE_HASH"
 _DEFAULT_GS_CMD_ACK = "ACK"
 _DEFAULT_GS_PACKET_TLM_HISTORY = "SAT_TLM_HISTORY"
 _DEFAULT_GS_PACKET_PWR_HISTORY = "SAT_PWR_HISTORY"
+_DEFAULT_GS_PACKET_ADCS_FILTER = "SAT_ADCS_FILTER"
 _DEFAULT_GS_PACKET_EVENT = "SAT_EVENT_QUEUE"
 _DEFAULT_GS_PACKET_INTEGRITY = "SAT_INTEGRITY_HASH"
 _DEFAULT_GS_CMD_LISTEN_HOST = "0.0.0.0"
@@ -106,10 +108,10 @@ class GScomms:
                 key_set = {}
 
             sw_id = int(key_set.get("sw_id", 0))
-            channel1 = int(
+            chennel1 = int(
                 key_set.get(
                     "channel1",
-                    demon_config.SAT_ADCS_FILTER_CHANNEL_ID,
+                    key_set.get("CHENNEL1", 0),
                 ),
             )
             detected_at = str(
@@ -142,7 +144,8 @@ class GScomms:
                 "IS_SENT": 0,
                 "EXCEPTION_CODE": int(result.get("exception_code", 0)),
                 "SW_ID": sw_id,
-                "CHANNEL1": channel1,
+                "WEIGHT": weight,
+                "CHENNEL1": chennel1,
                 "MODULE_SCORES": module_scores_text,
             }
 
@@ -152,11 +155,12 @@ class GScomms:
                 return -1
 
             logger.info(
-                "오탐필터 이벤트 INSERT event_id=%s type=%s weight=%s sw_id=%s",
+                "오탐필터 이벤트 INSERT event_id=%s type=%s weight=%s sw_id=%s chennel1=%s",
                 event_id,
                 event_type,
                 weight,
                 sw_id,
+                chennel1,
             )
             return event_id
         except (ValueError, TypeError) as e:
@@ -167,10 +171,11 @@ class GScomms:
             return -1
 
     def transmit_all(self) -> None:
-        """교신 윈도우 — tlm_history → pwr_history → events → integrity 순차 송신."""
+        """교신 윈도우 — tlm/pwr history → adcs filter → events → integrity 순차 송신."""
         try:
             self.transmit_tlm_history()
             self.transmit_pwr_history()
+            self.transmit_adcs_filter()
             self.transmit_event_queue()
             self.transmit_integrity()
         except Exception as e:
@@ -182,6 +187,7 @@ class GScomms:
             records = self._ctx.db.get_tlm_history()
             if not records:
                 return
+            history_ids = self._ctx.db.history_ids_from_records(records)
             payload = {
                 "packet_type": self._config_str(
                     "GS_PACKET_TYPE_TLM_HISTORY",
@@ -190,9 +196,12 @@ class GScomms:
                 "records": records,
             }
 
-            def on_ack(_ack: dict[str, Any]) -> None:
-                if not self._ctx.db.delete_tlm_history():
-                    logger.warning("delete_tlm_history 실패")
+            def on_ack(
+                _ack: dict[str, Any],
+                ids: list[int] = history_ids,
+            ) -> None:
+                if not self._ctx.db.delete_tlm_history(ids):
+                    logger.warning("delete_tlm_history 실패 ids=%s", ids)
 
             if not self.send_with_retry(payload, on_ack):
                 logger.warning("SAT_TLM_HISTORY 송신 실패 — 삭제하지 않음")
@@ -205,6 +214,7 @@ class GScomms:
             records = self._ctx.db.get_pwr_history()
             if not records:
                 return
+            history_ids = self._ctx.db.history_ids_from_records(records)
             payload = {
                 "packet_type": self._config_str(
                     "GS_PACKET_TYPE_PWR_HISTORY",
@@ -213,14 +223,40 @@ class GScomms:
                 "records": records,
             }
 
-            def on_ack(_ack: dict[str, Any]) -> None:
-                if not self._ctx.db.delete_pwr_history():
-                    logger.warning("delete_pwr_history 실패")
+            def on_ack(
+                _ack: dict[str, Any],
+                ids: list[int] = history_ids,
+            ) -> None:
+                if not self._ctx.db.delete_pwr_history(ids):
+                    logger.warning("delete_pwr_history 실패 ids=%s", ids)
 
             if not self.send_with_retry(payload, on_ack):
                 logger.warning("SAT_PWR_HISTORY 송신 실패 — 삭제하지 않음")
         except Exception as e:
             logger.error("transmit_pwr_history 실패: %s", e)
+
+    def transmit_adcs_filter(self) -> None:
+        """SAT_ADCS_FILTER 전체 송신 — ACK 시 delete_adcs_filter."""
+        try:
+            records = self._ctx.db.get_adcs_filter_all()
+            if not records:
+                return
+            payload = {
+                "packet_type": self._config_str(
+                    "GS_PACKET_TYPE_ADCS_FILTER",
+                    _DEFAULT_GS_PACKET_ADCS_FILTER,
+                ),
+                "records": records,
+            }
+
+            def on_ack(_ack: dict[str, Any]) -> None:
+                if not self._ctx.db.delete_adcs_filter():
+                    logger.warning("delete_adcs_filter 실패")
+
+            if not self.send_with_retry(payload, on_ack):
+                logger.warning("SAT_ADCS_FILTER 송신 실패 — 삭제하지 않음")
+        except Exception as e:
+            logger.error("transmit_adcs_filter 실패: %s", e)
 
     def transmit_event_queue(self) -> None:
         """미전송 이벤트 개별 순차 송신 — ACK 시 delete_event."""

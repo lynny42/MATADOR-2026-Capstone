@@ -42,11 +42,16 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok(f"SAT_PWR_META {pwr_rows} rows seeded")
 
     db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.1, "current_a": 0.4})
+    m0 = db.get_pwr_meta(0)
+    if m0 is not None:
+        db.insert_pwr_history(m0)
     db.upsert_pwr_meta({"sw_id": 0, "voltage": 3.4, "current_a": 0.5})
     m0 = db.get_pwr_meta(0)
     if m0 is None or abs(m0["CURR_DELTA_V"] - 0.3) > 1e-6:
         _fail(f"pwr delta expected 0.3 got {None if m0 is None else m0['CURR_DELTA_V']}")
     _ok("upsert_pwr_meta delta sliding window")
+    if m0 is not None:
+        db.insert_pwr_history(m0)
     conn = sqlite3.connect(tmp_db)
     pwr_hist_rows = conn.execute(
         "SELECT COUNT(*) FROM SAT_PWR_HISTORY WHERE SW_ID = 0",
@@ -64,7 +69,15 @@ def test_db_manager_api(tmp_db: Path) -> None:
         _fail("update_pwr_exceed_meta")
     _ok("update_pwr_exceed_meta")
 
-    eid = db.insert_event({"EVENT_TYPE": "VERIFY", "PRIORITY": 0})
+    eid = db.insert_event({
+        "EVENT_TYPE": "VERIFY",
+        "PRIORITY": 0,
+        "CHENNEL1": 5,
+        "SW_ID": 1,
+    })
+    ev = db.get_event(eid)
+    if ev is None or ev.get("CHENNEL1") != 5:
+        _fail(f"insert_event CHENNEL1 {ev}")
     if eid < 1 or len(db.get_pending_events()) != 1:
         _fail("insert_event / get_pending_events")
     db.mark_event_sent(eid)
@@ -72,6 +85,9 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok("event queue lifecycle")
 
     db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
+    tlm_snap = db.get_tlm_current()
+    if tlm_snap is not None:
+        db.insert_tlm_history(tlm_snap)
     if not db.is_sunlight_window():
         _fail("is_sunlight_window")
     _ok("upsert_tlm_current + is_sunlight_window")
@@ -83,15 +99,23 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok("SAT_TLM_HISTORY append")
 
     db.insert_adcs_filter({"QBN_0": 1.0, "SUN_VALID": 1, "_ADCS_HK_CMD_CNT": 10})
-    adcs = db.get_adcs_filter(1)
+    adcs = db.get_adcs_filter()
     if adcs is None or adcs.get("QBN_0") != 1.0:
         _fail(f"get_adcs_filter {adcs}")
     _ok("insert_adcs_filter + get_adcs_filter")
 
     db.insert_adcs_filter({"QBN_0": 0.9, "SUN_VALID": 0})
-    if db.get_adcs_filter(1).get("QBN_0") != 0.9:
-        _fail("insert_adcs_filter UPSERT (OR REPLACE)")
-    _ok("insert_adcs_filter OR REPLACE")
+    latest = db.get_adcs_filter()
+    if latest is None or latest.get("QBN_0") != 0.9:
+        _fail(f"insert_adcs_filter latest row {latest}")
+    all_adcs = db.get_adcs_filter_all()
+    if len(all_adcs) < 2:
+        _fail(f"get_adcs_filter_all count={len(all_adcs)}")
+    if not db.delete_adcs_filter():
+        _fail("delete_adcs_filter")
+    if db.get_adcs_filter_all():
+        _fail("delete_adcs_filter should clear table")
+    _ok("insert_adcs_filter append + get_adcs_filter_all + delete_adcs_filter")
 
     tlm = db.get_tlm_current()
     if tlm is None or tlm.get("ADCS_MODE") is None:
@@ -148,7 +172,12 @@ def test_do_flush_pending(tmp_db: Path) -> None:
         _fail(f"after flush ADCS_MODE/SUN_VALID {row}")
     if abs(float(row.get("WBN_X", 0)) + 0.002) > 1e-9:
         _fail(f"after flush WBN_X {row.get('WBN_X')}")
-    _ok("DO-style flush: pending → SAT_TLM_CURRENT once")
+    conn = sqlite3.connect(tmp_db)
+    tlm_hist = conn.execute("SELECT COUNT(*) FROM SAT_TLM_HISTORY").fetchone()[0]
+    conn.close()
+    if tlm_hist < 1:
+        _fail(f"SAT_TLM_HISTORY after flush count={tlm_hist}")
+    _ok("DO-style flush: pending → SAT_TLM_CURRENT + history")
 
     rx._merge_tlm_pending({"_DO_RW_TCMD_X": 0.5, "ADCS_MODE": 3})
     snap = DBManager.filter_tlm_current_fields(rx._tlm_pending)
@@ -199,7 +228,14 @@ def test_serial_reader_parsing(tmp_db: Path) -> None:
     m0 = db.get_pwr_meta(0)
     if m0 is None or abs(float(m0["VOLTAGE"]) - 3.5) > 1e-6:
         _fail(f"dispatch power line {m0}")
-    _ok("dispatch_line power → upsert_pwr_meta")
+    conn = sqlite3.connect(tmp_db)
+    pwr_hist = conn.execute(
+        "SELECT COUNT(*) FROM SAT_PWR_HISTORY WHERE SW_ID = 0",
+    ).fetchone()[0]
+    conn.close()
+    if pwr_hist < 1:
+        _fail(f"SAT_PWR_HISTORY after dispatch count={pwr_hist}")
+    _ok("dispatch_line power → upsert_pwr_meta + history")
 
     reader._dispatch_line("L,dark,80000")
     if reader.get_light_state() != "dark":

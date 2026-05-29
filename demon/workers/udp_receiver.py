@@ -329,6 +329,10 @@ class UDPReceiver:
                 snapshot = dict(self._tlm_pending)
             if not snapshot:
                 return
-            self._ctx.db.upsert_tlm_current(snapshot)
+            if not self._ctx.db.upsert_tlm_current(snapshot):
+                return
+            tlm_row = self._ctx.db.get_tlm_current()
+            if tlm_row is not None:
+                self._ctx.db.insert_tlm_history(tlm_row)
         except Exception as e:
             logger.error("_flush_tlm_pending_to_db 실패: %s", e)
