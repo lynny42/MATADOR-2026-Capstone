@@ -19,9 +19,9 @@ SERIAL_REOPEN_BACKOFF_SEC = 5.0
 # 아두이노 전력 CSV SW_ID 상한 (0~2 INA226, 3번은 L,light|dark 별도 라인)
 SERIAL_PWR_SW_ID_MAX = 2
 SERIAL_LIGHT_TAG = "L"
-UART_CMD_ATTACK = "ATTACK"
-UART_CMD_RECOVERY = "RECOVERY"
-# 아두이노 JSON 데모 — {"gyro":"on"|"off"}, {"num":N,"angle":D}
+# 아두이노 JSON — AttackSimulator 가 개별 전송 (ATTACK/RECOVERY 문자열 미사용)
+UART_JSON_PWR_BIAS_ON = "on"
+UART_JSON_PWR_BIAS_OFF = "off"
 UART_JSON_GYRO_ON = "on"
 UART_JSON_GYRO_OFF = "off"
 SERVO_ANGLE_MIN = 0
@@ -48,6 +48,14 @@ GS_HOST = "10.0.1.2"
 GS_PORT = 6000
 GS_SEND_RETRY_MAX = 3
 GS_SEND_RETRY_BASE_SEC = 1.0
+# 지상국 → 위성 커맨드 이름 (GScomms.dispatch_command)
+GS_CMD_ATTACK_SIM = "ATTACK_SIM"
+GS_CMD_RECOVERY = "RECOVERY"
+GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
+GS_CMD_UPDATE_HASH = "UPDATE_HASH"
+GS_CMD_ACK = "ACK"
+GS_CMD_LISTEN_HOST = "0.0.0.0"
+GS_CMD_LISTEN_PORT_OFFSET = 1
 
 # ============================================================
 # DB
@@ -85,10 +93,14 @@ TLM_CURRENT_UPDATEABLE_COLS: tuple[str, ...] = (
 COLLECT_INTERVAL_SEC = 1.0
 
 # ============================================================
-# 전력 초기 임계치 (SW_ID 0~3)
+# 전력 초기 임계치 (SW_ID 0~3) — 아두이노 INA226 실측 기준 (2026-05)
+#   SW_0 MPU rail:  대기 ~3.27V, ATTACK ~4.47V
+#   SW_1 RPi rail:  대기 ~4.82V (구 3.0~3.6V 는 3.3V 논리전압 가정으로 부적합)
+#   SW_2 Servo:     대기 ~4.81V, 서보 부하 시 ~3.85V
+#   SW_3:           조도 전용 — 전력 CSV 미갱신, 시드용
 # ============================================================
-V_THRESHOLD_LO = [3.0, 3.0, 4.5, 3.0]
-V_THRESHOLD_HI = [3.6, 3.6, 5.5, 3.6]
+V_THRESHOLD_LO = [3.10, 4.60, 3.50, 3.0]
+V_THRESHOLD_HI = [3.45, 5.00, 5.00, 3.6]
 
 # ============================================================
 # 물리적 범위 필터 (parse_serial_line 1차 필터)
@@ -106,6 +118,20 @@ INTEGRITY_TARGET_DIR = "/cf"
 # ============================================================
 EXCEED_COUNT_THRESHOLD = 3
 CONSECUTIVE_THRESHOLD = 3
+ANOMALY_DELTA_V_THRESHOLD = 0.1
+ATTACK_MODE_THRESHOLD_SHRINK_RATIO = 0.1
+
+# ============================================================
+# 공격 시뮬레이터 (지상국 ATTACK_SIM → AttackSimulator)
+# ============================================================
+# 물리: SerialReader JSON — pwr_bias / gyro / servo (아두이노는 명령만 수행)
+ATTACK_SIM_PWR_BIAS = True
+ATTACK_SIM_ENABLE_GYRO = True
+ATTACK_SIM_ENABLE_SERVO = True
+ATTACK_SIM_SERVO_REPEATS = 3
+ATTACK_SIM_SERVO_ANGLE = 90
+# 논리: SAT_ADCS_FILTER / SAT_TLM_CURRENT 에 오탐필터용 이상 스냅샷 주입
+ATTACK_SIM_INJECT_LOGICAL = True
 
 # ============================================================
 # 로깅

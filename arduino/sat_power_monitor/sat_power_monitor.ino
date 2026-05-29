@@ -12,13 +12,12 @@
  *   조도: 디지털 DO만 사용 (LM393: 밝음=DO LOW, 가림=DO HIGH)
  *   (SAT_PWR_META SW_ID 3 은 미갱신 — DB 시드 0 유지)
  *
- * 지상국/데몬 UART 명령 (한 줄):
- *   ATTACK   — 전압 바이어스 시뮬 (이상 탐지 데모)
- *   RECOVERY — 바이어스 해제
+ * 데몬 UART 명령 (한 줄 JSON — AttackSimulator 가 조합 전송):
+ *   {"pwr_bias":"on"|"off"}  — MPU rail 전압 바이어스 (이상 탐지 데모)
+ *   {"gyro":"on"|"off"}      — MPU6050 전원
+ *   {"num":N,"angle":D}      — 서보 N회, 각도 0~180
  *
- * 시리얼 모니터 데모 (선택, DEBUG_HUMAN_OUTPUT=1):
- *   {"gyro":"on"} / {"gyro":"off"}
- *   {"num":3,"angle":90} 또는 {"motor":{"num":3,"angle":90}}
+ * (레거시 ATTACK/RECOVERY 문자열은 사용하지 않음)
  *
  * 보드레이트: 9600 (demon config.py BAUD_RATE 와 동일)
  */
@@ -64,7 +63,7 @@ MPU6050 mpu(Wire);
 Servo servo;
 
 bool gyroActive = false;
-bool attackMode = false;
+bool pwrBiasActive = false;
 
 char cmdLine[128];
 uint8_t cmdLen = 0;
@@ -84,7 +83,7 @@ float readCurrent_A(INA226_WE &ina) {
 }
 
 float applyAttackBias(uint8_t swId, float voltage) {
-    if (!attackMode) {
+    if (!pwrBiasActive) {
         return voltage;
     }
     switch (swId) {
@@ -144,7 +143,7 @@ bool readLightDigitalBright(int *outDoLevel) {
 }
 
 bool isLightBright(int *outDoLevel) {
-    if (attackMode) {
+    if (pwrBiasActive) {
         if (outDoLevel != NULL) {
             *outDoLevel = 1;
         }
@@ -223,6 +222,16 @@ String extractValue(const String &json, const String &key) {
     return json.substring(idx, end);
 }
 
+void handlePwrBiasCommand(const String &biasVal) {
+    if (biasVal == "on") {
+        pwrBiasActive = true;
+        Serial.println(F("# pwr_bias on"));
+    } else if (biasVal == "off") {
+        pwrBiasActive = false;
+        Serial.println(F("# pwr_bias off"));
+    }
+}
+
 void handleGyroCommand(const String &gyroVal) {
     if (gyroVal == "on") {
         gyroActive = true;
@@ -261,6 +270,10 @@ void handleMotorCommand(const String &numVal, const String &angleVal) {
 }
 
 void handleJsonCommand(const String &input) {
+    String biasVal = extractValue(input, "pwr_bias");
+    if (biasVal.length() > 0) {
+        handlePwrBiasCommand(biasVal);
+    }
     String gyroVal = extractValue(input, "gyro");
     if (gyroVal.length() > 0) {
         handleGyroCommand(gyroVal);
@@ -278,21 +291,14 @@ void handleDaemonCommand(const String &input) {
     if (line.length() == 0) {
         return;
     }
-    if (line.equalsIgnoreCase("ATTACK")) {
-        attackMode = true;
-        Serial.println(F("# ATTACK"));
-        return;
-    }
-    if (line.equalsIgnoreCase("RECOVERY")) {
-        attackMode = false;
-        Serial.println(F("# RECOVERY"));
-        return;
-    }
     if (line.charAt(0) == '{') {
         handleJsonCommand(line);
         Serial.print(F("# json: "));
         Serial.println(line);
+        return;
     }
+    Serial.print(F("# unknown cmd (use JSON): "));
+    Serial.println(line);
 }
 
 void pollSerialCommands() {
@@ -368,7 +374,7 @@ void setup() {
     cmdLen = 0;
     Serial.println(F("# sat_power_monitor ready"));
     Serial.println(F("# power: 0,1,2 = CSV | light: L,light|dark (DO pin)"));
-    Serial.println(F("# CMD: ATTACK | RECOVERY | JSON demo"));
+    Serial.println(F("# CMD: JSON pwr_bias | gyro | num+angle"));
 }
 
 void loop() {

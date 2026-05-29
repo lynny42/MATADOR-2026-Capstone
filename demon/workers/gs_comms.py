@@ -47,7 +47,10 @@ class AnomalyDetectorLike(Protocol):
 
 
 class SerialReaderLike(Protocol):
-    def send_uart_command(self, cmd: str) -> bool:
+    def set_pwr_bias(self, enabled: bool) -> bool:
+        ...
+
+    def set_gyro_enabled(self, enabled: bool) -> bool:
         ...
 
 
@@ -58,6 +61,7 @@ class GScomms:
         self._ctx = ctx
         self._anomaly_detector: AnomalyDetectorLike | None = None
         self._serial_reader: SerialReaderLike | None = None
+        self._attack_simulator: object | None = None
         self._listen_sock: socket.socket | None = None
         self._recv_thread: threading.Thread | None = None
         self._last_transmit_sun_valid: bool = False
@@ -73,6 +77,13 @@ class GScomms:
             self._serial_reader = reader
         except Exception as e:
             logger.error("set_serial_reader 실패: %s", e)
+
+    def set_attack_simulator(self, simulator: object) -> None:
+        """AttackSimulator — ATTACK_SIM / RECOVERY 위임."""
+        try:
+            self._attack_simulator = simulator
+        except Exception as e:
+            logger.error("set_attack_simulator 실패: %s", e)
 
     def run(self) -> None:
         """gs_comms_thread — 수신 스레드 기동 + 일광 윈도우 송신 루프."""
@@ -355,29 +366,45 @@ class GScomms:
 
     def handle_attack_sim(self) -> None:
         try:
-            if self._anomaly_detector is None:
-                logger.error("AnomalyDetector 미주입 — ATTACK_SIM 스킵")
+            sim = self._attack_simulator
+            if sim is not None and hasattr(sim, "start"):
+                if not bool(sim.start()):
+                    logger.error("AttackSimulator.start 실패")
                 return
-            self._anomaly_detector.set_attack_mode(True)
-            if self._serial_reader is None:
-                logger.error("SerialReader 미주입 — UART ATTACK 스킵")
-                return
-            self._serial_reader.send_uart_command(demon_config.UART_CMD_ATTACK)
+            self._handle_attack_sim_legacy()
         except Exception as e:
             logger.error("handle_attack_sim 실패: %s", e)
 
     def handle_recovery(self) -> None:
         try:
-            if self._anomaly_detector is None:
-                logger.error("AnomalyDetector 미주입 — RECOVERY 스킵")
+            sim = self._attack_simulator
+            if sim is not None and hasattr(sim, "stop"):
+                if not bool(sim.stop()):
+                    logger.error("AttackSimulator.stop 실패")
                 return
-            self._anomaly_detector.set_attack_mode(False)
-            if self._serial_reader is None:
-                logger.error("SerialReader 미주입 — UART RECOVERY 스킵")
-                return
-            self._serial_reader.send_uart_command(demon_config.UART_CMD_RECOVERY)
+            self._handle_recovery_legacy()
         except Exception as e:
             logger.error("handle_recovery 실패: %s", e)
+
+    def _handle_attack_sim_legacy(self) -> None:
+        """AttackSimulator 미주입 시 최소 동작."""
+        try:
+            if self._anomaly_detector is not None:
+                self._anomaly_detector.set_attack_mode(True)
+            if self._serial_reader is not None:
+                self._serial_reader.set_pwr_bias(True)
+        except Exception as e:
+            logger.error("_handle_attack_sim_legacy 실패: %s", e)
+
+    def _handle_recovery_legacy(self) -> None:
+        try:
+            if self._serial_reader is not None:
+                self._serial_reader.set_pwr_bias(False)
+                self._serial_reader.set_gyro_enabled(False)
+            if self._anomaly_detector is not None:
+                self._anomaly_detector.set_attack_mode(False)
+        except Exception as e:
+            logger.error("_handle_recovery_legacy 실패: %s", e)
 
     def update_threshold(self, cmd: dict[str, Any]) -> None:
         """UPDATE_THRESHOLD — SAT_PWR_META 임계치 갱신."""

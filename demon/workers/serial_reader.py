@@ -24,8 +24,8 @@ class SerialReader:
     """
     아두이노 UART 전력·조도 수집 및 제어.
 
-    - 전력 시뮬: send_attack_sim / send_recovery (ATTACK|RECOVERY)
-    - 모터·자이로: run_servo_motion / set_gyro_enabled (JSON, sat_power_monitor.ino)
+    - 전력 시뮬: set_pwr_bias (JSON {"pwr_bias":"on"|"off"})
+    - 모터·자이로: run_servo_motion / set_gyro_enabled (JSON)
     - 조도: get_light_state (L,light|dark 수신만, 송신 제어 없음)
     """
 
@@ -85,27 +85,17 @@ class SerialReader:
             logger.error("is_light_bright 실패: %s", e)
             return None
 
-    def send_attack_sim(self) -> bool:
-        """전력 이상 시뮬 — 아두이노 ATTACK."""
-        return self.send_uart_command(demon_config.UART_CMD_ATTACK)
-
-    def send_recovery(self) -> bool:
-        """전력 시뮬 해제 — 아두이노 RECOVERY."""
-        return self.send_uart_command(demon_config.UART_CMD_RECOVERY)
-
-    def send_uart_command(self, cmd: str) -> bool:
-        """ATTACK / RECOVERY 한 줄 UART 전송."""
+    def set_pwr_bias(self, enabled: bool) -> bool:
+        """MPU rail 전압 바이어스 — {"pwr_bias":"on"|"off"}."""
         try:
-            text = (cmd or "").strip()
-            if text not in (
-                demon_config.UART_CMD_ATTACK,
-                demon_config.UART_CMD_RECOVERY,
-            ):
-                logger.warning("지원하지 않는 UART 커맨드: %s", text)
-                return False
-            return self._send_uart_line(text)
+            state = (
+                demon_config.UART_JSON_PWR_BIAS_ON
+                if enabled
+                else demon_config.UART_JSON_PWR_BIAS_OFF
+            )
+            return self._send_json_command({"pwr_bias": state})
         except Exception as e:
-            logger.error("send_uart_command 실패: %s", e)
+            logger.error("set_pwr_bias 실패: %s", e)
             return False
 
     def set_gyro_enabled(self, enabled: bool) -> bool:

@@ -6,7 +6,7 @@ import sqlite3
 import threading
 
 from ..db.db_manager import DBManager
-from ..workers import AnomalyDetector, GScomms, SerialReader, UDPReceiver
+from ..workers import AnomalyDetector, AttackSimulator, GScomms, SerialReader, UDPReceiver
 from .context import DaemonConfig, RuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -71,10 +71,14 @@ class MatadorDaemon:
             serial_reader = SerialReader(ctx)
             udp_receiver = UDPReceiver(ctx)
             anomaly_detector = AnomalyDetector(ctx)
+            attack_simulator = AttackSimulator(ctx)
             gs_comms = GScomms(ctx)
 
+            attack_simulator.set_anomaly_detector(anomaly_detector)
+            attack_simulator.set_serial_reader(serial_reader)
             gs_comms.set_anomaly_detector(anomaly_detector)
             gs_comms.set_serial_reader(serial_reader)
+            gs_comms.set_attack_simulator(attack_simulator)
             anomaly_detector.set_gs_comms(gs_comms)
 
             false_positive_filter = self._try_create_false_positive_filter(ctx, gs_comms)
