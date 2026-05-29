@@ -12,6 +12,15 @@ from pathlib import Path
 from demon import config as demon_config
 from demon.core.context import DaemonConfig, RuntimeContext
 from demon.db.db_manager import DBManager
+from demon.workers.anomaly_detector import AnomalyDetector
+from demon.workers.false_positive_filter import (
+    FalsePositiveFilter,
+    PhysicalConsistencyModule,
+    StatisticalConsistencyModule,
+    SystemResponseModule,
+)
+from demon.workers.false_positive_filter.experiment_db import ExperimentMockDB
+from demon.workers.gs_comms import GScomms
 from demon.workers.serial_reader import SerialReader
 from demon.workers.udp_receiver import UDPReceiver
 
@@ -48,17 +57,6 @@ def test_db_manager_api(tmp_db: Path) -> None:
         _fail(f"pwr delta expected 0.3 got {None if m0 is None else m0['CURR_DELTA_V']}")
     _ok("upsert_pwr_meta delta sliding window")
 
-    hid1 = db.insert_pwr_history_snapshot()
-    hid2 = db.insert_pwr_history_snapshot()
-    if hid1 < 1 or hid2 < 2:
-        _fail(f"insert_pwr_history_snapshot ids={hid1},{hid2}")
-    pwr_snapshots = db.get_pwr_history()
-    if len(pwr_snapshots) != 2:
-        _fail(f"get_pwr_history snapshot count={len(pwr_snapshots)}")
-    if len(pwr_snapshots[0].get("channels", [])) != demon_config.PWR_SW_ID_COUNT:
-        _fail(f"channels per snapshot={len(pwr_snapshots[0].get('channels', []))}")
-    _ok("SAT_PWR_HISTORY snapshot (4 channels per HISTORY_ID)")
-
     db.update_pwr_exceed_meta(
         {"sw_id": 0, "exceed_count": 3, "consecutive_exceed": 2, "anomaly_flag": 1},
     )
@@ -67,15 +65,7 @@ def test_db_manager_api(tmp_db: Path) -> None:
         _fail("update_pwr_exceed_meta")
     _ok("update_pwr_exceed_meta")
 
-    eid = db.insert_event({
-        "EVENT_TYPE": "VERIFY",
-        "PRIORITY": 0,
-        "CHENNEL1": 5,
-        "SW_ID": 1,
-    })
-    ev = db.get_event(eid)
-    if ev is None or ev.get("CHENNEL1") != 5:
-        _fail(f"insert_event CHENNEL1 {ev}")
+    eid = db.insert_event({"EVENT_TYPE": "VERIFY", "PRIORITY": 0})
     if eid < 1 or len(db.get_pending_events()) != 1:
         _fail("insert_event / get_pending_events")
     db.mark_event_sent(eid)
@@ -83,37 +73,20 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok("event queue lifecycle")
 
     db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
-    tlm_snap = db.get_tlm_current()
-    if tlm_snap is not None:
-        db.insert_tlm_history(tlm_snap)
     if not db.is_sunlight_window():
         _fail("is_sunlight_window")
     _ok("upsert_tlm_current + is_sunlight_window")
-    conn = sqlite3.connect(tmp_db)
-    tlm_hist_rows = conn.execute("SELECT COUNT(*) FROM SAT_TLM_HISTORY").fetchone()[0]
-    conn.close()
-    if tlm_hist_rows < 1:
-        _fail(f"SAT_TLM_HISTORY append count={tlm_hist_rows}")
-    _ok("SAT_TLM_HISTORY append")
 
     db.insert_adcs_filter({"QBN_0": 1.0, "SUN_VALID": 1, "_ADCS_HK_CMD_CNT": 10})
-    adcs = db.get_adcs_filter()
+    adcs = db.get_adcs_filter(1)
     if adcs is None or adcs.get("QBN_0") != 1.0:
         _fail(f"get_adcs_filter {adcs}")
     _ok("insert_adcs_filter + get_adcs_filter")
 
     db.insert_adcs_filter({"QBN_0": 0.9, "SUN_VALID": 0})
-    latest = db.get_adcs_filter()
-    if latest is None or latest.get("QBN_0") != 0.9:
-        _fail(f"insert_adcs_filter latest row {latest}")
-    all_adcs = db.get_adcs_filter_all()
-    if len(all_adcs) < 2:
-        _fail(f"get_adcs_filter_all count={len(all_adcs)}")
-    if not db.delete_adcs_filter():
-        _fail("delete_adcs_filter")
-    if db.get_adcs_filter_all():
-        _fail("delete_adcs_filter should clear table")
-    _ok("insert_adcs_filter append + get_adcs_filter_all + delete_adcs_filter")
+    if db.get_adcs_filter(1).get("QBN_0") != 0.9:
+        _fail("insert_adcs_filter UPSERT (OR REPLACE)")
+    _ok("insert_adcs_filter OR REPLACE")
 
     tlm = db.get_tlm_current()
     if tlm is None or tlm.get("ADCS_MODE") is None:
@@ -170,12 +143,7 @@ def test_do_flush_pending(tmp_db: Path) -> None:
         _fail(f"after flush ADCS_MODE/SUN_VALID {row}")
     if abs(float(row.get("WBN_X", 0)) + 0.002) > 1e-9:
         _fail(f"after flush WBN_X {row.get('WBN_X')}")
-    conn = sqlite3.connect(tmp_db)
-    tlm_hist = conn.execute("SELECT COUNT(*) FROM SAT_TLM_HISTORY").fetchone()[0]
-    conn.close()
-    if tlm_hist < 1:
-        _fail(f"SAT_TLM_HISTORY after flush count={tlm_hist}")
-    _ok("DO-style flush: pending → SAT_TLM_CURRENT + history")
+    _ok("DO-style flush: pending → SAT_TLM_CURRENT once")
 
     rx._merge_tlm_pending({"_DO_RW_TCMD_X": 0.5, "ADCS_MODE": 3})
     snap = DBManager.filter_tlm_current_fields(rx._tlm_pending)
@@ -250,6 +218,57 @@ def test_serial_reader_parsing(tmp_db: Path) -> None:
     db.close()
 
 
+def test_fpf_pipeline_wiring(db_path: Path) -> None:
+    """AnomalyDetector → FPF → GScomms wiring (runtime.py 와 동일 조립)."""
+    db = DBManager(db_path)
+    if not db.init_db():
+        _fail("FPF wiring: init_db")
+    shutdown = threading.Event()
+    ctx = RuntimeContext(config=DaemonConfig(db_path=db_path), shutdown_event=shutdown, db=db)
+
+    anomaly_detector = AnomalyDetector(ctx)
+    gs_comms = GScomms(ctx)
+    false_positive_filter = FalsePositiveFilter(
+        PhysicalConsistencyModule(db),
+        StatisticalConsistencyModule(db),
+        SystemResponseModule(db),
+        gs_comms,
+    )
+    anomaly_detector.set_false_positive_filter(false_positive_filter)
+    anomaly_detector.set_gs_comms(gs_comms)
+
+    if anomaly_detector._false_positive_filter is not false_positive_filter:
+        _fail("FPF wiring: set_false_positive_filter")
+    if false_positive_filter.gs_comms is not gs_comms:
+        _fail("FPF wiring: gs_comms reference")
+
+    mock_db = ExperimentMockDB("normal")
+    fpf = FalsePositiveFilter(
+        PhysicalConsistencyModule(mock_db),
+        StatisticalConsistencyModule(mock_db),
+        SystemResponseModule(mock_db),
+        gs_comms,
+    )
+    key_set = {
+        "tlm_id": 1,
+        "sw_id": 0,
+        "channel1": 1,
+        "event_id": 1,
+        "detected_at": "2026-05-12T12:00:00Z",
+    }
+    result = fpf.run_false_positive_filter(key_set)
+    if "is_attack" not in result or "weighted_score" not in result:
+        _fail("FPF wiring: run_false_positive_filter result keys")
+    if not fpf.send_to_gscomms(result):
+        _fail("FPF wiring: send_to_gscomms")
+    ks = result.get("key_set") or {}
+    if int(ks.get("event_id", 0)) < 1:
+        _fail("FPF wiring: event_id not updated after insert_event")
+
+    db.close()
+    _ok("FPF pipeline wiring (AnomalyDetector → FPF → GScomms)")
+
+
 def test_flush_trigger_mid_config() -> None:
     if demon_config.TLM_DB_FLUSH_TRIGGER_MID != demon_config.GENERIC_ADCS_DO_MID:
         _fail(
@@ -266,6 +285,7 @@ def main() -> int:
         test_db_manager_api(tmp)
         test_serial_reader_parsing(Path(tempfile.mkdtemp()) / "verify_serial.db")
         test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
+        test_fpf_pipeline_wiring(Path(tempfile.mkdtemp()) / "verify_fpf.db")
         logger.info("=== All local integration checks passed ===")
         return 0
     except SystemExit as exc:

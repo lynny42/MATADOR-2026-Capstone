@@ -21,6 +21,13 @@ from demon.core.context import DaemonConfig, RuntimeContext
 from demon.db.db_manager import DBManager
 from demon.workers.anomaly_detector import AnomalyDetector
 from demon.workers.attack_simulator import AttackSimulator
+from demon.workers.false_positive_filter import (
+    FalsePositiveFilter,
+    PhysicalConsistencyModule,
+    StatisticalConsistencyModule,
+    SystemResponseModule,
+)
+from demon.workers.gs_comms import GScomms
 from demon.workers.serial_reader import SerialReader
 
 logger = logging.getLogger(__name__)
@@ -74,6 +81,17 @@ def main() -> int:
     ctx = RuntimeContext(config=cfg, shutdown_event=shutdown, db=db)
     serial = SerialReader(ctx)
     detector = AnomalyDetector(ctx)
+    gs_comms = GScomms(ctx)
+    gs_comms.set_serial_reader(serial)
+    gs_comms.set_anomaly_detector(detector)
+    false_positive_filter = FalsePositiveFilter(
+        PhysicalConsistencyModule(db),
+        StatisticalConsistencyModule(db),
+        SystemResponseModule(db),
+        gs_comms,
+    )
+    detector.set_false_positive_filter(false_positive_filter)
+    detector.set_gs_comms(gs_comms)
     attack_sim = AttackSimulator(ctx)
     attack_sim.set_serial_reader(serial)
     attack_sim.set_anomaly_detector(detector)
@@ -119,7 +137,6 @@ def main() -> int:
     # 관측
     print(f"\n=== [3] 공격 후 {args.attack_sec}s (tick + 파이프라인) ===")
     saw_anomaly = False
-    saw_fpf_log = False
     for i in range(1, args.attack_sec + 1):
         detector._tick()
         anomaly = detector.detect_power_anomaly()
@@ -144,12 +161,20 @@ def main() -> int:
                 f"priority={ev.get('PRIORITY')} sw={ev.get('SW_ID')}",
             )
 
-    try:
-        from demon.filter.false_positive_filter import FalsePositiveFilter  # noqa: F401
-        fpf_status = "구현됨 (로그에 '오탐필터 전달' 확인)"
-    except ImportError:
-        fpf_status = "미구현 — anomaly_detector가 FPF 스킵 후 _fpf_dispatched=True (정상)"
-
+    fpf_wired = detector._false_positive_filter is not None
+    fpf_event_types = {ev.get("EVENT_TYPE") for ev in events}
+    fpf_ran = bool(
+        fpf_wired
+        and (
+            "ATTACK_CONFIRMED" in fpf_event_types
+            or "SEU_DETECTED" in fpf_event_types
+        ),
+    )
+    fpf_status = (
+        "PASS (AnomalyDetector → FPF → GScomms 이벤트 등록)"
+        if fpf_ran
+        else ("연결됨 (이상 구간에서 FPF 이벤트 미발생)" if fpf_wired else "FAIL (미연결)")
+    )
     print(f"  오탐필터(FPF):      {fpf_status}")
     print(
         "  기대: 이상 시 verify_hash → FPF.on_anomaly_detected "
@@ -171,7 +196,8 @@ def main() -> int:
     hist = conn.execute("SELECT COUNT(*) FROM SAT_PWR_HISTORY").fetchone()[0]
     conn.close()
     print(f"\nSAT_PWR_HISTORY snapshots={hist}")
-    print(f"종합: {'파이프라인 OK' if saw_anomaly else '전력 이상 미탐지 — 펌웨어/임계치 확인'}")
+    summary = "파이프라인 OK" if saw_anomaly else "전력 이상 미탐지 (펌웨어/임계치 확인)"
+    print(f"종합: {summary}")
 
     return 0 if saw_anomaly else 1
 

@@ -6,7 +6,13 @@ import sqlite3
 import threading
 
 from ..db.db_manager import DBManager
-from ..workers import AnomalyDetector, AttackSimulator, GScomms, SerialReader, UDPReceiver
+from ..workers import AnomalyDetector, GScomms, SerialReader, UDPReceiver
+from ..workers.false_positive_filter import (
+    FalsePositiveFilter,
+    PhysicalConsistencyModule,
+    StatisticalConsistencyModule,
+    SystemResponseModule,
+)
 from .context import DaemonConfig, RuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -14,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class MatadorDaemon:
     """
-    데몬 생명주기: init_db → SerialReader → UDPReceiver → AnomalyDetector → GScomms 기동,
+    데몬 생명주기: init_db → SerialReader → UDPReceiver → AnomalyDetector(+FPF) → GScomms 기동,
     종료 시 join 후 cleanup.
     """
 
@@ -71,21 +77,18 @@ class MatadorDaemon:
             serial_reader = SerialReader(ctx)
             udp_receiver = UDPReceiver(ctx)
             anomaly_detector = AnomalyDetector(ctx)
-            attack_simulator = AttackSimulator(ctx)
             gs_comms = GScomms(ctx)
-
-            attack_simulator.set_anomaly_detector(anomaly_detector)
-            attack_simulator.set_serial_reader(serial_reader)
-            gs_comms.set_anomaly_detector(anomaly_detector)
             gs_comms.set_serial_reader(serial_reader)
-            gs_comms.set_attack_simulator(attack_simulator)
-            anomaly_detector.set_gs_comms(gs_comms)
+            gs_comms.set_anomaly_detector(anomaly_detector)
 
-            false_positive_filter = self._try_create_false_positive_filter(ctx, gs_comms)
-            if false_positive_filter is not None:
-                anomaly_detector.set_false_positive_filter(false_positive_filter)
-            else:
-                logger.warning("FalsePositiveFilter 미구현 — 오탐 필터 파이프라인 비활성")
+            false_positive_filter = FalsePositiveFilter(
+                PhysicalConsistencyModule(self._db),
+                StatisticalConsistencyModule(self._db),
+                SystemResponseModule(self._db),
+                gs_comms,
+            )
+            anomaly_detector.set_false_positive_filter(false_positive_filter)
+            anomaly_detector.set_gs_comms(gs_comms)
 
             worker_specs: list[tuple[str, object]] = [
                 ("SerialReader", serial_reader),
@@ -138,19 +141,3 @@ class MatadorDaemon:
         except Exception as e:
             logger.error("DBManager cleanup 실패: %s", e)
         logger.info("cleanup complete")
-
-    @staticmethod
-    def _try_create_false_positive_filter(
-        ctx: RuntimeContext,
-        gs_comms: GScomms,
-    ) -> object | None:
-        """FalsePositiveFilter 모듈이 있으면 인스턴스 생성."""
-        try:
-            from ..filter.false_positive_filter import FalsePositiveFilter
-
-            return FalsePositiveFilter(ctx, gs_comms)
-        except ImportError:
-            return None
-        except Exception as e:
-            logger.error("FalsePositiveFilter 생성 실패: %s", e)
-            return None

@@ -317,6 +317,7 @@ class AnomalyDetector:
                 "tlm_id": demon_config.SAT_TLM_ID,
                 "sw_id": primary_sw_id,
                 "channel1": channel1,
+                "CHENNEL1": channel1,
                 "event_id": 0,
                 "detected_at": detected_at,
                 "adcs_series": list(self._adcs_series),
