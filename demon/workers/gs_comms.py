@@ -471,8 +471,12 @@ class GScomms:
             if sim is not None and hasattr(sim, "stop"):
                 if not bool(sim.stop(cmd)):
                     logger.error("AttackSimulator.stop 실패")
-                return
-            self._handle_recovery_legacy()
+            else:
+                self._handle_recovery_legacy()
+            if not self._ctx.db.reset_integrity_violations():
+                logger.warning("reset_integrity_violations 실패")
+            else:
+                logger.info("RECOVERY: SAT_INTEGRITY_HASH IS_VIOLATED → 0")
         except Exception as e:
             logger.error("handle_recovery 실패: %s", e)
 

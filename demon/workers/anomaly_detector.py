@@ -49,6 +49,7 @@ class AnomalyDetector:
         self._fpf_dispatched = False
         self._adcs_series: deque[dict[str, Any]] = deque(maxlen=5)
         self._tlm_series: deque[dict[str, Any]] = deque(maxlen=5)
+        self._warmup_ticks_remaining = 2
 
     def set_false_positive_filter(self, fpf: FalsePositiveFilterLike) -> None:
         """FalsePositiveFilter 인스턴스 주입 (런타임 wiring)."""
@@ -83,6 +84,8 @@ class AnomalyDetector:
     def run(self) -> None:
         """anomaly_detector_thread — 1초 주기 탐지 루프."""
         logger.info("AnomalyDetector started")
+        if not self._ctx.db.reset_pwr_anomaly_state():
+            logger.warning("reset_pwr_anomaly_state 실패 — 이전 세션 이상 상태가 남아있을 수 있음")
         try:
             interval = float(self._ctx.config.collect_interval_sec)
             while not self._ctx.shutdown_event.is_set():
@@ -99,6 +102,10 @@ class AnomalyDetector:
     def _tick(self) -> None:
         """1회 주기: 링버퍼 갱신 → 채널별 탐지 → 이상 시 후속 처리."""
         try:
+            if self._warmup_ticks_remaining > 0:
+                self._warmup_ticks_remaining -= 1
+                return
+
             self._refresh_series_buffers()
             for sw_id in range(demon_config.PWR_SW_ID_COUNT):
                 self._process_channel(sw_id)
@@ -197,9 +204,9 @@ class AnomalyDetector:
 
             delta_thresh = self._anomaly_delta_threshold()
             count_thresh = int(self._ctx.config.exceed_count_threshold)
-            anomaly_flag = 0
-            if exceed_count >= count_thresh and abs(curr_delta_v) > delta_thresh:
-                anomaly_flag = 1
+            # 연속 초과 횟수 기준, delta는 첫 tick(consecutive==1)만 확인
+            delta_ok = abs(curr_delta_v) > delta_thresh or consecutive > 1
+            anomaly_flag = 1 if consecutive >= count_thresh and delta_ok else 0
 
             return {
                 "sw_id": sw_id,

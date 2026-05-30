@@ -1198,6 +1198,51 @@ class DBManager:
             logger.error("update_integrity_result 실패: %s", e)
             return False
 
+    def reset_pwr_anomaly_state(self) -> bool:
+        """SAT_PWR_META 이상탐지 누적값 초기화 — 데몬 시작 시 호출."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("reset_pwr_anomaly_state: DB 미연결")
+                    return False
+                self._conn.execute(
+                    """
+                    UPDATE SAT_PWR_META SET
+                      EXCEED_COUNT = 0,
+                      CONSECUTIVE_EXCEED = 0,
+                      ANOMALY_FLAG = 0
+                    """
+                )
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("reset_pwr_anomaly_state 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("reset_pwr_anomaly_state 실패: %s", e)
+            return False
+
+    def reset_integrity_violations(self) -> bool:
+        """SAT_INTEGRITY_HASH 전체 IS_VIOLATED → 0 (RECOVERY 시 호출)."""
+        try:
+            now = _utc_now_iso()
+            with self._lock:
+                if self._conn is None:
+                    logger.error("reset_integrity_violations: DB 미연결")
+                    return False
+                self._conn.execute(
+                    "UPDATE SAT_INTEGRITY_HASH SET IS_VIOLATED = 0, UPDATED_AT = ?",
+                    (now,),
+                )
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("reset_integrity_violations 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("reset_integrity_violations 실패: %s", e)
+            return False
+
     @staticmethod
     def history_ids_from_records(records: list[dict[str, Any]]) -> list[int]:
         """history 행 dict 목록에서 HISTORY_ID 추출."""

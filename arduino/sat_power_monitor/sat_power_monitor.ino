@@ -9,7 +9,7 @@
  *
  * 조도 출력 (전력 채널 번호 대신 알파벳 태그 L):
  *   L,light,TIMESTAMP   또는   L,dark,TIMESTAMP
- *   조도: 디지털 DO만 사용 (LM393: 밝음=DO LOW, 가림=DO HIGH)
+ *   조도: 아날로그 AO 사용 (analogRead > LIGHT_AO_THRESHOLD → light)
  *   (SAT_PWR_META SW_ID 3 은 미갱신 — DB 시드 0 유지)
  *
  * 데몬 UART 명령 (한 줄 JSON — AttackSimulator 가 조합 전송):
@@ -42,9 +42,8 @@
 #define SERIAL_BAUD 9600
 #define POWER_INTERVAL_MS 1000
 
-// 조도: 디지털 DO만 (D0 핀 → LIGHT_DO). LM393: 밝음=LOW, 가림=HIGH
-#define LIGHT_DO_BRIGHT_IS_LOW  1     // 0이면 DO HIGH=밝음
-#define LIGHT_DO_SAMPLES        5     // 다수결 디바운스
+// 조도: 아날로그 AO (A0 핀). analogRead < LIGHT_AO_THRESHOLD → light (밝음=LOW)
+#define LIGHT_AO_THRESHOLD      700
 #define LIGHT_TAG 'L'
 
 // ATTACK 시뮬: 전력 채널 전압 바이어스 (V)
@@ -67,6 +66,16 @@ bool pwrBiasActive = false;
 
 char cmdLine[128];
 uint8_t cmdLen = 0;
+
+// 서보 비블로킹 상태
+enum ServoState { SERVO_IDLE, SERVO_TO_ANGLE, SERVO_TO_ZERO };
+ServoState servoState = SERVO_IDLE;
+int servoTargetAngle = 0;
+int servoRemainingReps = 0;
+unsigned long servoStepStart = 0;
+#define SERVO_STEP_MS 500
+
+unsigned long lastPowerEmitMs = 0;
 
 void setupINA226(INA226_WE &ina) {
     ina.init();
@@ -121,35 +130,16 @@ void emitPowerSample(uint8_t swId, INA226_WE &ina, float fallbackVoltage, float 
     printPowerCsv(swId, v, a);
 }
 
-bool readLightDigitalBright(int *outDoLevel) {
-    uint8_t lowCount = 0;
-    for (uint8_t i = 0; i < LIGHT_DO_SAMPLES; i++) {
-        if (digitalRead(LIGHT_DO) == LOW) {
-            lowCount++;
-        }
-        delay(1);
+bool readLightAnalogBright(int *outAoVal) {
+    int val = analogRead(LIGHT_AO);
+    if (outAoVal != NULL) {
+        *outAoVal = val;
     }
-
-    uint8_t lastLevel = (lowCount > (LIGHT_DO_SAMPLES / 2)) ? 0 : 1;
-    if (outDoLevel != NULL) {
-        *outDoLevel = lastLevel;
-    }
-
-#if LIGHT_DO_BRIGHT_IS_LOW
-    return lowCount > (LIGHT_DO_SAMPLES / 2);
-#else
-    return lowCount <= (LIGHT_DO_SAMPLES / 2);
-#endif
+    return val < LIGHT_AO_THRESHOLD;
 }
 
-bool isLightBright(int *outDoLevel) {
-    if (pwrBiasActive) {
-        if (outDoLevel != NULL) {
-            *outDoLevel = 1;
-        }
-        return false;
-    }
-    return readLightDigitalBright(outDoLevel);
+bool isLightBright(int *outAoVal) {
+    return readLightAnalogBright(outAoVal);
 }
 
 void emitLightStatus() {
@@ -250,6 +240,35 @@ void handleGyroCommand(const String &gyroVal) {
     }
 }
 
+void startServoMotion(int num, int angle) {
+    servoTargetAngle = angle;
+    servoRemainingReps = num;
+    servo.write(angle);
+    servoState = SERVO_TO_ANGLE;
+    servoStepStart = millis();
+}
+
+void updateServo() {
+    if (servoState == SERVO_IDLE) return;
+    if (millis() - servoStepStart < SERVO_STEP_MS) return;
+
+    if (servoState == SERVO_TO_ANGLE) {
+        servo.write(0);
+        servoState = SERVO_TO_ZERO;
+        servoStepStart = millis();
+    } else if (servoState == SERVO_TO_ZERO) {
+        servoRemainingReps--;
+        if (servoRemainingReps <= 0) {
+            servoState = SERVO_IDLE;
+            Serial.println(F("# servo done"));
+        } else {
+            servo.write(servoTargetAngle);
+            servoState = SERVO_TO_ANGLE;
+            servoStepStart = millis();
+        }
+    }
+}
+
 void handleMotorCommand(const String &numVal, const String &angleVal) {
     if (numVal.length() == 0 || angleVal.length() == 0) {
         return;
@@ -260,13 +279,7 @@ void handleMotorCommand(const String &numVal, const String &angleVal) {
     Serial.print(num);
     Serial.print(F(" x angle "));
     Serial.println(angle);
-    for (int i = 0; i < num; i++) {
-        servo.write(angle);
-        delay(500);
-        servo.write(0);
-        delay(500);
-    }
-    Serial.println(F("# servo done"));
+    startServoMotion(num, angle);
 }
 
 void handleJsonCommand(const String &input) {
@@ -321,12 +334,12 @@ void pollSerialCommands() {
 
 #if DEBUG_HUMAN_OUTPUT
 void printHumanSensors() {
-    int doLevel = 1;
-    bool bright = isLightBright(&doLevel);
+    int aoVal = 0;
+    bool bright = isLightBright(&aoVal);
     Serial.print(F("[조도] "));
     Serial.print(bright ? F("light") : F("dark"));
-    Serial.print(F(" (DO="));
-    Serial.print(doLevel ? F("HIGH") : F("LOW"));
+    Serial.print(F(" (AO="));
+    Serial.print(aoVal);
     Serial.println(F(")"));
 
     if (gyroActive) {
@@ -369,21 +382,24 @@ void setup() {
 
     servo.attach(SERVO_PIN);
     servo.write(0);
-    pinMode(LIGHT_DO, INPUT);
+    // LIGHT_AO: 아날로그 핀은 pinMode 불필요
 
     cmdLen = 0;
     Serial.println(F("# sat_power_monitor ready"));
-    Serial.println(F("# power: 0,1,2 = CSV | light: L,light|dark (DO pin)"));
+    Serial.println(F("# power: 0,1,2 = CSV | light: L,light|dark (AO threshold=700)"));
     Serial.println(F("# CMD: JSON pwr_bias | gyro | num+angle"));
 }
 
 void loop() {
     pollSerialCommands();
-    emitAllPowerCsv();
+    updateServo();
 
+    unsigned long now = millis();
+    if (now - lastPowerEmitMs >= POWER_INTERVAL_MS) {
+        lastPowerEmitMs = now;
+        emitAllPowerCsv();
 #if DEBUG_HUMAN_OUTPUT
-    printHumanSensors();
+        printHumanSensors();
 #endif
-
-    delay(POWER_INTERVAL_MS);
+    }
 }
