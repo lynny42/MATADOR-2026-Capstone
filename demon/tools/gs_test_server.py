@@ -27,11 +27,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import socket
 import struct
 import sys
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .. import config as demon_config
@@ -50,6 +52,49 @@ _PACKET_INTEGRITY = "SAT_INTEGRITY_HASH"
 _CMD_ATTACK = demon_config.GS_CMD_ATTACK_SIM
 _CMD_ATTACK_HASH = demon_config.GS_CMD_ATTACK_HASH
 _CMD_RECOVERY = demon_config.GS_CMD_RECOVERY
+
+_ADCS_LOG_PATH = Path(__file__).parent.parent.parent / "adcs_filter_log.txt"
+_adcs_log_lock = threading.Lock()
+
+_ADCS_FIELDS = [
+    "CHENNEL1", "TIMESTAMP", "CMDCOUNTER",
+    "QBN_0", "QBN_1", "QBN_2", "QBN_3",
+    "ST_QBN_0", "ST_QBN_1", "ST_QBN_2", "ST_QBN_3",
+    "Q_VALID", "THERR_X", "THERR_Y", "THERR_Z",
+    "CMD_WBN_X", "CMD_WBN_Y", "CMD_WBN_Z",
+    "BDOT_X", "BDOT_Y", "BDOT_Z",
+    "H_MGMTON", "SUN_VALID",
+    "DEVICE_ENABLED_RW0", "DEVICE_ENABLED_RW1", "DEVICE_ENABLED_RW2",
+    "IMU_WBN_X", "IMU_WBN_Y", "IMU_WBN_Z",
+    "IMU_ACC_X", "IMU_ACC_Y", "IMU_ACC_Z",
+    "QERR_0", "QERR_1", "QERR_2", "QERR_3",
+    "TCMD_X", "TCMD_Y", "TCMD_Z",
+    "MCMD_X", "MCMD_Y", "MCMD_Z",
+    "WERR_X", "WERR_Y", "WERR_Z",
+    "MOMENTUM_NMS_0", "MOMENTUM_NMS_1", "MOMENTUM_NMS_2",
+    "ST_VALID", "COMBINEDPACKETSSENT", "ERLOGENTRIES",
+    "SKIPPEDSLOTSCOUNT", "LASTVALCRC", "ENABLEDROUTES",
+    "FORWARD_ERR_COUNT", "APPCSERRCOUNTER", "OSCSERRCOUNTER",
+    "SYSLOGENTRIES", "RESETSPERFORMED", "EXECOUNTS",
+]
+
+
+def _append_adcs_log(records: list[dict[str, Any]], received_at: str) -> None:
+    try:
+        with _adcs_log_lock:
+            with open(_ADCS_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{'='*60}\n")
+                f.write(f"수신시각: {received_at}  행수: {len(records)}\n")
+                f.write(f"{'='*60}\n")
+                for i, rec in enumerate(records):
+                    f.write(f"  [{i}]\n")
+                    for field in _ADCS_FIELDS:
+                        val = rec.get(field)
+                        if val is not None:
+                            f.write(f"    {field:<24} = {val}\n")
+                f.write("\n")
+    except Exception as e:
+        logger.error("ADCS 로그 저장 실패: %s", e)
 
 
 def recv_packet(conn: socket.socket) -> dict[str, Any] | None:
@@ -265,11 +310,14 @@ def print_packet_summary(pkt: dict[str, Any], addr: tuple, verbose: bool) -> Non
 
         elif ptype == _PACKET_ADCS_FILTER:
             records = _safe_records(pkt)
+            received_at = _utc_now()
             print(f"  [ADCS filter 누적] {len(records)}행")
             for i, rec in enumerate(records[:8]):
                 _print_adcs_record(rec, i)
             if len(records) > 8:
                 print(f"    ... 외 {len(records) - 8}행")
+            _append_adcs_log(records, received_at)
+            print(f"  → 로그 저장: {_ADCS_LOG_PATH}")
 
         elif ptype == _PACKET_INTEGRITY:
             records = _safe_records(pkt)

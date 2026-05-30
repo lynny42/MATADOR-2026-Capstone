@@ -32,7 +32,7 @@ SERVO_REPEAT_MAX = 20
 SERIAL_LIGHT_STATE_LIGHT = "light"
 SERIAL_LIGHT_STATE_DARK = "dark"
 # True 면 수신·파싱·DB 반영 시 INFO (시리얼 디버그용)
-SERIAL_LOG_PARSED = True
+SERIAL_LOG_PARSED = False
 
 # ============================================================
 # UDP (cFS TO 텔레메트리 수신)
