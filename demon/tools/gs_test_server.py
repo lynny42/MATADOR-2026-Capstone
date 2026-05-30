@@ -43,11 +43,12 @@ logger = logging.getLogger(__name__)
 _MAX_PACKET_BYTES = 2_000_000
 _ACK_PAYLOAD = {"ack": True, "cmd": "ACK"}
 
-_PACKET_EVENT = "SAT_EVENT_QUEUE"
-_PACKET_TLM_HISTORY = "SAT_TLM_HISTORY"
-_PACKET_PWR_HISTORY = "SAT_PWR_HISTORY"
-_PACKET_ADCS_FILTER = "SAT_ADCS_FILTER"
-_PACKET_INTEGRITY = "SAT_INTEGRITY_HASH"
+_PACKET_EVENT = demon_config.GS_PACKET_TYPE_EVENT
+_PACKET_EVENT_META = demon_config.GS_PACKET_TYPE_EVENT_META
+_PACKET_TLM_HISTORY = demon_config.GS_PACKET_TYPE_TLM_HISTORY
+_PACKET_PWR_HISTORY = demon_config.GS_PACKET_TYPE_PWR_HISTORY
+_PACKET_ADCS_FILTER = demon_config.GS_PACKET_TYPE_ADCS_FILTER
+_PACKET_INTEGRITY = demon_config.GS_PACKET_TYPE_INTEGRITY
 
 _CMD_ATTACK = demon_config.GS_CMD_ATTACK_SIM
 _CMD_ATTACK_HASH = demon_config.GS_CMD_ATTACK_HASH
@@ -290,6 +291,12 @@ def print_packet_summary(pkt: dict[str, Any], addr: tuple, verbose: bool) -> Non
                 _print_event(ev)
             else:
                 print("  (event 필드 없음)")
+
+        elif ptype == _PACKET_EVENT_META:
+            print(
+                f"  [EVENT META] total={pkt.get('event_total')} "
+                f"ids={pkt.get('event_ids')}"
+            )
 
         elif ptype == _PACKET_TLM_HISTORY:
             records = _safe_records(pkt)

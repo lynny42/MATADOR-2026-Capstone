@@ -22,24 +22,36 @@ _OPTIONAL_EVENT_COLS: tuple[str, ...] = (
     "MODULE_SCORES",
 )
 
-# config.py 에 GS_CMD_* / GS_PACKET_TYPE_* 정의 권장 — 미정의 시 아래 기본값
+# config.GS_CMD_* 미정의 시 fallback (일반적으로 config 사용)
 _DEFAULT_GS_CMD_ATTACK_SIM = "ATTACK_SIM"
 _DEFAULT_GS_CMD_ATTACK_HASH = "ATTACK_HASH"
 _DEFAULT_GS_CMD_RECOVERY = "RECOVERY"
 _DEFAULT_GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 _DEFAULT_GS_CMD_UPDATE_HASH = "UPDATE_HASH"
 _DEFAULT_GS_CMD_ACK = "ACK"
-_DEFAULT_GS_PACKET_TLM_HISTORY = "SAT_TLM_HISTORY"
-_DEFAULT_GS_PACKET_PWR_HISTORY = "SAT_PWR_HISTORY"
-_DEFAULT_GS_PACKET_ADCS_FILTER = "SAT_ADCS_FILTER"
-_DEFAULT_GS_PACKET_EVENT = "SAT_EVENT_QUEUE"
-_DEFAULT_GS_PACKET_INTEGRITY = "SAT_INTEGRITY_HASH"
 _DEFAULT_GS_CMD_LISTEN_HOST = "0.0.0.0"
 _DEFAULT_GS_CMD_LISTEN_PORT_OFFSET = 1
 _DEFAULT_SOCKET_TIMEOUT_SEC = 5.0
 _DEFAULT_ACK_WAIT_SEC = 3.0
 _WEIGHT_MIN = 1
 _WEIGHT_MAX = 100
+
+
+def _event_ids_from_pending(pending: list[dict[str, Any]]) -> list[int]:
+    """get_pending_events 순서 유지 — 유효 EVENT_ID 만 추출."""
+    try:
+        ids: list[int] = []
+        for event in pending:
+            try:
+                event_id = int(event.get("EVENT_ID", -1))
+            except (TypeError, ValueError):
+                continue
+            if event_id >= 0:
+                ids.append(event_id)
+        return ids
+    except Exception as e:
+        logger.error("_event_ids_from_pending 실패: %s", e)
+        return []
 
 
 class AnomalyDetectorLike(Protocol):
@@ -136,10 +148,10 @@ class GScomms:
             )
 
             if is_attack == "Y":
-                event_type = self._config_str("GS_EVENT_ATTACK_CONFIRMED", "ATTACK_CONFIRMED")
+                event_type = demon_config.GS_EVENT_ATTACK_CONFIRMED
                 priority = 1
             else:
-                event_type = self._config_str("GS_EVENT_SEU_DETECTED", "SEU_DETECTED")
+                event_type = demon_config.GS_EVENT_SEU_DETECTED
                 priority = 0
 
             module_scores = result.get("module_scores")
@@ -187,19 +199,18 @@ class GScomms:
             return -1
 
     def transmit_all(self) -> None:
-        """조도 dark→light 엣지 — 미전송 이벤트 있으면 우선, 없으면 history부터 순차 송신."""
+        """
+        조도 dark→light 엣지 bulk 송신.
+
+        순서: EVENT(META→본문) → INTEGRITY(HASH) → ADCS → TLM → PWR
+        """
         try:
-            if self._has_pending_events():
-                self.transmit_event_queue()
-                self.transmit_adcs_filter()
-                self.transmit_tlm_history()
-                self.transmit_pwr_history()
-            else:
-                self.transmit_tlm_history()
-                self.transmit_pwr_history()
-                self.transmit_adcs_filter()
+            self.transmit_event_queue()
             if self._should_transmit_integrity():
                 self.transmit_integrity()
+            self.transmit_adcs_filter()
+            self.transmit_tlm_history()
+            self.transmit_pwr_history()
         except Exception as e:
             logger.error("transmit_all 실패: %s", e)
 
@@ -228,28 +239,15 @@ class GScomms:
             logger.error("_should_transmit_integrity 실패: %s", e)
             return False
 
-    def _has_pending_events(self) -> bool:
-        """SAT_EVENT_QUEUE IS_SENT=0 존재 여부."""
-        try:
-            pending = self._ctx.db.get_pending_events()
-            return bool(pending)
-        except Exception as e:
-            logger.error("_has_pending_events 실패: %s", e)
-            return False
-
     def transmit_tlm_history(self) -> None:
         """SAT_TLM_HISTORY 배치 송신 — ACK 시 해당 배치만 delete_tlm_history."""
         try:
             records = self._ctx.db.get_tlm_history()
             if not records:
                 return
-            packet_type = self._config_str(
-                "GS_PACKET_TYPE_TLM_HISTORY",
-                _DEFAULT_GS_PACKET_TLM_HISTORY,
-            )
             self._transmit_history_in_batches(
                 records,
-                packet_type,
+                demon_config.GS_PACKET_TYPE_TLM_HISTORY,
                 self._ctx.db.delete_tlm_history,
                 "SAT_TLM_HISTORY",
             )
@@ -262,13 +260,9 @@ class GScomms:
             records = self._ctx.db.get_pwr_history()
             if not records:
                 return
-            packet_type = self._config_str(
-                "GS_PACKET_TYPE_PWR_HISTORY",
-                _DEFAULT_GS_PACKET_PWR_HISTORY,
-            )
             self._transmit_history_in_batches(
                 records,
-                packet_type,
+                demon_config.GS_PACKET_TYPE_PWR_HISTORY,
                 self._ctx.db.delete_pwr_history,
                 "SAT_PWR_HISTORY",
             )
@@ -326,10 +320,7 @@ class GScomms:
             if not records:
                 return
             payload = {
-                "packet_type": self._config_str(
-                    "GS_PACKET_TYPE_ADCS_FILTER",
-                    _DEFAULT_GS_PACKET_ADCS_FILTER,
-                ),
+                "packet_type": demon_config.GS_PACKET_TYPE_ADCS_FILTER,
                 "records": records,
             }
 
@@ -343,18 +334,26 @@ class GScomms:
             logger.error("transmit_adcs_filter 실패: %s", e)
 
     def transmit_event_queue(self) -> None:
-        """미전송 이벤트 개별 순차 송신 — ACK 시 delete_event."""
+        """미전송 이벤트 — META 선송신 후 개별 순차 송신, ACK 시 delete_event."""
         try:
             pending = self._ctx.db.get_pending_events()
+            event_ids = _event_ids_from_pending(pending)
+            if not event_ids:
+                return
+            if not self._transmit_event_queue_meta(event_ids):
+                logger.warning("SAT_EVENT_QUEUE_META 송신 실패 — 이벤트 본문 송신 중단")
+                return
+            id_set = set(event_ids)
             for event in pending:
-                event_id = int(event.get("EVENT_ID", -1))
-                if event_id < 0:
+                try:
+                    event_id = int(event.get("EVENT_ID", -1))
+                except (TypeError, ValueError) as e:
+                    logger.error("EVENT_ID 변환 실패: %s", e)
+                    continue
+                if event_id not in id_set:
                     continue
                 payload = {
-                    "packet_type": self._config_str(
-                        "GS_PACKET_TYPE_EVENT",
-                        _DEFAULT_GS_PACKET_EVENT,
-                    ),
+                    "packet_type": demon_config.GS_PACKET_TYPE_EVENT,
                     "event": event,
                 }
                 captured_id = event_id
@@ -372,8 +371,26 @@ class GScomms:
         except Exception as e:
             logger.error("transmit_event_queue 실패: %s", e)
 
+    def _transmit_event_queue_meta(self, event_ids: list[int]) -> bool:
+        """SAT_EVENT_QUEUE 본문 송신 전 event_total·event_ids 메타데이터 1회 송신."""
+        try:
+            payload = {
+                "packet_type": demon_config.GS_PACKET_TYPE_EVENT_META,
+                "event_total": len(event_ids),
+                "event_ids": list(event_ids),
+            }
+            logger.info(
+                "SAT_EVENT_QUEUE_META 송신 event_total=%s ids=%s",
+                payload["event_total"],
+                payload["event_ids"],
+            )
+            return self.send_with_retry(payload, None)
+        except Exception as e:
+            logger.error("_transmit_event_queue_meta 실패: %s", e)
+            return False
+
     def transmit_integrity(self) -> None:
-        """SAT_INTEGRITY_HASH 전체 송신 — 삭제 없음."""
+        """SAT_INTEGRITY_HASH(HASH) 전체 송신 — 삭제 없음."""
         try:
             records = self._ctx.db.get_integrity_hash()
             if records is None or not records:
@@ -381,10 +398,7 @@ class GScomms:
             if isinstance(records, dict):
                 records = [records]
             payload = {
-                "packet_type": self._config_str(
-                    "GS_PACKET_TYPE_INTEGRITY",
-                    _DEFAULT_GS_PACKET_INTEGRITY,
-                ),
+                "packet_type": demon_config.GS_PACKET_TYPE_INTEGRITY,
                 "records": records,
             }
 

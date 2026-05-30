@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any, Callable
 
 from demon import config as demon_config
 from demon.core.context import DaemonConfig, RuntimeContext
@@ -200,8 +201,8 @@ def test_serial_reader_parsing(tmp_db: Path) -> None:
     if reader.get_light_state() != "dark":
         _fail(f"dispatch light line state={reader.get_light_state()}")
     row3 = db.get_pwr_meta(3)
-    if row3 is None or float(row3["VOLTAGE"]) != 0.0:
-        _fail("L line must not update SAT_PWR_META sw_id=3")
+    if row3 is not None:
+        _fail("L line must not create/update SAT_PWR_META sw_id=3")
     _ok("dispatch_line light — SW_ID 3 unchanged")
 
     reader._dispatch_line("# comment")
@@ -278,6 +279,91 @@ def test_flush_trigger_mid_config() -> None:
     _ok("TLM_DB_FLUSH_TRIGGER_MID == GENERIC_ADCS_DO_MID (0x0945)")
 
 
+def test_gs_transmit_order(db_path: Path) -> None:
+    """GScomms transmit_all — META→EVENT→ADCS→TLM→PWR 순서 및 META 필드 검증."""
+    db = DBManager(db_path)
+    if not db.init_db():
+        _fail("GS transmit: init_db")
+
+    shutdown = threading.Event()
+    ctx = RuntimeContext(config=DaemonConfig(db_path=db_path), shutdown_event=shutdown, db=db)
+    gs = GScomms(ctx)
+
+    sent: list[dict[str, Any]] = []
+
+    def mock_send(
+        payload: dict[str, Any],
+        on_ack_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> bool:
+        sent.append(dict(payload))
+        if on_ack_callback is not None:
+            on_ack_callback({"ack": True})
+        return True
+
+    gs.send_with_retry = mock_send  # type: ignore[method-assign]
+
+    e1 = db.insert_event(
+        {
+            "DETECTED_AT": "2026-05-30T12:00:00+00:00",
+            "EVENT_TYPE": "ATTACK_CONFIRMED",
+            "PRIORITY": 1,
+            "IS_SENT": 0,
+        },
+    )
+    e2 = db.insert_event(
+        {
+            "DETECTED_AT": "2026-05-30T12:00:01+00:00",
+            "EVENT_TYPE": "SEU_DETECTED",
+            "PRIORITY": 0,
+            "IS_SENT": 0,
+        },
+    )
+    if e1 < 1 or e2 < 1:
+        _fail("GS transmit: insert_event seed")
+
+    db.insert_adcs_filter({"Q_VALID": 1, "ST_VALID": 0})
+    tlm_row = db.get_tlm_current()
+    if tlm_row is None:
+        _fail("GS transmit: get_tlm_current")
+    if not db.insert_tlm_history(tlm_row):
+        _fail("GS transmit: insert_tlm_history")
+    if db.insert_pwr_history_snapshot() < 0:
+        _fail("GS transmit: insert_pwr_history_snapshot")
+
+    gs.transmit_all()
+
+    types = [str(p.get("packet_type", "")) for p in sent]
+    if not types:
+        _fail("GS transmit: no packets sent")
+
+    meta_idx = types.index(demon_config.GS_PACKET_TYPE_EVENT_META)
+    if meta_idx != 0:
+        _fail(f"GS transmit: META must be first, got order={types}")
+
+    meta = sent[meta_idx]
+    if int(meta.get("event_total", 0)) != 2:
+        _fail(f"GS transmit: event_total expected 2 got {meta.get('event_total')}")
+    meta_ids = meta.get("event_ids")
+    if not isinstance(meta_ids, list) or sorted(meta_ids) != sorted([e1, e2]):
+        _fail(f"GS transmit: event_ids mismatch {meta_ids}")
+
+    event_indices = [i for i, t in enumerate(types) if t == demon_config.GS_PACKET_TYPE_EVENT]
+    if len(event_indices) != 2:
+        _fail(f"GS transmit: expected 2 EVENT packets, got {len(event_indices)}")
+
+    idx_adcs = types.index(demon_config.GS_PACKET_TYPE_ADCS_FILTER)
+    idx_tlm = types.index(demon_config.GS_PACKET_TYPE_TLM_HISTORY)
+    idx_pwr = types.index(demon_config.GS_PACKET_TYPE_PWR_HISTORY)
+    if not (max(event_indices) < idx_adcs < idx_tlm < idx_pwr):
+        _fail(f"GS transmit: order ADCS<TLM<PWR violated: {types}")
+
+    if db.get_pending_events():
+        _fail("GS transmit: events should be deleted after ACK")
+
+    db.close()
+    _ok("GScomms transmit_all order (META→EVENT→ADCS→TLM→PWR)")
+
+
 def main() -> int:
     try:
         test_flush_trigger_mid_config()
@@ -286,6 +372,7 @@ def main() -> int:
         test_serial_reader_parsing(Path(tempfile.mkdtemp()) / "verify_serial.db")
         test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
         test_fpf_pipeline_wiring(Path(tempfile.mkdtemp()) / "verify_fpf.db")
+        test_gs_transmit_order(Path(tempfile.mkdtemp()) / "verify_gs.db")
         logger.info("=== All local integration checks passed ===")
         return 0
     except SystemExit as exc:
