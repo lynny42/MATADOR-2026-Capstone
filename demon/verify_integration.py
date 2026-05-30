@@ -279,11 +279,11 @@ def test_flush_trigger_mid_config() -> None:
     _ok("TLM_DB_FLUSH_TRIGGER_MID == GENERIC_ADCS_DO_MID (0x0945)")
 
 
-def test_gs_transmit_order(db_path: Path) -> None:
-    """GScomms transmit_all — META→EVENT→ADCS→TLM→PWR 순서 및 META 필드 검증."""
+def test_gs_bulk_transmit(db_path: Path) -> None:
+    """GScomms transmit_all — SAT_BULK_TELEMETRY 단일 JSON 송신 검증."""
     db = DBManager(db_path)
     if not db.init_db():
-        _fail("GS transmit: init_db")
+        _fail("GS bulk: init_db")
 
     shutdown = threading.Event()
     ctx = RuntimeContext(config=DaemonConfig(db_path=db_path), shutdown_event=shutdown, db=db)
@@ -319,49 +319,52 @@ def test_gs_transmit_order(db_path: Path) -> None:
         },
     )
     if e1 < 1 or e2 < 1:
-        _fail("GS transmit: insert_event seed")
+        _fail("GS bulk: insert_event seed")
 
     db.insert_adcs_filter({"Q_VALID": 1, "ST_VALID": 0})
     tlm_row = db.get_tlm_current()
     if tlm_row is None:
-        _fail("GS transmit: get_tlm_current")
+        _fail("GS bulk: get_tlm_current")
     if not db.insert_tlm_history(tlm_row):
-        _fail("GS transmit: insert_tlm_history")
+        _fail("GS bulk: insert_tlm_history")
     if db.insert_pwr_history_snapshot() < 0:
-        _fail("GS transmit: insert_pwr_history_snapshot")
+        _fail("GS bulk: insert_pwr_history_snapshot")
 
     gs.transmit_all()
 
-    types = [str(p.get("packet_type", "")) for p in sent]
-    if not types:
-        _fail("GS transmit: no packets sent")
+    if len(sent) != 1:
+        _fail(f"GS bulk: expected 1 packet, got {len(sent)}")
 
-    meta_idx = types.index(demon_config.GS_PACKET_TYPE_EVENT_META)
-    if meta_idx != 0:
-        _fail(f"GS transmit: META must be first, got order={types}")
+    bulk = sent[0]
+    if bulk.get("packet_type") != demon_config.GS_PACKET_TYPE_BULK:
+        _fail(f"GS bulk: packet_type={bulk.get('packet_type')}")
 
-    meta = sent[meta_idx]
-    if int(meta.get("event_total", 0)) != 2:
-        _fail(f"GS transmit: event_total expected 2 got {meta.get('event_total')}")
-    meta_ids = meta.get("event_ids")
+    ev_sec = bulk.get(demon_config.GS_PACKET_TYPE_EVENT)
+    if not isinstance(ev_sec, dict):
+        _fail("GS bulk: missing SAT_EVENT_QUEUE section")
+    if int(ev_sec.get("event_total", 0)) != 2:
+        _fail(f"GS bulk: event_total expected 2 got {ev_sec.get('event_total')}")
+    meta_ids = ev_sec.get("event_ids")
     if not isinstance(meta_ids, list) or sorted(meta_ids) != sorted([e1, e2]):
-        _fail(f"GS transmit: event_ids mismatch {meta_ids}")
+        _fail(f"GS bulk: event_ids mismatch {meta_ids}")
+    events = ev_sec.get("events")
+    if not isinstance(events, list) or len(events) != 2:
+        _fail(f"GS bulk: expected 2 events, got {events}")
 
-    event_indices = [i for i, t in enumerate(types) if t == demon_config.GS_PACKET_TYPE_EVENT]
-    if len(event_indices) != 2:
-        _fail(f"GS transmit: expected 2 EVENT packets, got {len(event_indices)}")
-
-    idx_adcs = types.index(demon_config.GS_PACKET_TYPE_ADCS_FILTER)
-    idx_tlm = types.index(demon_config.GS_PACKET_TYPE_TLM_HISTORY)
-    idx_pwr = types.index(demon_config.GS_PACKET_TYPE_PWR_HISTORY)
-    if not (max(event_indices) < idx_adcs < idx_tlm < idx_pwr):
-        _fail(f"GS transmit: order ADCS<TLM<PWR violated: {types}")
+    for key in (
+        demon_config.GS_PACKET_TYPE_ADCS_FILTER,
+        demon_config.GS_PACKET_TYPE_TLM_HISTORY,
+        demon_config.GS_PACKET_TYPE_PWR_HISTORY,
+    ):
+        sec = bulk.get(key)
+        if not isinstance(sec, dict) or not sec.get("records"):
+            _fail(f"GS bulk: missing or empty section {key}")
 
     if db.get_pending_events():
-        _fail("GS transmit: events should be deleted after ACK")
+        _fail("GS bulk: events should be deleted after ACK")
 
     db.close()
-    _ok("GScomms transmit_all order (META→EVENT→ADCS→TLM→PWR)")
+    _ok("GScomms SAT_BULK_TELEMETRY single-packet transmit")
 
 
 def main() -> int:
@@ -372,7 +375,7 @@ def main() -> int:
         test_serial_reader_parsing(Path(tempfile.mkdtemp()) / "verify_serial.db")
         test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
         test_fpf_pipeline_wiring(Path(tempfile.mkdtemp()) / "verify_fpf.db")
-        test_gs_transmit_order(Path(tempfile.mkdtemp()) / "verify_gs.db")
+        test_gs_bulk_transmit(Path(tempfile.mkdtemp()) / "verify_gs.db")
         logger.info("=== All local integration checks passed ===")
         return 0
     except SystemExit as exc:

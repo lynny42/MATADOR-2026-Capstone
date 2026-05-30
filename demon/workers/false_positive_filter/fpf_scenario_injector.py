@@ -228,11 +228,45 @@ def _clear_accumulated_tables(db: Any) -> None:
         logger.error("_clear_accumulated_tables 실패: %s", e)
 
 
+def inject_natural_adcs_tlm(db: Any) -> bool:
+    """
+    FPF N(오탐) 시연용 — SAT_TLM_CURRENT·SAT_ADCS_FILTER 에 정상 스냅샷만 DB 반영.
+
+    전력(SAT_PWR_META)은 Serial/Detector 가 갱신하므로 건드리지 않는다.
+    UDP flush 로 ADCS 행이 덮어써지기 전·후 FPF 판정 시점에 재호출한다.
+    """
+    try:
+        ok_tlm = db.upsert_tlm_current(_base_tlm_natural())
+        ok_adcs = db.insert_adcs_filter(_base_adcs_natural())
+        return bool(ok_tlm and ok_adcs)
+    except Exception as e:
+        logger.error("inject_natural_adcs_tlm 실패: %s", e)
+        return False
+
+
+def inject_attack_adcs_tlm(db: Any) -> bool:
+    """
+    FPF Y(공격) 시연용 — AttackSimulator 논리 주입과 동일 payload 를 DB 에 기록.
+
+    토크 시계열 2프레임 + 최종 attack 스냅샷(사원수 위반 등)을 insert 한다.
+    """
+    try:
+        ok_tlm = db.upsert_tlm_current(tlm_attack_payload())
+        ok_any = bool(ok_tlm)
+        for frame in _adcs_torque_series():
+            if db.insert_adcs_filter(frame):
+                ok_any = True
+        if db.insert_adcs_filter(adcs_attack_payload()):
+            ok_any = True
+        return ok_any
+    except Exception as e:
+        logger.error("inject_attack_adcs_tlm 실패: %s", e)
+        return False
+
+
 def _inject_natural_scenario(db: Any) -> list[dict[str, Any]]:
     """단일 채널 전력 이상 + ADCS/TLM 정상."""
-    adcs = _base_adcs_natural()
-    db.upsert_tlm_current(_base_tlm_natural())
-    db.insert_adcs_filter(adcs)
+    inject_natural_adcs_tlm(db)
 
     target_sw = int(fpf_config.PWR_SW_ID_ADCS)
     lo, _hi = _threshold_for_sw(target_sw)
@@ -259,10 +293,7 @@ def _inject_natural_scenario(db: Any) -> list[dict[str, Any]]:
 def _inject_attack_scenario(db: Any) -> list[dict[str, Any]]:
     """AttackSimulator 논리 주입 + 다채널 전력 이상 + 토크 시계열."""
     series = _adcs_torque_series()
-    db.upsert_tlm_current(tlm_attack_payload())
-    for frame in series:
-        db.insert_adcs_filter(frame)
-    db.insert_adcs_filter(adcs_attack_payload())
+    inject_attack_adcs_tlm(db)
 
     now_ts = utc_now_iso()
     for sw_id in range(_pwr_channel_count()):

@@ -48,6 +48,7 @@ _PACKET_TLM_HISTORY = demon_config.GS_PACKET_TYPE_TLM_HISTORY
 _PACKET_PWR_HISTORY = demon_config.GS_PACKET_TYPE_PWR_HISTORY
 _PACKET_ADCS_FILTER = demon_config.GS_PACKET_TYPE_ADCS_FILTER
 _PACKET_INTEGRITY = demon_config.GS_PACKET_TYPE_INTEGRITY
+_PACKET_BULK = demon_config.GS_PACKET_TYPE_BULK
 
 _CMD_ATTACK = demon_config.GS_CMD_ATTACK_SIM
 _CMD_ATTACK_HASH = demon_config.GS_CMD_ATTACK_HASH
@@ -279,6 +280,66 @@ def _print_integrity_record(rec: dict[str, Any], idx: int) -> None:
     )
 
 
+def _print_bulk_section(key: str, section: Any, verbose: bool) -> None:
+    """SAT_BULK_TELEMETRY 내부 섹션 출력."""
+    try:
+        if key == _PACKET_EVENT and isinstance(section, dict):
+            print(
+                f"  [EVENT] total={section.get('event_total')} "
+                f"ids={section.get('event_ids')}"
+            )
+            events = section.get("events")
+            if isinstance(events, list):
+                for ev in events[:5]:
+                    if isinstance(ev, dict):
+                        _print_event(ev)
+                if len(events) > 5:
+                    print(f"    ... 외 {len(events) - 5}건")
+            return
+
+        if key == _PACKET_INTEGRITY and isinstance(section, dict):
+            records = _safe_records(section)
+            print(f"  [무결성 해시] {len(records)}건")
+            for i, rec in enumerate(records[:5]):
+                _print_integrity_record(rec, i)
+            return
+
+        if key == _PACKET_ADCS_FILTER and isinstance(section, dict):
+            records = _safe_records(section)
+            received_at = _utc_now()
+            print(f"  [ADCS filter 누적] {len(records)}행")
+            for i, rec in enumerate(records[:8]):
+                _print_adcs_record(rec, i)
+            if len(records) > 8:
+                print(f"    ... 외 {len(records) - 8}행")
+            _append_adcs_log(records, received_at)
+            print(f"  → 로그 저장: {_ADCS_LOG_PATH}")
+            return
+
+        if key == _PACKET_TLM_HISTORY and isinstance(section, dict):
+            records = _safe_records(section)
+            print(f"  [TLM history] {len(records)}건")
+            for i, rec in enumerate(records[:10]):
+                _print_tlm_record(rec, i)
+            if len(records) > 10:
+                print(f"    ... 외 {len(records) - 10}건")
+            return
+
+        if key == _PACKET_PWR_HISTORY and isinstance(section, dict):
+            records = _safe_records(section)
+            print(f"  [PWR history] 스냅샷 {len(records)}건 (1건=4채널)")
+            for i, rec in enumerate(records[:5]):
+                _print_pwr_snapshot(rec, i)
+            if len(records) > 5:
+                print(f"    ... 외 {len(records) - 5} 스냅샷")
+            return
+
+        if verbose:
+            print(f"  [{key}] {section}")
+    except Exception as e:
+        logger.error("_print_bulk_section 실패 key=%s: %s", key, e)
+
+
 def print_packet_summary(pkt: dict[str, Any], addr: tuple, verbose: bool) -> None:
     try:
         ptype = str(pkt.get("packet_type", "?"))
@@ -286,7 +347,19 @@ def print_packet_summary(pkt: dict[str, Any], addr: tuple, verbose: bool) -> Non
         print(sep)
         print(f"[{_utc_now()}] from {addr[0]}:{addr[1]}  packet_type={ptype}")
 
-        if ptype == _PACKET_EVENT:
+        if ptype == _PACKET_BULK:
+            print(f"  sent_at={pkt.get('sent_at')}")
+            for sec_key in (
+                _PACKET_EVENT,
+                _PACKET_INTEGRITY,
+                _PACKET_ADCS_FILTER,
+                _PACKET_TLM_HISTORY,
+                _PACKET_PWR_HISTORY,
+            ):
+                if sec_key in pkt:
+                    _print_bulk_section(sec_key, pkt.get(sec_key), verbose)
+
+        elif ptype == _PACKET_EVENT:
             ev = pkt.get("event")
             if isinstance(ev, dict):
                 _print_event(ev)

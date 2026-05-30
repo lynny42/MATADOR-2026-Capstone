@@ -203,17 +203,190 @@ class GScomms:
         """
         조도 dark→light 엣지 bulk 송신.
 
-        순서: EVENT(META→본문) → INTEGRITY(HASH) → ADCS → TLM → PWR
+        SAT_EVENT_QUEUE / INTEGRITY / ADCS / TLM / PWR 를 단일 JSON(SAT_BULK_TELEMETRY)으로 1회 송신.
+        ACK 수신 시 해당 섹션 DB 삭제(INTEGRITY 제외).
         """
         try:
-            self.transmit_event_queue()
-            if self._should_transmit_integrity():
-                self.transmit_integrity()
-            self.transmit_adcs_filter()
-            self.transmit_tlm_history()
-            self.transmit_pwr_history()
+            bulk, cleanup = self._build_bulk_transmit()
+            if bulk is None:
+                logger.info("bulk 송신할 데이터 없음 — skip")
+                return
+            sections = self._bulk_section_counts(bulk)
+            logger.info(
+                "SAT_BULK_TELEMETRY 송신 events=%s adcs=%s tlm=%s pwr=%s integrity=%s",
+                sections.get("events", 0),
+                sections.get("adcs", 0),
+                sections.get("tlm", 0),
+                sections.get("pwr", 0),
+                sections.get("integrity", 0),
+            )
+
+            def on_ack(_ack: dict[str, Any]) -> None:
+                self._on_bulk_ack(cleanup)
+
+            if not self.send_with_retry(bulk, on_ack):
+                logger.warning("SAT_BULK_TELEMETRY 송신 실패 — DB 삭제하지 않음")
         except Exception as e:
             logger.error("transmit_all 실패: %s", e)
+
+    def _build_bulk_transmit(self) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """DB 조회 → bulk JSON + ACK 후 삭제용 cleanup 메타."""
+        try:
+            cleanup: dict[str, Any] = {
+                "event_ids": [],
+                "tlm_history_ids": [],
+                "pwr_history_ids": [],
+                "delete_adcs": False,
+            }
+            payload: dict[str, Any] = {
+                "packet_type": demon_config.GS_PACKET_TYPE_BULK,
+                "sent_at": now_iso(),
+            }
+            has_any = False
+
+            pending = self._ctx.db.get_pending_events()
+            event_ids = _event_ids_from_pending(pending)
+            if event_ids:
+                id_set = set(event_ids)
+                events: list[dict[str, Any]] = []
+                for event in pending:
+                    try:
+                        event_id = int(event.get("EVENT_ID", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if event_id in id_set:
+                        events.append(normalize_record_timestamps(event))
+                payload[demon_config.GS_PACKET_TYPE_EVENT] = {
+                    "event_total": len(event_ids),
+                    "event_ids": list(event_ids),
+                    "events": events,
+                }
+                cleanup["event_ids"] = list(event_ids)
+                has_any = True
+
+            if self._should_transmit_integrity():
+                integrity_records = self._get_integrity_records()
+                if integrity_records:
+                    payload[demon_config.GS_PACKET_TYPE_INTEGRITY] = {
+                        "records": [
+                            normalize_record_timestamps(rec)
+                            for rec in integrity_records
+                        ],
+                    }
+                    has_any = True
+
+            adcs_records = self._ctx.db.get_adcs_filter_all()
+            if adcs_records:
+                payload[demon_config.GS_PACKET_TYPE_ADCS_FILTER] = {
+                    "records": [
+                        normalize_record_timestamps(rec) for rec in adcs_records
+                    ],
+                }
+                cleanup["delete_adcs"] = True
+                has_any = True
+
+            tlm_records = self._ctx.db.get_tlm_history()
+            if tlm_records:
+                payload[demon_config.GS_PACKET_TYPE_TLM_HISTORY] = {
+                    "records": [
+                        normalize_record_timestamps(rec) for rec in tlm_records
+                    ],
+                }
+                cleanup["tlm_history_ids"] = self._ctx.db.history_ids_from_records(
+                    tlm_records,
+                )
+                has_any = True
+
+            pwr_records = self._ctx.db.get_pwr_history()
+            if pwr_records:
+                payload[demon_config.GS_PACKET_TYPE_PWR_HISTORY] = {
+                    "records": [
+                        normalize_record_timestamps(rec) for rec in pwr_records
+                    ],
+                }
+                cleanup["pwr_history_ids"] = self._ctx.db.history_ids_from_records(
+                    pwr_records,
+                )
+                has_any = True
+
+            if not has_any:
+                return None, cleanup
+            return payload, cleanup
+        except Exception as e:
+            logger.error("_build_bulk_transmit 실패: %s", e)
+            return None, {
+                "event_ids": [],
+                "tlm_history_ids": [],
+                "pwr_history_ids": [],
+                "delete_adcs": False,
+            }
+
+    def _on_bulk_ack(self, cleanup: dict[str, Any]) -> None:
+        """bulk ACK 수신 후 섹션별 DB 정리."""
+        try:
+            for raw_id in cleanup.get("event_ids") or []:
+                try:
+                    event_id = int(raw_id)
+                except (TypeError, ValueError) as e:
+                    logger.error("bulk ACK event_id 변환 실패: %s", e)
+                    continue
+                if not self._ctx.db.delete_event(event_id):
+                    logger.warning("delete_event 실패 event_id=%s", event_id)
+
+            if cleanup.get("delete_adcs"):
+                if not self._ctx.db.delete_adcs_filter():
+                    logger.warning("delete_adcs_filter 실패")
+
+            tlm_ids = cleanup.get("tlm_history_ids") or []
+            if tlm_ids and not self._ctx.db.delete_tlm_history(tlm_ids):
+                logger.warning("delete_tlm_history 실패 ids=%s", tlm_ids)
+
+            pwr_ids = cleanup.get("pwr_history_ids") or []
+            if pwr_ids and not self._ctx.db.delete_pwr_history(pwr_ids):
+                logger.warning("delete_pwr_history 실패 ids=%s", pwr_ids)
+
+            logger.info("SAT_BULK_TELEMETRY ACK 처리 완료")
+        except Exception as e:
+            logger.error("_on_bulk_ack 실패: %s", e)
+
+    @staticmethod
+    def _bulk_section_counts(bulk: dict[str, Any]) -> dict[str, int]:
+        """로그용 섹션별 건수."""
+        try:
+            counts: dict[str, int] = {}
+            ev_sec = bulk.get(demon_config.GS_PACKET_TYPE_EVENT)
+            if isinstance(ev_sec, dict):
+                counts["events"] = int(ev_sec.get("event_total", 0))
+            adcs_sec = bulk.get(demon_config.GS_PACKET_TYPE_ADCS_FILTER)
+            if isinstance(adcs_sec, dict) and isinstance(adcs_sec.get("records"), list):
+                counts["adcs"] = len(adcs_sec["records"])
+            tlm_sec = bulk.get(demon_config.GS_PACKET_TYPE_TLM_HISTORY)
+            if isinstance(tlm_sec, dict) and isinstance(tlm_sec.get("records"), list):
+                counts["tlm"] = len(tlm_sec["records"])
+            pwr_sec = bulk.get(demon_config.GS_PACKET_TYPE_PWR_HISTORY)
+            if isinstance(pwr_sec, dict) and isinstance(pwr_sec.get("records"), list):
+                counts["pwr"] = len(pwr_sec["records"])
+            int_sec = bulk.get(demon_config.GS_PACKET_TYPE_INTEGRITY)
+            if isinstance(int_sec, dict) and isinstance(int_sec.get("records"), list):
+                counts["integrity"] = len(int_sec["records"])
+            return counts
+        except Exception as e:
+            logger.error("_bulk_section_counts 실패: %s", e)
+            return {}
+
+    def _get_integrity_records(self) -> list[dict[str, Any]]:
+        try:
+            records = self._ctx.db.get_integrity_hash()
+            if records is None:
+                return []
+            if isinstance(records, dict):
+                return [records]
+            if isinstance(records, list):
+                return [rec for rec in records if isinstance(rec, dict)]
+            return []
+        except Exception as e:
+            logger.error("_get_integrity_records 실패: %s", e)
+            return []
 
     def _should_transmit_integrity(self) -> bool:
         """무결성 해시 패킷 — INTEGRITY 이벤트·위반 시에만 (attack 경로)."""
@@ -239,180 +412,6 @@ class GScomms:
         except Exception as e:
             logger.error("_should_transmit_integrity 실패: %s", e)
             return False
-
-    def transmit_tlm_history(self) -> None:
-        """SAT_TLM_HISTORY 배치 송신 — ACK 시 해당 배치만 delete_tlm_history."""
-        try:
-            records = self._ctx.db.get_tlm_history()
-            if not records:
-                return
-            self._transmit_history_in_batches(
-                records,
-                demon_config.GS_PACKET_TYPE_TLM_HISTORY,
-                self._ctx.db.delete_tlm_history,
-                "SAT_TLM_HISTORY",
-            )
-        except Exception as e:
-            logger.error("transmit_tlm_history 실패: %s", e)
-
-    def transmit_pwr_history(self) -> None:
-        """SAT_PWR_HISTORY 배치 송신 — ACK 시 해당 배치만 delete_pwr_history."""
-        try:
-            records = self._ctx.db.get_pwr_history()
-            if not records:
-                return
-            self._transmit_history_in_batches(
-                records,
-                demon_config.GS_PACKET_TYPE_PWR_HISTORY,
-                self._ctx.db.delete_pwr_history,
-                "SAT_PWR_HISTORY",
-            )
-        except Exception as e:
-            logger.error("transmit_pwr_history 실패: %s", e)
-
-    def _transmit_history_in_batches(
-        self,
-        records: list[dict[str, Any]],
-        packet_type: str,
-        delete_fn: Callable[[list[int]], bool],
-        label: str,
-    ) -> None:
-        """history records 를 GS_HISTORY_BATCH_SIZE 건씩 나눠 송신."""
-        try:
-            batch_size = int(
-                getattr(self._ctx.config, "gs_history_batch_size", 30),
-            )
-            if batch_size < 1:
-                batch_size = 30
-            total = len(records)
-            for start in range(0, total, batch_size):
-                chunk = records[start : start + batch_size]
-                history_ids = self._ctx.db.history_ids_from_records(chunk)
-                norm_chunk = [normalize_record_timestamps(rec) for rec in chunk]
-                payload = {
-                    "packet_type": packet_type,
-                    "records": norm_chunk,
-                }
-
-                def on_ack(
-                    _ack: dict[str, Any],
-                    ids: list[int] = history_ids,
-                    _delete: Callable[[list[int]], bool] = delete_fn,
-                ) -> None:
-                    if not _delete(ids):
-                        logger.warning("%s delete 실패 ids=%s", label, ids)
-
-                logger.info(
-                    "%s 배치 송신 %s~%s / %s",
-                    label,
-                    start + 1,
-                    min(start + len(chunk), total),
-                    total,
-                )
-                if not self.send_with_retry(payload, on_ack):
-                    logger.warning("%s 배치 송신 실패 — 이후 배치 중단", label)
-                    break
-        except Exception as e:
-            logger.error("_transmit_history_in_batches 실패 label=%s: %s", label, e)
-
-    def transmit_adcs_filter(self) -> None:
-        """SAT_ADCS_FILTER 전체 송신 — ACK 시 delete_adcs_filter."""
-        try:
-            records = self._ctx.db.get_adcs_filter_all()
-            if not records:
-                return
-            norm_records = [normalize_record_timestamps(rec) for rec in records]
-            payload = {
-                "packet_type": demon_config.GS_PACKET_TYPE_ADCS_FILTER,
-                "records": norm_records,
-            }
-
-            def on_ack(_ack: dict[str, Any]) -> None:
-                if not self._ctx.db.delete_adcs_filter():
-                    logger.warning("delete_adcs_filter 실패")
-
-            if not self.send_with_retry(payload, on_ack):
-                logger.warning("SAT_ADCS_FILTER 송신 실패 — 삭제하지 않음")
-        except Exception as e:
-            logger.error("transmit_adcs_filter 실패: %s", e)
-
-    def transmit_event_queue(self) -> None:
-        """미전송 이벤트 — META 선송신 후 개별 순차 송신, ACK 시 delete_event."""
-        try:
-            pending = self._ctx.db.get_pending_events()
-            event_ids = _event_ids_from_pending(pending)
-            if not event_ids:
-                return
-            if not self._transmit_event_queue_meta(event_ids):
-                logger.warning("SAT_EVENT_QUEUE_META 송신 실패 — 이벤트 본문 송신 중단")
-                return
-            id_set = set(event_ids)
-            for event in pending:
-                try:
-                    event_id = int(event.get("EVENT_ID", -1))
-                except (TypeError, ValueError) as e:
-                    logger.error("EVENT_ID 변환 실패: %s", e)
-                    continue
-                if event_id not in id_set:
-                    continue
-                norm_event = normalize_record_timestamps(event)
-                payload = {
-                    "packet_type": demon_config.GS_PACKET_TYPE_EVENT,
-                    "event": norm_event,
-                }
-                captured_id = event_id
-
-                def on_ack(
-                    _ack: dict[str, Any],
-                    eid: int = captured_id,
-                ) -> None:
-                    if not self._ctx.db.delete_event(eid):
-                        logger.warning("delete_event 실패 event_id=%s", eid)
-
-                if not self.send_with_retry(payload, on_ack):
-                    logger.warning("이벤트 송신 실패 event_id=%s", event_id)
-                    break
-        except Exception as e:
-            logger.error("transmit_event_queue 실패: %s", e)
-
-    def _transmit_event_queue_meta(self, event_ids: list[int]) -> bool:
-        """SAT_EVENT_QUEUE 본문 송신 전 event_total·event_ids 메타데이터 1회 송신."""
-        try:
-            payload = {
-                "packet_type": demon_config.GS_PACKET_TYPE_EVENT_META,
-                "event_total": len(event_ids),
-                "event_ids": list(event_ids),
-            }
-            logger.info(
-                "SAT_EVENT_QUEUE_META 송신 event_total=%s ids=%s",
-                payload["event_total"],
-                payload["event_ids"],
-            )
-            return self.send_with_retry(payload, None)
-        except Exception as e:
-            logger.error("_transmit_event_queue_meta 실패: %s", e)
-            return False
-
-    def transmit_integrity(self) -> None:
-        """SAT_INTEGRITY_HASH(HASH) 전체 송신 — 삭제 없음."""
-        try:
-            records = self._ctx.db.get_integrity_hash()
-            if records is None or not records:
-                return
-            if isinstance(records, dict):
-                records = [records]
-            norm_records = [normalize_record_timestamps(rec) for rec in records]
-            payload = {
-                "packet_type": demon_config.GS_PACKET_TYPE_INTEGRITY,
-                "records": norm_records,
-            }
-
-            def on_ack(_ack: dict[str, Any]) -> None:
-                logger.info("SAT_INTEGRITY_HASH 송신 ACK 수신")
-
-            self.send_with_retry(payload, on_ack)
-        except Exception as e:
-            logger.error("transmit_integrity 실패: %s", e)
 
     def dispatch_command(self, cmd: dict[str, Any]) -> None:
         """지상국 커맨드 라우팅."""

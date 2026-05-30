@@ -12,7 +12,11 @@ from typing import Any, Protocol
 from .. import config as demon_config
 from ..core.context import RuntimeContext
 from ..core.time_utils import utc_now_iso
-from .false_positive_filter.fpf_scenario_injector import adcs_attack_payload, tlm_attack_payload
+from .false_positive_filter.fpf_scenario_injector import (
+    adcs_attack_payload,
+    inject_attack_adcs_tlm,
+    tlm_attack_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +73,13 @@ class AttackSimulator:
         except Exception as e:
             logger.error("AttackSimulator.set_serial_reader 실패: %s", e)
 
-    def start(self, cmd: dict[str, Any] | None = None) -> bool:
-        """ATTACK_SIM — 물리(시리얼) + 논리(DB). cf 파일 주입 없음."""
+    def start(
+        self,
+        cmd: dict[str, Any] | None = None,
+        *,
+        inject_logical: bool | None = None,
+    ) -> bool:
+        """ATTACK_SIM — 물리(시리얼) + 선택적 논리(DB). cf 파일 주입 없음."""
         try:
             if self._physical_active:
                 logger.warning("ATTACK_SIM 이미 활성 — start 스킵")
@@ -83,7 +92,12 @@ class AttackSimulator:
             if self._run_physical_attack():
                 ok_any = True
 
-            if self._config_bool("ATTACK_SIM_INJECT_LOGICAL", True):
+            do_logical = (
+                self._config_bool("ATTACK_SIM_INJECT_LOGICAL", True)
+                if inject_logical is None
+                else bool(inject_logical)
+            )
+            if do_logical:
                 if self._inject_logical_attack():
                     ok_any = True
 
@@ -297,15 +311,20 @@ class AttackSimulator:
             logger.error("cf 주입 파일 삭제 실패: %s", e)
             return False
 
+    def reinject_logical_attack(self) -> bool:
+        """FPF 직전 ADCS/TLM 변조 스냅샷 재기록 (UDP 덮어쓰기 대비)."""
+        try:
+            ok = inject_attack_adcs_tlm(self._ctx.db)
+            if ok:
+                logger.info("공격 시뮬: ADCS/TLM 논리 스냅샷 재주입")
+            return ok
+        except Exception as e:
+            logger.error("reinject_logical_attack 실패: %s", e)
+            return False
+
     def _inject_logical_attack(self) -> bool:
         try:
-            ok_adcs = self._ctx.db.insert_adcs_filter(adcs_attack_payload())
-            ok_tlm = self._ctx.db.upsert_tlm_current(tlm_attack_payload())
-            if ok_adcs:
-                logger.info("공격 시뮬: SAT_ADCS_FILTER 이상 스냅샷 INSERT")
-            if ok_tlm:
-                logger.info("공격 시뮬: SAT_TLM_CURRENT 갱신")
-            return bool(ok_adcs or ok_tlm)
+            return self.reinject_logical_attack()
         except Exception as e:
             logger.error("_inject_logical_attack 실패: %s", e)
             return False
