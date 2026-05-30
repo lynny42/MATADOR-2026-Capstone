@@ -9,6 +9,7 @@ from typing import Any
 from .. import config as demon_config
 from ..core.context import RuntimeContext
 from ..db.db_manager import DBManager
+from . import tlm_parse_cfs
 from . import tlm_parse_nos3
 
 logger = logging.getLogger(__name__)
@@ -220,28 +221,48 @@ class UDPReceiver:
                 if mm is not None and mm >= 0:
                     with self._mission_lock:
                         self._mission_mode = mm
-                    self._merge_tlm_pending({"MISSION_MODE": mm})
+                    self._merge_parsed_fields({"MISSION_MODE": mm})
             elif demon_config.MID_SC_HKTLM and mid in demon_config.MID_SC_HKTLM:
-                self._log_parsed_telemetry(mid, "sc", {}, note="SC HK counters only")
+                sc_fields = tlm_parse_nos3.parse_sc_hktlm(full_packet)
+                self._log_parsed_telemetry(mid, "sc", sc_fields)
+                if sc_fields:
+                    self._merge_parsed_fields(sc_fields)
             elif demon_config.MID_ADCS_TLM and mid in demon_config.MID_ADCS_TLM:
                 adcs = tlm_parse_nos3.parse_adcs_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "adcs", adcs)
                 if adcs:
-                    self._merge_tlm_pending(adcs)
+                    self._merge_parsed_fields(adcs)
                     with self._adcs_lock:
-                        self._latest_adcs_data.update(adcs)
+                        self._latest_adcs_data.update(
+                            DBManager.filter_adcs_filter_fields(adcs),
+                        )
                     if mid == demon_config.TLM_DB_FLUSH_TRIGGER_MID:
                         self._flush_tlm_pending_to_db()
+            elif demon_config.MID_CFS_HK_TLM and mid in demon_config.MID_CFS_HK_TLM:
+                cfs_fields = tlm_parse_cfs.parse_cfs_hk(mid, full_packet)
+                self._log_parsed_telemetry(mid, "cfs", cfs_fields)
+                if cfs_fields:
+                    self._merge_parsed_fields(cfs_fields)
+            elif demon_config.MID_RW_TLM and mid in demon_config.MID_RW_TLM:
+                rw_fields = tlm_parse_nos3.parse_rw_tlm(mid, full_packet)
+                self._log_parsed_telemetry(mid, "rw", rw_fields)
+                if rw_fields:
+                    self._merge_parsed_fields(rw_fields)
+            elif demon_config.MID_STAR_TRACKER_TLM and mid in demon_config.MID_STAR_TRACKER_TLM:
+                st_fields = tlm_parse_nos3.parse_star_tracker_tlm(mid, full_packet)
+                self._log_parsed_telemetry(mid, "st", st_fields)
+                if st_fields:
+                    self._merge_parsed_fields(st_fields)
             elif demon_config.MID_IMU_TLM and mid in demon_config.MID_IMU_TLM:
                 imu = tlm_parse_nos3.parse_imu_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "imu", imu)
                 if imu:
-                    self._merge_tlm_pending(imu)
+                    self._merge_parsed_fields(imu)
             elif demon_config.MID_MAG_TLM and mid in demon_config.MID_MAG_TLM:
                 mag = tlm_parse_nos3.parse_mag_tlm(mid, full_packet)
                 self._log_parsed_telemetry(mid, "mag", mag)
                 if mag:
-                    self._merge_tlm_pending(mag)
+                    self._merge_parsed_fields(mag)
             else:
                 try:
                     if demon_config.LOG_UNREGISTERED_TLM:
@@ -310,6 +331,26 @@ class UDPReceiver:
         except Exception as e:
             logger.error("get_mission_mode 실패: %s", e)
             return 0
+
+    def _merge_parsed_fields(self, fields: dict[str, Any]) -> None:
+        """파서 출력 → SAT_TLM_CURRENT pending + SAT_ADCS_FILTER 캐시."""
+        try:
+            if not fields:
+                return
+            working = dict(fields)
+            ccsds_sec = working.pop("_CCSDS_SECONDS", None)
+            if ccsds_sec is not None and "OBC_S_TICK" not in working:
+                working["OBC_S_TICK"] = int(ccsds_sec)
+
+            tlm_part = DBManager.filter_tlm_current_fields(working)
+            adcs_part = DBManager.filter_adcs_filter_fields(working)
+            if tlm_part:
+                self._merge_tlm_pending(tlm_part)
+            if adcs_part:
+                with self._adcs_lock:
+                    self._latest_adcs_data.update(adcs_part)
+        except Exception as e:
+            logger.error("_merge_parsed_fields 실패: %s", e)
 
     def _merge_tlm_pending(self, fields: dict[str, Any]) -> None:
         """SAT_TLM_CURRENT 화이트리스트 필드만 pending 에 merge."""

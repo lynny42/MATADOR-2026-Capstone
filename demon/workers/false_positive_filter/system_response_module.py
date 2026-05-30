@@ -500,14 +500,16 @@ class SystemResponseModule:
 
     @staticmethod
     def _is_recently_updated(ts: Any, threshold_sec: float = 60.0) -> bool:
-        """타임스탬프가 최근 threshold_sec 이내인지."""
+        """타임스탬프가 최근 threshold_sec 이내인지 (UTC 기준)."""
         if ts is None:
             return False
         try:
-            from datetime import datetime
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts)
-            now = datetime.now()
-            return abs((now - ts).total_seconds()) <= threshold_sec
-        except Exception:
+            from ...core.time_utils import parse_utc_timestamp, utc_now
+
+            parsed = parse_utc_timestamp(ts)
+            if parsed is None:
+                return False
+            return abs((utc_now() - parsed).total_seconds()) <= threshold_sec
+        except Exception as e:
+            logger.error("최근 갱신 여부 판단 실패: %s", e)
             return False

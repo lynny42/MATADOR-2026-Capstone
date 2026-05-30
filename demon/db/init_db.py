@@ -14,7 +14,9 @@ import argparse
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
+from .. import config as demon_config
 from .paths import default_db_path
 
 # 명세 타입 매핑: INT/UINT32/TINYINT/BIT/BITMASK -> INTEGER, FLOAT -> REAL,
@@ -22,24 +24,59 @@ from .paths import default_db_path
 
 logger = logging.getLogger(__name__)
 
+_TLM_CFS_HK_COLUMN_DEFS: tuple[tuple[str, str], ...] = (
+    ("SYSLOGENTRIES", "INTEGER NOT NULL DEFAULT 0"),
+    ("ERLOGENTRIES", "INTEGER NOT NULL DEFAULT 0"),
+    ("RESETSPERFORMED", "INTEGER NOT NULL DEFAULT 0"),
+    ("LASTVALCRC", "TEXT NOT NULL DEFAULT ''"),
+    ("ENABLEDROUTES", "INTEGER NOT NULL DEFAULT 0"),
+    ("COMBINEDPACKETSSENT", "INTEGER NOT NULL DEFAULT 0"),
+    ("SKIPPEDSLOTSCOUNT", "INTEGER NOT NULL DEFAULT 0"),
+    ("EXECOUNTS", "REAL NOT NULL DEFAULT 0"),
+    ("APPCSERRCOUNTER", "INTEGER NOT NULL DEFAULT 0"),
+    ("OSCSERRCOUNTER", "INTEGER NOT NULL DEFAULT 0"),
+    ("FORWARD_ERR_COUNT", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+_TLM_CFS_HK_DDL_SUFFIX = """
+      SYSLOGENTRIES INTEGER NOT NULL,
+      ERLOGENTRIES INTEGER NOT NULL,
+      RESETSPERFORMED INTEGER NOT NULL,
+      LASTVALCRC TEXT NOT NULL,
+      ENABLEDROUTES INTEGER NOT NULL,
+      COMBINEDPACKETSSENT INTEGER NOT NULL,
+      SKIPPEDSLOTSCOUNT INTEGER NOT NULL,
+      EXECOUNTS REAL NOT NULL,
+      APPCSERRCOUNTER INTEGER NOT NULL,
+      OSCSERRCOUNTER INTEGER NOT NULL,
+      FORWARD_ERR_COUNT INTEGER NOT NULL
+"""
+
+
+def _tlm_seed_default(col: str) -> Any:
+    try:
+        if col == "LASTVALCRC":
+            return ""
+        if col in ("SVB_X", "SVB_Y", "SVB_Z", "WBN_X", "WBN_Y", "WBN_Z", "DT", "EXECOUNTS"):
+            return 0.0
+        return 0
+    except Exception as e:
+        logger.error("TLM seed 기본값 실패 col=%s: %s", col, e)
+        return 0
+
 
 def _seed_sat_tlm_current(conn: sqlite3.Connection) -> None:
     """TLM_ID=1 기본 행 — UDPReceiver가 UPDATE만 할 수 있도록 보장."""
     try:
+        data_cols = list(demon_config.TLM_CURRENT_UPDATEABLE_COLS)
+        col_names = ["TLM_ID", "UPDATED_AT"] + data_cols
+        vals: list[Any] = [1, "1970-01-01T00:00:00Z"]
+        vals.extend(_tlm_seed_default(col) for col in data_cols)
+        placeholders = ", ".join("?" * len(col_names))
         conn.execute(
-            """
-            INSERT OR IGNORE INTO SAT_TLM_CURRENT (
-              TLM_ID, UPDATED_AT, MISSION_MODE, OBC_S_TICK, HEAP_FREE,
-              APPENABLESTATE, DWELL_MASK, ADCS_MODE,
-              SVB_X, SVB_Y, SVB_Z, WBN_X, WBN_Y, WBN_Z,
-              DT, TORQUER_PERIOD, SUN_VALID
-            ) VALUES (
-              1, '1970-01-01T00:00:00Z', 0, 0, 0,
-              0, 0, 0,
-              0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-              0.0, 0, 0
-            )
-            """
+            f"INSERT OR IGNORE INTO SAT_TLM_CURRENT ({', '.join(col_names)}) "
+            f"VALUES ({placeholders})",
+            vals,
         )
     except sqlite3.Error as e:
         logger.error("SAT_TLM_CURRENT 시드 실패: %s", e)
@@ -69,7 +106,7 @@ DDL_STATEMENTS: list[str] = [
       WBN_Z REAL NOT NULL,
       DT REAL NOT NULL,
       TORQUER_PERIOD INTEGER NOT NULL,
-      SUN_VALID INTEGER NOT NULL
+      SUN_VALID INTEGER NOT NULL,""" + _TLM_CFS_HK_DDL_SUFFIX + """
     )
     """,
     # SAT_TLM_HISTORY — SAT_TLM_CURRENT 누적 히스토리
@@ -92,7 +129,7 @@ DDL_STATEMENTS: list[str] = [
       WBN_Z REAL NOT NULL,
       DT REAL NOT NULL,
       TORQUER_PERIOD INTEGER NOT NULL,
-      SUN_VALID INTEGER NOT NULL
+      SUN_VALID INTEGER NOT NULL,""" + _TLM_CFS_HK_DDL_SUFFIX + """
     )
     """,
     """
@@ -214,6 +251,9 @@ DDL_STATEMENTS: list[str] = [
       IMU_ACC_X REAL,
       IMU_ACC_Y REAL,
       IMU_ACC_Z REAL,
+      MAG_BVB_X REAL,
+      MAG_BVB_Y REAL,
+      MAG_BVB_Z REAL,
       QERR_0 REAL NOT NULL,
       QERR_1 REAL NOT NULL,
       QERR_2 REAL NOT NULL,
@@ -416,6 +456,39 @@ def _migrate_adcs_filter_autoincrement(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_tlm_cfs_hk_columns(conn: sqlite3.Connection) -> None:
+    """SAT_TLM_CURRENT / SAT_TLM_HISTORY — cFS HK 컬럼 추가 (구 DB 호환)."""
+    try:
+        for table in ("SAT_TLM_CURRENT", "SAT_TLM_HISTORY"):
+            for col, col_def in _TLM_CFS_HK_COLUMN_DEFS:
+                if _table_has_column(conn, table, col):
+                    continue
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+                logger.info("%s: %s 컬럼 추가", table, col)
+    except sqlite3.Error as e:
+        logger.error("TLM cFS HK 컬럼 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("TLM cFS HK 컬럼 마이그레이션 실패: %s", e)
+        raise
+
+
+def _migrate_adcs_filter_mag_columns(conn: sqlite3.Connection) -> None:
+    """SAT_ADCS_FILTER — MAG device B-field 컬럼 추가."""
+    try:
+        for col in ("MAG_BVB_X", "MAG_BVB_Y", "MAG_BVB_Z"):
+            if _table_has_column(conn, "SAT_ADCS_FILTER", col):
+                continue
+            conn.execute(f"ALTER TABLE SAT_ADCS_FILTER ADD COLUMN {col} REAL")
+            logger.info("SAT_ADCS_FILTER: %s 컬럼 추가", col)
+    except sqlite3.Error as e:
+        logger.error("SAT_ADCS_FILTER MAG 컬럼 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_ADCS_FILTER MAG 컬럼 마이그레이션 실패: %s", e)
+        raise
+
+
 def _migrate_integrity_hash_column(conn: sqlite3.Connection) -> None:
     """구 스키마 LAST_VERIFIEDA_AT → LAST_VERIFIED_AT 컬럼명 정리."""
     try:
@@ -451,6 +524,8 @@ def init_db(db_path: Path) -> None:
         _migrate_pwr_history_snapshot_schema(conn)
         _migrate_event_queue_columns(conn)
         _migrate_adcs_filter_autoincrement(conn)
+        _migrate_tlm_cfs_hk_columns(conn)
+        _migrate_adcs_filter_mag_columns(conn)
         _seed_sat_tlm_current(conn)
         conn.commit()
     except sqlite3.Error as e:

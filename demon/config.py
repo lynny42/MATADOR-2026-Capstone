@@ -40,11 +40,12 @@ SERIAL_LOG_PARSED = False
 UDP_TLM_BIND_HOST = "0.0.0.0"
 UDP_TLM_PORT = 5020
 UDP_RECV_BUFFER_BYTES = 65535
+GS_MAX_PACKET_BYTES = 2_000_000
 
 # ============================================================
 # 지상국 TCP (송수신)
 # ============================================================
-GS_HOST = "192.168.0.12"
+GS_HOST = "192.168.0.29"
 GS_PORT = 6000
 GS_SEND_RETRY_MAX = 3
 GS_SEND_RETRY_BASE_SEC = 1.0
@@ -78,7 +79,7 @@ SAT_TLM_ID = 1
 SAT_ADCS_FILTER_CHANNEL_ID = 1
 PWR_SW_ID_COUNT = 3
 
-# SAT_TLM_CURRENT 부분 UPDATE 허용 컬럼
+# SAT_TLM_CURRENT / SAT_TLM_HISTORY 공통 데이터 컬럼 (UDP pending flush·history INSERT)
 TLM_CURRENT_UPDATEABLE_COLS: tuple[str, ...] = (
     "MISSION_MODE",
     "OBC_S_TICK",
@@ -95,7 +96,23 @@ TLM_CURRENT_UPDATEABLE_COLS: tuple[str, ...] = (
     "DT",
     "TORQUER_PERIOD",
     "SUN_VALID",
+    # cFS / NOS3 HK — tlm_parse_cfs.py
+    "SYSLOGENTRIES",
+    "ERLOGENTRIES",
+    "RESETSPERFORMED",
+    "LASTVALCRC",
+    "ENABLEDROUTES",
+    "COMBINEDPACKETSSENT",
+    "SKIPPEDSLOTSCOUNT",
+    "EXECOUNTS",
+    "APPCSERRCOUNTER",
+    "OSCSERRCOUNTER",
+    "FORWARD_ERR_COUNT",
 )
+
+# generic_imu / generic_mag device 페이로드 (CFE 헤더 제외, generic_*_device.h)
+GENERIC_IMU_DEVICE_DATA_BYTES = 24
+GENERIC_MAG_DEVICE_DATA_BYTES = 12
 
 # ============================================================
 # 수집 주기
@@ -154,7 +171,9 @@ ATTACK_HASH_CF_PAYLOAD = "MATADOR ground-station cf file injection\n"
 # ============================================================
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
-LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+# 로그 asctime 도 UTC (DB UPDATED_AT 과 날짜 불일치 방지)
+LOG_USE_UTC = True
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S UTC"
 # None 이면 stdout 만. 경로 지정 시 파일 핸들러 추가.
 LOG_FILE_PATH: str | None = None
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
@@ -209,6 +228,25 @@ GENERIC_MAG_DEVICE_TLM_MID = 0x092B
 # SC
 SC_HK_TLM_MID = 0x08AA
 
+# cFE core / cFS 앱 HK — nos3/gsw/cosmos/config/targets/CFS/cmd_tlm/*.txt
+CFE_ES_HK_TLM_MID = 0x0800
+CFE_SB_HK_TLM_MID = 0x0803
+CFE_TBL_HK_TLM_MID = 0x0804
+CFE_TIME_HK_TLM_MID = 0x0805
+TO_HK_TLM_MID = 0x0880
+FM_HK_TLM_MID = 0x088A
+HK_APP_HK_TLM_MID = 0x089B
+MD_HK_TLM_MID = 0x0890
+SCH_HK_TLM_MID = 0x0897
+CS_HK_TLM_MID = 0x08A4
+DS_HK_TLM_MID = 0x08B8
+
+# generic_reaction_wheel / generic_star_tracker / generic_radio
+GENERIC_RW_HK_TLM_MID = 0x0993
+GENERIC_STAR_TRACKER_HK_TLM_MID = 0x0935
+GENERIC_STAR_TRACKER_DEVICE_TLM_MID = 0x0936
+GENERIC_RADIO_HK_TLM_MID = 0x0930
+
 # MGR (Mission Manager — NOS3에서 SpacecraftMode 보유)
 # components/mgr/fsw/cfs/platform_inc/mgr_msgids.h
 MGR_HK_TLM_MID = 0x08F8
@@ -227,6 +265,25 @@ MID_ADCS_TLM: tuple[int, ...] = (
 )
 MID_IMU_TLM: tuple[int, ...] = (GENERIC_IMU_HK_TLM_MID, GENERIC_IMU_DEVICE_TLM_MID)
 MID_MAG_TLM: tuple[int, ...] = (GENERIC_MAG_HK_TLM_MID, GENERIC_MAG_DEVICE_TLM_MID)
+MID_CFS_HK_TLM: tuple[int, ...] = (
+    CFE_ES_HK_TLM_MID,
+    CFE_SB_HK_TLM_MID,
+    CFE_TBL_HK_TLM_MID,
+    CFE_TIME_HK_TLM_MID,
+    TO_HK_TLM_MID,
+    FM_HK_TLM_MID,
+    HK_APP_HK_TLM_MID,
+    MD_HK_TLM_MID,
+    SCH_HK_TLM_MID,
+    CS_HK_TLM_MID,
+    DS_HK_TLM_MID,
+    GENERIC_RADIO_HK_TLM_MID,
+)
+MID_RW_TLM: tuple[int, ...] = (GENERIC_RW_HK_TLM_MID,)
+MID_STAR_TRACKER_TLM: tuple[int, ...] = (
+    GENERIC_STAR_TRACKER_HK_TLM_MID,
+    GENERIC_STAR_TRACKER_DEVICE_TLM_MID,
+)
 
 # MGR HK 페이로드(사용자 영역) 내 SpacecraftMode 오프셋.
 # 구조: CommandErrorCount(1) + CommandCount(1) + SpacecraftMode(1) ... → offset 2

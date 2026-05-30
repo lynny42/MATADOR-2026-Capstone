@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
+from ..core.time_utils import utc_now_iso
 from ..integrity_dir_hash import (
     INTEGRITY_DIR_FILE_PATH,
     compute_directory_manifest_hash,
@@ -354,7 +354,7 @@ class AnomalyDetector:
                     return
                 logger.info("%s: hash 통과 — 오탐 필터 진행", scenario)
 
-            detected_at = self._utc_now_iso()
+            detected_at = utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
 
             adcs_row = self._ctx.db.get_adcs_filter()
@@ -400,7 +400,7 @@ class AnomalyDetector:
                     payload = dict(snap)
                     payload.pop("CHENNEL1", None)
                     if payload:
-                        payload.setdefault("TIMESTAMP", self._utc_now_iso())
+                        payload.setdefault("TIMESTAMP", utc_now_iso())
                         if not self._ctx.db.insert_adcs_filter(payload):
                             logger.warning("insert_adcs_filter 실패(시리즈)")
             if self._adcs_series:
@@ -410,7 +410,7 @@ class AnomalyDetector:
                 payload = dict(row) if row else {}
             if not payload:
                 return
-            payload.setdefault("TIMESTAMP", self._utc_now_iso())
+            payload.setdefault("TIMESTAMP", utc_now_iso())
             payload.pop("CHENNEL1", None)
             if not self._ctx.db.insert_adcs_filter(payload):
                 logger.warning("insert_adcs_filter 실패")
@@ -514,7 +514,7 @@ class AnomalyDetector:
     ) -> bool:
         """PRIORITY=1 무결성 이벤트 INSERT. 성공 시 True."""
         try:
-            detected_at = self._utc_now_iso()
+            detected_at = utc_now_iso()
             event_id = self._ctx.db.insert_event({
                 "DETECTED_AT": detected_at,
                 "TIMESTAMP": detected_at,
@@ -539,11 +539,3 @@ class AnomalyDetector:
         except Exception as e:
             logger.error("_insert_integrity_event 실패: %s", e)
             return False
-
-    @staticmethod
-    def _utc_now_iso() -> str:
-        try:
-            return datetime.now(timezone.utc).isoformat()
-        except Exception as e:
-            logger.error("UTC 시각 생성 실패: %s", e)
-            return "1970-01-01T00:00:00+00:00"

@@ -338,12 +338,22 @@ def _parse_adcs_di(full_packet: bytes) -> dict[str, Any]:
         (css_valid,) = struct.unpack_from(f"{_E}B", ub, 113 + 240)      # 353
         (imu_valid,) = struct.unpack_from(f"{_E}B", ub, 378 + 56)       # 434
         (st_valid,) = struct.unpack_from(f"{_E}B", ub, 603 + 64)        # 667
-        return {
+        st_q = struct.unpack_from(f"{_E}4d", ub, 603 + 32)               # body q at 635
+        result = {
             "_DI_FSS_VALID": int(fss_valid) & 0xFF,
             "_DI_CSS_VALID": int(css_valid) & 0xFF,
             "_DI_IMU_VALID": int(imu_valid) & 0xFF,
             "_DI_ST_VALID": int(st_valid) & 0xFF,
         }
+        if int(st_valid) & 0xFF:
+            result.update({
+                "ST_VALID": int(st_valid) & 0xFF,
+                "ST_QBN_0": float(st_q[0]),
+                "ST_QBN_1": float(st_q[1]),
+                "ST_QBN_2": float(st_q[2]),
+                "ST_QBN_3": float(st_q[3]),
+            })
+        return result
     except struct.error as e:
         logger.error("ADCS DI struct 오류: %s", e)
         return {}
@@ -446,9 +456,44 @@ def parse_adcs_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
 
 
 def parse_imu_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
-    """IMU 텔레메트리(추후 WBN 등 매핑). 현재 ADCS AD/GNC 에서 받음."""
+    """
+    GENERIC_IMU HK(0x0925) / device DATA(0x0926).
+
+    Device: GENERIC_IMU_Device_Data_tlm_t — 축별 LinearAcc·AngularAcc (float LE).
+    """
     try:
-        _ = (mid, full_packet)
+        ub = cfe_tlm_user_bytes(full_packet)
+        if ub is None:
+            return {}
+        if mid == demon_config.GENERIC_IMU_DEVICE_TLM_MID:
+            need = demon_config.GENERIC_IMU_DEVICE_DATA_BYTES
+            if len(ub) < need:
+                logger.warning(
+                    "IMU device 페이로드 길이 부족: need>=%s have=%s",
+                    need,
+                    len(ub),
+                )
+                return {}
+            x_lin, x_ang, y_lin, y_ang, z_lin, z_ang = struct.unpack_from(
+                "<6f",
+                ub,
+                0,
+            )
+            return {
+                "IMU_WBN_X": float(x_ang),
+                "IMU_WBN_Y": float(y_ang),
+                "IMU_WBN_Z": float(z_ang),
+                "IMU_ACC_X": float(x_lin),
+                "IMU_ACC_Y": float(y_lin),
+                "IMU_ACC_Z": float(z_lin),
+            }
+        if mid == demon_config.GENERIC_IMU_HK_TLM_MID:
+            if len(ub) < 5:
+                return {}
+            return {"_IMU_DEVICE_ENABLED": int(ub[4]) & 0xFF}
+        return {}
+    except struct.error as e:
+        logger.error("parse_imu_tlm struct 오류: %s", e)
         return {}
     except Exception as e:
         logger.error("parse_imu_tlm 실패: %s", e)
@@ -456,12 +501,97 @@ def parse_imu_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
 
 
 def parse_mag_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
-    """MAG 텔레메트리(추후 매핑). 현재 ADCS GNC.bvb 에서 받음."""
+    """
+    GENERIC_MAG HK(0x092A) / device DATA(0x092B).
+
+    Device: MagneticIntensity X/Y/Z (int32, cFS PROCESSOR_ENDIAN = LE on ARM).
+    """
     try:
-        _ = (mid, full_packet)
+        ub = cfe_tlm_user_bytes(full_packet)
+        if ub is None:
+            return {}
+        if mid == demon_config.GENERIC_MAG_DEVICE_TLM_MID:
+            need = demon_config.GENERIC_MAG_DEVICE_DATA_BYTES
+            if len(ub) < need:
+                logger.warning(
+                    "MAG device 페이로드 길이 부족: need>=%s have=%s",
+                    need,
+                    len(ub),
+                )
+                return {}
+            mx, my, mz = struct.unpack_from(f"{_E}3i", ub, 0)
+            return {
+                "MAG_BVB_X": float(mx),
+                "MAG_BVB_Y": float(my),
+                "MAG_BVB_Z": float(mz),
+            }
+        if mid == demon_config.GENERIC_MAG_HK_TLM_MID:
+            if len(ub) < 5:
+                return {}
+            return {"_MAG_DEVICE_ENABLED": int(ub[4]) & 0xFF}
+        return {}
+    except struct.error as e:
+        logger.error("parse_mag_tlm struct 오류: %s", e)
         return {}
     except Exception as e:
         logger.error("parse_mag_tlm 실패: %s", e)
+        return {}
+
+
+def parse_rw_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
+    """GENERIC_RW HK (0x0993) — 휠 enable·모멘텀."""
+    try:
+        if mid != demon_config.GENERIC_RW_HK_TLM_MID:
+            return {}
+        ub = cfe_tlm_user_bytes(full_packet)
+        if ub is None or len(ub) < 11:
+            return {}
+        return {
+            "DEVICE_ENABLED_RW0": int(ub[8]) & 0xFF,
+            "DEVICE_ENABLED_RW1": int(ub[9]) & 0xFF,
+            "DEVICE_ENABLED_RW2": int(ub[10]) & 0xFF,
+            "MOMENTUM_NMS_0": float(struct.unpack_from(f"{_E}d", ub, 11)[0]),
+            "MOMENTUM_NMS_1": float(struct.unpack_from(f"{_E}d", ub, 19)[0]),
+            "MOMENTUM_NMS_2": float(struct.unpack_from(f"{_E}d", ub, 27)[0]),
+        }
+    except struct.error as e:
+        logger.error("parse_rw_tlm struct 오류: %s", e)
+        return {}
+    except Exception as e:
+        logger.error("parse_rw_tlm 실패: %s", e)
+        return {}
+
+
+def parse_star_tracker_tlm(mid: int, full_packet: bytes) -> dict[str, Any]:
+    """GENERIC_STAR_TRACKER device/HK (0x0936 / 0x0935)."""
+    try:
+        ub = cfe_tlm_user_bytes(full_packet)
+        if ub is None:
+            return {}
+        if mid == demon_config.GENERIC_STAR_TRACKER_DEVICE_TLM_MID:
+            if len(ub) < 33:
+                return {}
+            q = struct.unpack_from(f"{_E}4d", ub, 0)
+            (is_valid,) = struct.unpack_from(f"{_E}B", ub, 32)
+            if not int(is_valid) & 0xFF:
+                return {"ST_VALID": 0}
+            return {
+                "ST_VALID": 1,
+                "ST_QBN_0": float(q[0]),
+                "ST_QBN_1": float(q[1]),
+                "ST_QBN_2": float(q[2]),
+                "ST_QBN_3": float(q[3]),
+            }
+        if mid == demon_config.GENERIC_STAR_TRACKER_HK_TLM_MID:
+            if len(ub) < 5:
+                return {}
+            return {"_ST_DEVICE_ENABLED": int(ub[4]) & 0xFF}
+        return {}
+    except struct.error as e:
+        logger.error("parse_star_tracker_tlm struct 오류: %s", e)
+        return {}
+    except Exception as e:
+        logger.error("parse_star_tracker_tlm 실패: %s", e)
         return {}
 
 
@@ -482,6 +612,19 @@ def parse_mgr_mission_mode(full_packet: bytes) -> int:
     except Exception as e:
         logger.error("parse_mgr_mission_mode 실패: %s", e)
         return -1
+
+
+def parse_sc_hktlm(full_packet: bytes) -> dict[str, Any]:
+    """SC HK (0x08AA) — 현재 SAT_TLM 스키마에 직접 매핑 필드 없음."""
+    try:
+        ub = cfe_tlm_user_bytes(full_packet)
+        if ub is None or len(ub) < 4:
+            return {}
+        cmd_ctr = int(ub[3])
+        return {"_SC_CMDCTR": cmd_ctr}
+    except Exception as e:
+        logger.error("parse_sc_hktlm 실패: %s", e)
+        return {}
 
 
 def parse_mgr_hktlm(full_packet: bytes) -> dict[str, Any]:

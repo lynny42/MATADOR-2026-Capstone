@@ -51,6 +51,7 @@ class DaemonConfig:
     gs_transmit_on_light_edge: bool = demon_config.GS_TRANSMIT_ON_LIGHT_EDGE
     gs_poll_interval_sec: float = demon_config.GS_POLL_INTERVAL_SEC
     gs_history_batch_size: int = demon_config.GS_HISTORY_BATCH_SIZE
+    gs_max_packet_bytes: int = demon_config.GS_MAX_PACKET_BYTES
 
     # --- 수집 주기 ---
     collect_interval_sec: float = demon_config.COLLECT_INTERVAL_SEC

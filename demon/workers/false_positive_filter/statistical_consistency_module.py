@@ -254,16 +254,16 @@ class StatisticalConsistencyModule:
 
     @staticmethod
     def _within_time_window(t1: Any, t2: Any, window_sec: float) -> bool:
-        """t1, t2 사이의 차이가 window_sec 이내인지 (datetime/문자열/숫자 모두 허용)."""
+        """t1, t2 사이의 차이가 window_sec 이내인지 (UTC datetime/문자열/숫자)."""
         try:
-            from datetime import datetime
-            if isinstance(t1, str):
-                t1 = datetime.fromisoformat(t1)
-            if isinstance(t2, str):
-                t2 = datetime.fromisoformat(t2)
+            from ...core.time_utils import seconds_between_utc
+
             if isinstance(t1, (int, float)) and isinstance(t2, (int, float)):
-                return abs(t1 - t2) <= window_sec
-            return abs((t1 - t2).total_seconds()) <= window_sec
+                return abs(float(t1) - float(t2)) <= window_sec
+            delta = seconds_between_utc(t1, t2)
+            if delta is None:
+                return False
+            return delta <= window_sec
         except Exception as e:
             logger.error(f"시간 윈도우 비교 실패: {e}")
             return False

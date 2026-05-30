@@ -5,11 +5,11 @@ import logging
 import socket
 import struct
 import threading
-from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
+from ..core.time_utils import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class GScomms:
             detected_at = str(
                 result.get("detected_at")
                 or key_set.get("detected_at")
-                or self._utc_now_iso(),
+                or utc_now_iso(),
             )
 
             if is_attack == "Y":
@@ -622,6 +622,10 @@ class GScomms:
                         continue
                     ack = self._wait_for_ack(sock)
                     if ack is not None:
+                        logger.info(
+                            "GS ACK 수신 packet_type=%s",
+                            payload.get("packet_type", "?"),
+                        )
                         if on_ack_callback is not None:
                             on_ack_callback(ack)
                         return True
@@ -848,14 +852,6 @@ class GScomms:
             logger.error("소켓 close 실패: %s", e)
         except Exception as e:
             logger.error("소켓 close 실패: %s", e)
-
-    @staticmethod
-    def _utc_now_iso() -> str:
-        try:
-            return datetime.now(timezone.utc).isoformat()
-        except Exception as e:
-            logger.error("UTC 시각 생성 실패: %s", e)
-            return "1970-01-01T00:00:00+00:00"
 
     def _cmd_listen_port(self) -> int:
         try:

@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
+from ..core.time_utils import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +265,7 @@ class AttackSimulator:
                     "MATADOR cf injection\n",
                 ),
             )
-            stamp = datetime.now(timezone.utc).isoformat()
+            stamp = utc_now_iso()
             body = f"{payload.rstrip()}\n# injected_at={stamp}\n"
             target = base / name
             target.write_text(body, encoding="utf-8")

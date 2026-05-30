@@ -8,11 +8,27 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import time
 from pathlib import Path
 
 from .. import config as demon_config
 
 logger = logging.getLogger(__name__)
+
+
+class _UtcFormatter(logging.Formatter):
+    """logging.Formatter — asctime 을 UTC 로 출력."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        try:
+            ct = time.gmtime(record.created)
+            fmt = datefmt or self.datefmt
+            if fmt:
+                return time.strftime(fmt, ct)
+            return time.strftime("%Y-%m-%d %H:%M:%S UTC", ct)
+        except Exception as e:
+            logger.error("UtcFormatter.formatTime 실패: %s", e)
+            return "1970-01-01 00:00:00 UTC"
 
 
 def _attach_file_handler(formatter: logging.Formatter) -> None:
@@ -46,7 +62,8 @@ def setup_logging() -> None:
 
         root.setLevel(demon_config.LOG_LEVEL)
 
-        formatter = logging.Formatter(
+        formatter_cls = _UtcFormatter if demon_config.LOG_USE_UTC else logging.Formatter
+        formatter = formatter_cls(
             fmt=demon_config.LOG_FORMAT,
             datefmt=demon_config.LOG_DATEFMT,
         )

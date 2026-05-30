@@ -9,12 +9,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .. import config as demon_config
 from .init_db import init_db as apply_schema
+from ..core.time_utils import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ _ADCS_FILTER_NULLABLE_COLS: frozenset[str] = frozenset({
     "BDOT_X", "BDOT_Y", "BDOT_Z",
     "IMU_WBN_X", "IMU_WBN_Y", "IMU_WBN_Z",
     "IMU_ACC_X", "IMU_ACC_Y", "IMU_ACC_Z",
+    "MAG_BVB_X", "MAG_BVB_Y", "MAG_BVB_Z",
 })
 
 _EVENT_INT_DEFAULTS: dict[str, int] = {
@@ -93,6 +94,9 @@ _ADCS_FILTER_INSERT_COLS: tuple[str, ...] = (
     "IMU_ACC_X",
     "IMU_ACC_Y",
     "IMU_ACC_Z",
+    "MAG_BVB_X",
+    "MAG_BVB_Y",
+    "MAG_BVB_Z",
     "QERR_0",
     "QERR_1",
     "QERR_2",
@@ -123,13 +127,37 @@ _ADCS_FILTER_INSERT_COLS: tuple[str, ...] = (
     "EXECOUNTS",
 )
 
+_ADCS_FILTER_COLS = frozenset(_ADCS_FILTER_INSERT_COLS)
 
-def _utc_now_iso() -> str:
+
+def _coerce_tlm_column_value(col: str, val: Any) -> Any:
+    """SAT_TLM_CURRENT/HISTORY INSERT·UPDATE용 타입 정규화."""
     try:
-        return datetime.now(timezone.utc).isoformat()
+        if col == "LASTVALCRC":
+            return str(val) if val is not None else ""
+        if col in ("SVB_X", "SVB_Y", "SVB_Z", "WBN_X", "WBN_Y", "WBN_Z", "DT", "EXECOUNTS"):
+            return float(val)
+        return int(val)
+    except (TypeError, ValueError) as e:
+        logger.error("TLM 컬럼 변환 실패 col=%s val=%r: %s", col, val, e)
+        if col == "LASTVALCRC":
+            return ""
+        if col in ("SVB_X", "SVB_Y", "SVB_Z", "WBN_X", "WBN_Y", "WBN_Z", "DT", "EXECOUNTS"):
+            return 0.0
+        return 0
+
+
+def _tlm_history_default(col: str) -> Any:
+    """history INSERT 시 tlm_row 에 키가 없을 때 기본값."""
+    try:
+        if col == "LASTVALCRC":
+            return ""
+        if col in ("SVB_X", "SVB_Y", "SVB_Z", "WBN_X", "WBN_Y", "WBN_Z", "DT", "EXECOUNTS"):
+            return 0.0
+        return 0
     except Exception as e:
-        logger.error("UTC 시각 생성 실패: %s", e)
-        return "1970-01-01T00:00:00+00:00"
+        logger.error("TLM history 기본값 실패 col=%s: %s", col, e)
+        return 0
 
 
 def _mapping_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -223,7 +251,7 @@ class DBManager:
         if self._conn is None:
             return
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             for sw_id in range(demon_config.PWR_SW_ID_COUNT):
                 lo = float(demon_config.V_THRESHOLD_LO[sw_id])
                 hi = float(demon_config.V_THRESHOLD_HI[sw_id])
@@ -277,6 +305,22 @@ class DBManager:
             logger.error("filter_tlm_current_fields 실패: %s", e)
             return {}
 
+    @staticmethod
+    def filter_adcs_filter_fields(data: dict[str, Any]) -> dict[str, Any]:
+        """SAT_ADCS_FILTER INSERT 허용 컬럼만 (내부 '_' 키 제외)."""
+        try:
+            out: dict[str, Any] = {}
+            for key, val in data.items():
+                if val is None or str(key).startswith("_"):
+                    continue
+                col = _ADCS_FILTER_KEY_ALIASES.get(str(key), str(key))
+                if col in _ADCS_FILTER_COLS:
+                    out[col] = val
+            return out
+        except Exception as e:
+            logger.error("filter_adcs_filter_fields 실패: %s", e)
+            return {}
+
     def insert_tlm_history(self, tlm: dict[str, Any]) -> bool:
         """SAT_TLM_HISTORY append."""
         try:
@@ -301,7 +345,7 @@ class DBManager:
         Returns: HISTORY_ID (실패 시 -1).
         """
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
                     logger.error("insert_pwr_history_snapshot: DB 미연결")
@@ -335,34 +379,20 @@ class DBManager:
         try:
             if self._conn is None:
                 return
+            data_cols = list(demon_config.TLM_CURRENT_UPDATEABLE_COLS)
+            col_names = ["TLM_ID", "UPDATED_AT"] + data_cols
+            vals: list[Any] = [
+                int(tlm_row.get("TLM_ID", demon_config.SAT_TLM_ID)),
+                str(tlm_row.get("UPDATED_AT", utc_now_iso())),
+            ]
+            for col in data_cols:
+                raw = tlm_row.get(col, _tlm_history_default(col))
+                vals.append(_coerce_tlm_column_value(col, raw))
+            placeholders = ", ".join("?" * len(col_names))
             self._conn.execute(
-                """
-                INSERT INTO SAT_TLM_HISTORY (
-                  TLM_ID, UPDATED_AT, MISSION_MODE, OBC_S_TICK, HEAP_FREE,
-                  APPENABLESTATE, DWELL_MASK, ADCS_MODE,
-                  SVB_X, SVB_Y, SVB_Z, WBN_X, WBN_Y, WBN_Z,
-                  DT, TORQUER_PERIOD, SUN_VALID
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(tlm_row.get("TLM_ID", demon_config.SAT_TLM_ID)),
-                    str(tlm_row.get("UPDATED_AT", _utc_now_iso())),
-                    int(tlm_row.get("MISSION_MODE", 0)),
-                    int(tlm_row.get("OBC_S_TICK", 0)),
-                    int(tlm_row.get("HEAP_FREE", 0)),
-                    int(tlm_row.get("APPENABLESTATE", 0)),
-                    int(tlm_row.get("DWELL_MASK", 0)),
-                    int(tlm_row.get("ADCS_MODE", 0)),
-                    float(tlm_row.get("SVB_X", 0.0)),
-                    float(tlm_row.get("SVB_Y", 0.0)),
-                    float(tlm_row.get("SVB_Z", 0.0)),
-                    float(tlm_row.get("WBN_X", 0.0)),
-                    float(tlm_row.get("WBN_Y", 0.0)),
-                    float(tlm_row.get("WBN_Z", 0.0)),
-                    float(tlm_row.get("DT", 0.0)),
-                    int(tlm_row.get("TORQUER_PERIOD", 0)),
-                    int(tlm_row.get("SUN_VALID", 0)),
-                ),
+                f"INSERT INTO SAT_TLM_HISTORY ({', '.join(col_names)}) "
+                f"VALUES ({placeholders})",
+                vals,
             )
         except sqlite3.Error as e:
             logger.error("SAT_TLM_HISTORY append 실패(SQLite): %s", e)
@@ -430,7 +460,7 @@ class DBManager:
             if not safe:
                 return True
 
-            now = _utc_now_iso()
+            now = utc_now_iso()
             safe["UPDATED_AT"] = now
             cols = ["UPDATED_AT = ?"] + [f"{k} = ?" for k in safe if k != "UPDATED_AT"]
             vals = [safe["UPDATED_AT"]] + [safe[k] for k in safe if k != "UPDATED_AT"]
@@ -519,7 +549,7 @@ class DBManager:
             sw_id = int(pwr_sample["sw_id"])
             voltage = float(pwr_sample["voltage"])
             current_a = float(pwr_sample["current_a"])
-            now = _utc_now_iso()
+            now = utc_now_iso()
 
             with self._lock:
                 if self._conn is None:
@@ -579,7 +609,7 @@ class DBManager:
             exceed_count = int(exceed_info["exceed_count"])
             consecutive = int(exceed_info["consecutive_exceed"])
             anomaly_flag = int(exceed_info["anomaly_flag"])
-            now = _utc_now_iso()
+            now = utc_now_iso()
 
             with self._lock:
                 if self._conn is None:
@@ -739,7 +769,7 @@ class DBManager:
     ) -> bool:
         """SAT_INTEGRITY_HASH INSERT/UPDATE — 기대 해시 등록·갱신."""
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             path_str = str(file_path).strip()
             hash_str = str(expected_hash).strip().lower()
             if not path_str or not hash_str:
@@ -835,7 +865,7 @@ class DBManager:
     def insert_event(self, event: dict[str, Any]) -> int:
         """SAT_EVENT_QUEUE INSERT. 성공 시 event_id, 실패 시 -1."""
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             detected_at = str(event.get("DETECTED_AT", now))
             timestamp = str(event.get("TIMESTAMP", detected_at))
             event_type = str(event.get("EVENT_TYPE", "UNKNOWN"))
@@ -969,7 +999,7 @@ class DBManager:
     def insert_adcs_filter(self, data: dict[str, Any]) -> bool:
         """이상 감지 시점 ADCS 스냅샷 — SAT_ADCS_FILTER INSERT (CHENNEL1 AUTOINCREMENT)."""
         try:
-            ts = str(data.get("TIMESTAMP", _utc_now_iso()))
+            ts = str(data.get("TIMESTAMP", utc_now_iso()))
 
             row: dict[str, Any] = {
                 "TIMESTAMP": ts,
@@ -1048,7 +1078,7 @@ class DBManager:
     def update_threshold(self, sw_id: int, lo: float, hi: float) -> bool:
         """지상국 UPDATE_THRESHOLD — V_THRESHOLD_LO/HI 갱신."""
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
                     logger.error("update_threshold: DB 미연결")
@@ -1171,7 +1201,7 @@ class DBManager:
     def update_integrity_result(self, file_path: str, is_violated: int) -> bool:
         """SAT_INTEGRITY_HASH 무결성 검증 결과 갱신."""
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
                     logger.error("update_integrity_result: DB 미연결")
@@ -1225,7 +1255,7 @@ class DBManager:
     def reset_integrity_violations(self) -> bool:
         """SAT_INTEGRITY_HASH 전체 IS_VIOLATED → 0 (RECOVERY 시 호출)."""
         try:
-            now = _utc_now_iso()
+            now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
                     logger.error("reset_integrity_violations: DB 미연결")
