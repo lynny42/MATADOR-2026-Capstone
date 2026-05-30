@@ -73,6 +73,31 @@ class AttackSimulator:
         except Exception as e:
             logger.error("AttackSimulator.set_serial_reader 실패: %s", e)
 
+    def start_seu_physical(self) -> bool:
+        """
+        SEU(오탐) 시연 — pwr_bias 만 ON.
+
+        attack_mode / hash / gyro / servo / 논리 DB 주입 없음.
+        """
+        try:
+            if self._serial_reader is None:
+                logger.error("SerialReader 미주입 — SEU physical 스킵")
+                return False
+
+            self._set_attack_mode(False)
+            self._set_hash_attack_mode(False)
+
+            if not self._serial_reader.set_pwr_bias(True):
+                logger.error("SEU physical: set_pwr_bias(on) 실패")
+                return False
+
+            self._physical_active = True
+            logger.info('SEU physical sim: {"pwr_bias":"on"} (attack_mode=False)')
+            return True
+        except Exception as e:
+            logger.error("AttackSimulator.start_seu_physical 실패: %s", e)
+            return False
+
     def start(
         self,
         cmd: dict[str, Any] | None = None,

@@ -228,6 +228,26 @@ def _clear_accumulated_tables(db: Any) -> None:
         logger.error("_clear_accumulated_tables 실패: %s", e)
 
 
+def build_natural_fpf_key_overrides(key_set: dict[str, Any] | None = None) -> dict[str, Any]:
+    """FPF N 판정용 key_set 보강 — _snapshots 로 ADCS/TLM 고정, UDP deque 는 제거.
+
+    lab 시나리오(_inject_natural_scenario)와 동일하게 adcs_series 는 비워 두고
+    resolve_adcs() 가 _snapshots 만 쓰게 한다. 동일 프레임 3개를 넣으면
+    check_command_outcome 의 dω/dt=0 이라 physical=1.0 이 된다.
+    """
+    try:
+        adcs = _base_adcs_natural()
+        tlm = _base_tlm_natural()
+        merged = dict(key_set) if isinstance(key_set, dict) else {}
+        merged[fpf_config.KEY_ADCS_SERIES] = []
+        merged[fpf_config.KEY_TLM_SERIES] = []
+        merged[fpf_config.KEY_SNAPSHOTS] = {"adcs": dict(adcs), "tlm": dict(tlm)}
+        return merged
+    except Exception as e:
+        logger.error("build_natural_fpf_key_overrides 실패: %s", e)
+        return dict(key_set) if isinstance(key_set, dict) else {}
+
+
 def inject_natural_adcs_tlm(db: Any) -> bool:
     """
     FPF N(오탐) 시연용 — SAT_TLM_CURRENT·SAT_ADCS_FILTER 에 정상 스냅샷만 DB 반영.

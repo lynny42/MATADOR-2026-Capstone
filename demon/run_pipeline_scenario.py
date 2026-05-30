@@ -53,6 +53,7 @@ from demon.workers.false_positive_filter import (
 from demon.workers.false_positive_filter.fpf_scenario_injector import (
     FpfScenarioInjector,
     SCENARIO_FPF_NATURAL,
+    build_natural_fpf_key_overrides,
     inject_natural_adcs_tlm,
 )
 from demon.workers.gs_comms import GScomms
@@ -179,6 +180,30 @@ class _Harness:
         self._threads: list[threading.Thread] = []
         self.baseline_max_event_id = _max_event_id(self.db_path)
         self._scenario_fpf_seen = False
+        self._fpf_on_anomaly_original: Callable[[dict[str, Any]], None] | None = None
+
+    def install_fpf_natural_patch(self) -> None:
+        """false_positive: FPF 직전 정상 ADCS/TLM 을 DB·key_set 에 고정."""
+        if self._fpf_on_anomaly_original is not None:
+            return
+        original = self.fpf.on_anomaly_detected
+        self._fpf_on_anomaly_original = original
+
+        def _patched(key_set: dict[str, Any]) -> None:
+            try:
+                inject_natural_adcs_tlm(self.db)
+                merged = build_natural_fpf_key_overrides(key_set)
+                self.fpf.physical._prev_state.clear()
+                original(merged)
+            except Exception as e:
+                logger.error("FPF natural patch 실패: %s", e)
+
+        self.fpf.on_anomaly_detected = _patched  # type: ignore[method-assign]
+
+    def restore_fpf_patch(self) -> None:
+        if self._fpf_on_anomaly_original is not None:
+            self.fpf.on_anomaly_detected = self._fpf_on_anomaly_original  # type: ignore[method-assign]
+            self._fpf_on_anomaly_original = None
 
     def _wrap_gs_capture(self) -> dict[str, Any]:
         state: dict[str, Any] = {"last_fpf": None, "bulk_attempts": 0}
@@ -232,6 +257,7 @@ class _Harness:
             self.attack_sim.stop()
         except Exception as e:
             logger.error("attack_sim.stop 실패: %s", e)
+        self.restore_fpf_patch()
         self.shutdown.set()
         for t in self._threads:
             t.join(timeout=5.0)
@@ -568,13 +594,19 @@ def run_false_positive(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
         _print_section(c, 2, "AnomalyDetector → FPF (N 기대)")
         _run_ticks_lab(h, c, count=3, verbose=args.verbose)
     else:
-        _print_section(c, 1, "물리 전력 이상 + DB 정상 ADCS/TLM")
-        print(c.wrap("  Serial(pwr_bias) → 전력 이상 | DB inject_natural_adcs_tlm → FPF N 기대", c.DIM))
+        _print_section(c, 1, "SEU physical — pwr_bias + DB 정상 ADCS/TLM")
+        print(
+            c.wrap(
+                "  attack_mode OFF · gyro/servo OFF · FPF 직전 inject_natural + key_set 스냅샷",
+                c.DIM,
+            ),
+        )
+        h.install_fpf_natural_patch()
         if not inject_natural_adcs_tlm(h.db):
             print("정상 ADCS/TLM DB 주입 실패", file=sys.stderr)
             return 1
-        if not h.attack_sim.start(inject_logical=False):
-            print("물리 공격 시작 실패 (SerialReader 확인)", file=sys.stderr)
+        if not h.attack_sim.start_seu_physical():
+            print("SEU physical 시작 실패 (SerialReader 확인)", file=sys.stderr)
             return 1
 
         def _poll_fp(_i: int) -> None:
