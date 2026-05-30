@@ -46,6 +46,7 @@ _PACKET_EVENT = demon_config.GS_PACKET_TYPE_EVENT
 _PACKET_EVENT_META = demon_config.GS_PACKET_TYPE_EVENT_META
 _PACKET_TLM_HISTORY = demon_config.GS_PACKET_TYPE_TLM_HISTORY
 _PACKET_PWR_HISTORY = demon_config.GS_PACKET_TYPE_PWR_HISTORY
+_PACKET_SNAPSHOT = demon_config.GS_PACKET_TYPE_SNAPSHOT
 _PACKET_ADCS_FILTER = demon_config.GS_PACKET_TYPE_ADCS_FILTER
 _PACKET_INTEGRITY = demon_config.GS_PACKET_TYPE_INTEGRITY
 _PACKET_BULK = demon_config.GS_PACKET_TYPE_BULK
@@ -231,7 +232,8 @@ def _print_event(ev: dict[str, Any]) -> None:
 
 def _print_tlm_record(rec: dict[str, Any], idx: int) -> None:
     print(
-        f"    [{idx}] HISTORY_ID={rec.get('HISTORY_ID')} "
+        f"    [{idx}] SNAPSHOT_ID={rec.get('SNAPSHOT_ID')} "
+        f"HISTORY_ID={rec.get('HISTORY_ID')} "
         f"MODE={rec.get('MISSION_MODE')} ADCS_MODE={rec.get('ADCS_MODE')} "
         f"SUN_VALID={rec.get('SUN_VALID')} @ {rec.get('UPDATED_AT')}"
     )
@@ -241,10 +243,11 @@ def _print_pwr_snapshot(snap: dict[str, Any], idx: int) -> None:
     """SAT_PWR_HISTORY 1스냅샷 = HISTORY_ID + channels[4] (db_manager.get_pwr_history 형식)."""
     try:
         hid = snap.get("HISTORY_ID")
+        sid = snap.get("SNAPSHOT_ID")
         updated = snap.get("UPDATED_AT")
         channels = snap.get("channels")
         if isinstance(channels, list) and channels:
-            print(f"    [{idx}] HISTORY_ID={hid} @ {updated}")
+            print(f"    [{idx}] SNAPSHOT_ID={sid} HISTORY_ID={hid} @ {updated}")
             for ch in channels:
                 if not isinstance(ch, dict):
                     continue
@@ -267,7 +270,8 @@ def _print_pwr_snapshot(snap: dict[str, Any], idx: int) -> None:
 
 def _print_adcs_record(rec: dict[str, Any], idx: int) -> None:
     print(
-        f"    [{idx}] CHENNEL1={rec.get('CHENNEL1')} "
+        f"    [{idx}] SNAPSHOT_ID={rec.get('SNAPSHOT_ID')} "
+        f"CHENNEL1={rec.get('CHENNEL1')} "
         f"QBN_0={rec.get('QBN_0')} ST_VALID={rec.get('ST_VALID')} "
         f"@ {rec.get('TIMESTAMP')}"
     )
@@ -302,6 +306,16 @@ def _print_bulk_section(key: str, section: Any, verbose: bool) -> None:
             print(f"  [무결성 해시] {len(records)}건")
             for i, rec in enumerate(records[:5]):
                 _print_integrity_record(rec, i)
+            return
+
+        if key == _PACKET_SNAPSHOT and isinstance(section, dict):
+            records = _safe_records(section)
+            print(f"  [통합 SNAPSHOT] {len(records)}건")
+            for i, rec in enumerate(records[:10]):
+                print(
+                    f"    [{i}] SNAPSHOT_ID={rec.get('SNAPSHOT_ID')} "
+                    f"@ {rec.get('SNAPSHOT_AT')}"
+                )
             return
 
         if key == _PACKET_ADCS_FILTER and isinstance(section, dict):
@@ -352,6 +366,7 @@ def print_packet_summary(pkt: dict[str, Any], addr: tuple, verbose: bool) -> Non
             for sec_key in (
                 _PACKET_EVENT,
                 _PACKET_INTEGRITY,
+                _PACKET_SNAPSHOT,
                 _PACKET_ADCS_FILTER,
                 _PACKET_TLM_HISTORY,
                 _PACKET_PWR_HISTORY,

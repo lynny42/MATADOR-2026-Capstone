@@ -109,8 +109,6 @@ class AnomalyDetector:
             self._refresh_series_buffers()
             for sw_id in range(demon_config.PWR_SW_ID_COUNT):
                 self._process_channel(sw_id)
-            if self._ctx.db.insert_pwr_history_snapshot() < 0:
-                logger.warning("insert_pwr_history_snapshot 실패")
 
             anomaly = self.detect_power_anomaly()
             if anomaly:
@@ -393,16 +391,20 @@ class AnomalyDetector:
             logger.error("_handle_power_anomaly_first 실패: %s", e)
 
     def _persist_adcs_on_anomaly(self) -> None:
-        """이상 구간 동안 ADCS 스냅샷을 SAT_ADCS_FILTER에 누적."""
+        """이상 구간 동안 ADCS 스냅샷을 SAT_ADCS_FILTER history에 누적."""
         try:
+            snapshot_id = self._ctx.db.get_latest_snapshot_id()
+            if snapshot_id < 0:
+                logger.warning("_persist_adcs_on_anomaly: 유효 SNAPSHOT_ID 없음")
+                return
             if not self._fpf_dispatched:
                 for snap in self._adcs_series:
                     payload = dict(snap)
                     payload.pop("CHENNEL1", None)
                     if payload:
                         payload.setdefault("TIMESTAMP", utc_now_iso())
-                        if not self._ctx.db.insert_adcs_filter(payload):
-                            logger.warning("insert_adcs_filter 실패(시리즈)")
+                        if not self._ctx.db.insert_adcs_filter_history(payload, snapshot_id):
+                            logger.warning("insert_adcs_filter_history 실패(시리즈)")
             if self._adcs_series:
                 payload = dict(self._adcs_series[-1])
             else:
@@ -412,8 +414,8 @@ class AnomalyDetector:
                 return
             payload.setdefault("TIMESTAMP", utc_now_iso())
             payload.pop("CHENNEL1", None)
-            if not self._ctx.db.insert_adcs_filter(payload):
-                logger.warning("insert_adcs_filter 실패")
+            if not self._ctx.db.insert_adcs_filter_history(payload, snapshot_id):
+                logger.warning("insert_adcs_filter_history 실패")
         except Exception as e:
             logger.error("_persist_adcs_on_anomaly 실패: %s", e)
 

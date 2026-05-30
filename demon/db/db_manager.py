@@ -128,6 +128,76 @@ _ADCS_FILTER_INSERT_COLS: tuple[str, ...] = (
     "EXECOUNTS",
 )
 
+
+def _build_adcs_filter_row(data: dict[str, Any]) -> dict[str, Any]:
+    """SAT_ADCS_FILTER INSERT용 행 dict (CHENNEL1·SNAPSHOT_ID 제외)."""
+    try:
+        ts = str(data.get("TIMESTAMP", utc_now_iso()))
+        row: dict[str, Any] = {
+            "TIMESTAMP": ts,
+            "CMDCOUNTER": 0,
+            "Q_VALID": 0,
+            "H_MGMTON": 0,
+            "SUN_VALID": 0,
+            "DEVICE_ENABLED_RW0": 0,
+            "DEVICE_ENABLED_RW1": 0,
+            "DEVICE_ENABLED_RW2": 0,
+            "QERR_0": 0.0,
+            "QERR_1": 0.0,
+            "QERR_2": 0.0,
+            "QERR_3": 0.0,
+            "TCMD_X": 0.0,
+            "TCMD_Y": 0.0,
+            "TCMD_Z": 0.0,
+            "MCMD_X": 0.0,
+            "MCMD_Y": 0.0,
+            "MCMD_Z": 0.0,
+            "WERR_X": 0.0,
+            "WERR_Y": 0.0,
+            "WERR_Z": 0.0,
+            "MOMENTUM_NMS_0": 0.0,
+            "MOMENTUM_NMS_1": 0.0,
+            "MOMENTUM_NMS_2": 0.0,
+            "ST_VALID": 0,
+            "COMBINEDPACKETSSENT": 0,
+            "ERLOGENTRIES": 0,
+            "SKIPPEDSLOTSCOUNT": 0,
+            "LASTVALCRC": "",
+            "ENABLEDROUTES": 0,
+            "FORWARD_ERR_COUNT": 0,
+            "APPCSERRCOUNTER": 0,
+            "OSCSERRCOUNTER": 0,
+            "SYSLOGENTRIES": 0,
+            "RESETSPERFORMED": 0,
+            "EXECOUNTS": 0.0,
+        }
+        for src_key, val in data.items():
+            if val is None:
+                continue
+            if src_key in ("CHENNEL1", demon_config.SNAPSHOT_ID_COL):
+                continue
+            col = _ADCS_FILTER_KEY_ALIASES.get(src_key, src_key)
+            if col in row or col in _ADCS_FILTER_NULLABLE_COLS:
+                row[col] = val
+        for col in _ADCS_FILTER_NULLABLE_COLS:
+            if col not in row:
+                row[col] = None
+        return row
+    except Exception as e:
+        logger.error("_build_adcs_filter_row 실패: %s", e)
+        return {"TIMESTAMP": utc_now_iso(), "CMDCOUNTER": 0, "Q_VALID": 0, "H_MGMTON": 0,
+                "SUN_VALID": 0, "DEVICE_ENABLED_RW0": 0, "DEVICE_ENABLED_RW1": 0,
+                "DEVICE_ENABLED_RW2": 0, "QERR_0": 0.0, "QERR_1": 0.0, "QERR_2": 0.0,
+                "QERR_3": 0.0, "TCMD_X": 0.0, "TCMD_Y": 0.0, "TCMD_Z": 0.0,
+                "MCMD_X": 0.0, "MCMD_Y": 0.0, "MCMD_Z": 0.0, "WERR_X": 0.0,
+                "WERR_Y": 0.0, "WERR_Z": 0.0, "MOMENTUM_NMS_0": 0.0,
+                "MOMENTUM_NMS_1": 0.0, "MOMENTUM_NMS_2": 0.0, "ST_VALID": 0,
+                "COMBINEDPACKETSSENT": 0, "ERLOGENTRIES": 0, "SKIPPEDSLOTSCOUNT": 0,
+                "LASTVALCRC": "", "ENABLEDROUTES": 0, "FORWARD_ERR_COUNT": 0,
+                "APPCSERRCOUNTER": 0, "OSCSERRCOUNTER": 0, "SYSLOGENTRIES": 0,
+                "RESETSPERFORMED": 0, "EXECOUNTS": 0.0}
+
+
 _ADCS_FILTER_COLS = frozenset(_ADCS_FILTER_INSERT_COLS)
 
 
@@ -360,8 +430,8 @@ class DBManager:
             logger.error("filter_adcs_filter_fields 실패: %s", e)
             return {}
 
-    def insert_tlm_history(self, tlm: dict[str, Any]) -> bool:
-        """SAT_TLM_HISTORY append."""
+    def insert_tlm_history(self, tlm: dict[str, Any], snapshot_id: int | None = None) -> bool:
+        """SAT_TLM_HISTORY append (통합 SNAPSHOT_ID 선택)."""
         try:
             if self._accumulation_write_blocked():
                 return True
@@ -369,7 +439,7 @@ class DBManager:
                 if self._conn is None:
                     logger.error("insert_tlm_history: DB 미연결")
                     return False
-                self._insert_tlm_history_locked(tlm)
+                self._insert_tlm_history_locked(tlm, snapshot_id)
                 self._conn.commit()
             return True
         except sqlite3.Error as e:
@@ -379,11 +449,34 @@ class DBManager:
             logger.error("insert_tlm_history 실패: %s", e)
             return False
 
-    def insert_pwr_history_snapshot(self) -> int:
-        """
-        SAT_PWR_META 4채널을 한 스냅샷(HISTORY_ID)으로 SAT_PWR_HISTORY에 append.
+    def get_latest_snapshot_id(self) -> int:
+        """SAT_SNAPSHOT 최신 SNAPSHOT_ID. 없거나 실패 시 -1."""
+        try:
+            with self._lock:
+                if self._conn is None:
+                    logger.error("get_latest_snapshot_id: DB 미연결")
+                    return -1
+                row = self._conn.execute(
+                    "SELECT MAX(SNAPSHOT_ID) FROM SAT_SNAPSHOT",
+                ).fetchone()
+            if row is None or row[0] is None:
+                return -1
+            return int(row[0])
+        except (ValueError, TypeError) as e:
+            logger.error("get_latest_snapshot_id 변환 오류: %s", e)
+            return -1
+        except sqlite3.Error as e:
+            logger.error("get_latest_snapshot_id 실패(SQLite): %s", e)
+            return -1
+        except Exception as e:
+            logger.error("get_latest_snapshot_id 실패: %s", e)
+            return -1
 
-        Returns: HISTORY_ID (실패 시 -1).
+    def insert_unified_snapshot(self) -> int:
+        """
+        SAT_SNAPSHOT 1건 + PWR/TLM/ADCS history 를 동일 SNAPSHOT_ID 로 append.
+
+        UDP DO flush 직후 호출 (TLM 한 사이클 = 1 SNAPSHOT). Returns: SNAPSHOT_ID (실패 시 -1).
         """
         try:
             if self._accumulation_write_blocked():
@@ -391,43 +484,78 @@ class DBManager:
             now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
-                    logger.error("insert_pwr_history_snapshot: DB 미연결")
+                    logger.error("insert_unified_snapshot: DB 미연결")
                     return -1
                 cur = self._conn.execute(
-                    "INSERT INTO SAT_PWR_HISTORY (UPDATED_AT) VALUES (?)",
+                    "INSERT INTO SAT_SNAPSHOT (SNAPSHOT_AT) VALUES (?)",
                     (now,),
                 )
-                history_id = int(cur.lastrowid)
+                snapshot_id = int(cur.lastrowid)
+                pwr_cur = self._conn.execute(
+                    "INSERT INTO SAT_PWR_HISTORY (UPDATED_AT, SNAPSHOT_ID) VALUES (?, ?)",
+                    (now, snapshot_id),
+                )
+                pwr_history_id = int(pwr_cur.lastrowid)
                 for sw_id in range(demon_config.PWR_SW_ID_COUNT):
                     meta = self._get_pwr_meta_locked(sw_id)
-                    if meta is None:
-                        continue
-                    self._insert_pwr_history_channel_locked(history_id, meta)
+                    if meta is not None:
+                        self._insert_pwr_history_channel_locked(pwr_history_id, meta)
+                tlm_row = self._conn.execute(
+                    "SELECT * FROM SAT_TLM_CURRENT WHERE TLM_ID = ?",
+                    (demon_config.SAT_TLM_ID,),
+                ).fetchone()
+                if tlm_row is not None:
+                    self._insert_tlm_history_locked(
+                        _row_to_dict(tlm_row),
+                        snapshot_id,
+                    )
+                adcs_row = self._conn.execute(
+                    "SELECT * FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IS NULL "
+                    "ORDER BY CHENNEL1 DESC LIMIT 1",
+                ).fetchone()
+                if adcs_row is not None:
+                    self._insert_adcs_history_locked(
+                        _row_to_dict(adcs_row),
+                        snapshot_id,
+                        now,
+                    )
                 self._conn.commit()
-            return history_id
+            return snapshot_id
         except sqlite3.Error as e:
-            logger.error("insert_pwr_history_snapshot 실패(SQLite): %s", e)
+            logger.error("insert_unified_snapshot 실패(SQLite): %s", e)
             return -1
         except Exception as e:
-            logger.error("insert_pwr_history_snapshot 실패: %s", e)
+            logger.error("insert_unified_snapshot 실패: %s", e)
             return -1
+
+    def insert_pwr_history_snapshot(self) -> int:
+        """하위 호환 — insert_unified_snapshot() 래퍼. Returns: SNAPSHOT_ID."""
+        return self.insert_unified_snapshot()
 
     def insert_pwr_history(self, pwr: dict[str, Any]) -> bool:
         """하위 호환 — 단일 채널 dict 대신 insert_pwr_history_snapshot() 사용 권장."""
         del pwr
         return self.insert_pwr_history_snapshot() >= 0
 
-    def _insert_tlm_history_locked(self, tlm_row: dict[str, Any]) -> None:
+    def _insert_tlm_history_locked(
+        self,
+        tlm_row: dict[str, Any],
+        snapshot_id: int | None = None,
+    ) -> None:
         """현재 TLM 스냅샷을 SAT_TLM_HISTORY 에 append (lock 보유 상태에서 호출)."""
         try:
             if self._conn is None:
                 return
             data_cols = list(demon_config.TLM_CURRENT_UPDATEABLE_COLS)
-            col_names = ["TLM_ID", "UPDATED_AT"] + data_cols
+            col_names = ["TLM_ID", "UPDATED_AT"]
             vals: list[Any] = [
                 int(tlm_row.get("TLM_ID", demon_config.SAT_TLM_ID)),
                 str(tlm_row.get("UPDATED_AT", utc_now_iso())),
             ]
+            if snapshot_id is not None:
+                col_names.append(demon_config.SNAPSHOT_ID_COL)
+                vals.append(int(snapshot_id))
+            col_names.extend(data_cols)
             for col in data_cols:
                 raw = tlm_row.get(col, _tlm_history_default(col))
                 vals.append(_coerce_tlm_column_value(col, raw))
@@ -441,6 +569,37 @@ class DBManager:
             logger.error("SAT_TLM_HISTORY append 실패(SQLite): %s", e)
         except Exception as e:
             logger.error("SAT_TLM_HISTORY append 실패: %s", e)
+
+    def _insert_adcs_history_locked(
+        self,
+        adcs_row: dict[str, Any],
+        snapshot_id: int,
+        timestamp: str | None = None,
+    ) -> None:
+        """SAT_ADCS_FILTER history 행 append (SNAPSHOT_ID 지정, lock 보유)."""
+        try:
+            if self._conn is None:
+                return
+            payload = dict(adcs_row)
+            payload.pop("CHENNEL1", None)
+            payload.pop(demon_config.SNAPSHOT_ID_COL, None)
+            if timestamp is not None:
+                payload["TIMESTAMP"] = timestamp
+            built = _build_adcs_filter_row(payload)
+            col_names = [c for c in _ADCS_FILTER_INSERT_COLS if c in built]
+            col_names.append(demon_config.SNAPSHOT_ID_COL)
+            placeholders = ", ".join("?" * len(col_names))
+            vals = [built[c] for c in col_names if c != demon_config.SNAPSHOT_ID_COL]
+            vals.append(int(snapshot_id))
+            self._conn.execute(
+                f"INSERT INTO SAT_ADCS_FILTER ({', '.join(col_names)}) "
+                f"VALUES ({placeholders})",
+                vals,
+            )
+        except sqlite3.Error as e:
+            logger.error("_insert_adcs_history_locked 실패(SQLite): %s", e)
+        except Exception as e:
+            logger.error("_insert_adcs_history_locked 실패: %s", e)
 
     def _get_pwr_meta_locked(self, sw_id: int) -> dict[str, Any] | None:
         """lock 보유 상태에서 SAT_PWR_META 1행 조회."""
@@ -732,7 +891,7 @@ class DBManager:
         return self.get_pwr_meta_all()
 
     def get_adcs_filter(self, channel1: int | None = None) -> dict[str, Any] | None:
-        """SAT_ADCS_FILTER 최신 1행 (CHENNEL1 DESC). channel1 인자는 하위 호환용 무시."""
+        """SAT_ADCS_FILTER live 1행 (SNAPSHOT_ID IS NULL). channel1 인자는 하위 호환용 무시."""
         del channel1
         try:
             with self._lock:
@@ -740,7 +899,8 @@ class DBManager:
                     logger.error("get_adcs_filter: DB 미연결")
                     return None
                 cur = self._conn.execute(
-                    "SELECT * FROM SAT_ADCS_FILTER ORDER BY CHENNEL1 DESC LIMIT 1",
+                    "SELECT * FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IS NULL "
+                    "ORDER BY CHENNEL1 DESC LIMIT 1",
                 )
                 return _row_to_dict_or_none(cur.fetchone())
         except (ValueError, TypeError) as e:
@@ -1045,86 +1205,58 @@ class DBManager:
             logger.error("delete_event 실패: %s", e)
             return False
 
-    def insert_adcs_filter(self, data: dict[str, Any]) -> bool:
-        """이상 감지 시점 ADCS 스냅샷 — SAT_ADCS_FILTER INSERT (CHENNEL1 AUTOINCREMENT)."""
+    def upsert_adcs_current(self, data: dict[str, Any]) -> bool:
+        """SAT_ADCS_FILTER live 1행 갱신 (SNAPSHOT_ID IS NULL, UDP flush용)."""
         try:
             if self._accumulation_write_blocked():
                 return True
-            ts = str(data.get("TIMESTAMP", utc_now_iso()))
-
-            row: dict[str, Any] = {
-                "TIMESTAMP": ts,
-                "CMDCOUNTER": 0,
-                "Q_VALID": 0,
-                "H_MGMTON": 0,
-                "SUN_VALID": 0,
-                "DEVICE_ENABLED_RW0": 0,
-                "DEVICE_ENABLED_RW1": 0,
-                "DEVICE_ENABLED_RW2": 0,
-                "QERR_0": 0.0,
-                "QERR_1": 0.0,
-                "QERR_2": 0.0,
-                "QERR_3": 0.0,
-                "TCMD_X": 0.0,
-                "TCMD_Y": 0.0,
-                "TCMD_Z": 0.0,
-                "MCMD_X": 0.0,
-                "MCMD_Y": 0.0,
-                "MCMD_Z": 0.0,
-                "WERR_X": 0.0,
-                "WERR_Y": 0.0,
-                "WERR_Z": 0.0,
-                "MOMENTUM_NMS_0": 0.0,
-                "MOMENTUM_NMS_1": 0.0,
-                "MOMENTUM_NMS_2": 0.0,
-                "ST_VALID": 0,
-                "COMBINEDPACKETSSENT": 0,
-                "ERLOGENTRIES": 0,
-                "SKIPPEDSLOTSCOUNT": 0,
-                "LASTVALCRC": "",
-                "ENABLEDROUTES": 0,
-                "FORWARD_ERR_COUNT": 0,
-                "APPCSERRCOUNTER": 0,
-                "OSCSERRCOUNTER": 0,
-                "SYSLOGENTRIES": 0,
-                "RESETSPERFORMED": 0,
-                "EXECOUNTS": 0.0,
-            }
-
-            for src_key, val in data.items():
-                if val is None:
-                    continue
-                if src_key == "CHENNEL1":
-                    continue
-                col = _ADCS_FILTER_KEY_ALIASES.get(src_key, src_key)
-                if col in row or col in _ADCS_FILTER_NULLABLE_COLS:
-                    row[col] = val
-
-            for col in _ADCS_FILTER_NULLABLE_COLS:
-                if col not in row:
-                    row[col] = None
-
-            col_names = [c for c in _ADCS_FILTER_INSERT_COLS if c in row]
+            built = _build_adcs_filter_row(data)
+            col_names = [c for c in _ADCS_FILTER_INSERT_COLS if c in built]
             placeholders = ", ".join("?" * len(col_names))
-            sql = (
-                f"INSERT INTO SAT_ADCS_FILTER ({', '.join(col_names)}) "
-                f"VALUES ({placeholders})"
-            )
-            vals = [row[c] for c in col_names]
-
+            vals = [built[c] for c in col_names]
             with self._lock:
                 if self._conn is None:
-                    logger.error("insert_adcs_filter: DB 미연결")
+                    logger.error("upsert_adcs_current: DB 미연결")
                     return False
-                self._conn.execute(sql, vals)
+                self._conn.execute(
+                    "DELETE FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IS NULL",
+                )
+                self._conn.execute(
+                    f"INSERT INTO SAT_ADCS_FILTER ({', '.join(col_names)}) "
+                    f"VALUES ({placeholders})",
+                    vals,
+                )
                 self._conn.commit()
             return True
         except sqlite3.Error as e:
-            logger.error("insert_adcs_filter 실패(SQLite): %s", e)
+            logger.error("upsert_adcs_current 실패(SQLite): %s", e)
             return False
         except Exception as e:
-            logger.error("insert_adcs_filter 실패: %s", e)
+            logger.error("upsert_adcs_current 실패: %s", e)
             return False
+
+    def insert_adcs_filter_history(self, data: dict[str, Any], snapshot_id: int) -> bool:
+        """SAT_ADCS_FILTER history append (이상 구간·통합 SNAPSHOT_ID)."""
+        try:
+            if self._accumulation_write_blocked():
+                return True
+            with self._lock:
+                if self._conn is None:
+                    logger.error("insert_adcs_filter_history: DB 미연결")
+                    return False
+                self._insert_adcs_history_locked(data, int(snapshot_id))
+                self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("insert_adcs_filter_history 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("insert_adcs_filter_history 실패: %s", e)
+            return False
+
+    def insert_adcs_filter(self, data: dict[str, Any]) -> bool:
+        """하위 호환 — live ADCS 갱신 (upsert_adcs_current)."""
+        return self.upsert_adcs_current(data)
 
     def update_threshold(self, sw_id: int, lo: float, hi: float) -> bool:
         """지상국 UPDATE_THRESHOLD — V_THRESHOLD_LO/HI 갱신."""
@@ -1161,7 +1293,8 @@ class DBManager:
                     logger.error("get_tlm_history: DB 미연결")
                     return []
                 cur = self._conn.execute(
-                    "SELECT * FROM SAT_TLM_HISTORY ORDER BY HISTORY_ID ASC",
+                    "SELECT * FROM SAT_TLM_HISTORY WHERE SNAPSHOT_ID IS NOT NULL "
+                    "ORDER BY HISTORY_ID ASC",
                 )
                 return [_row_to_dict(r) for r in cur.fetchall()]
         except sqlite3.Error as e:
@@ -1183,7 +1316,9 @@ class DBManager:
                     logger.error("get_pwr_history: DB 미연결")
                     return []
                 header_cur = self._conn.execute(
-                    "SELECT HISTORY_ID, UPDATED_AT FROM SAT_PWR_HISTORY ORDER BY HISTORY_ID ASC",
+                    "SELECT HISTORY_ID, SNAPSHOT_ID, UPDATED_AT "
+                    "FROM SAT_PWR_HISTORY WHERE SNAPSHOT_ID IS NOT NULL "
+                    "ORDER BY HISTORY_ID ASC",
                 )
                 snapshots: list[dict[str, Any]] = []
                 for header in header_cur.fetchall():
@@ -1203,6 +1338,7 @@ class DBManager:
                     channels = [_row_to_dict(r) for r in ch_cur.fetchall()]
                     snapshots.append({
                         "HISTORY_ID": hid,
+                        "SNAPSHOT_ID": header["SNAPSHOT_ID"],
                         "UPDATED_AT": str(header["UPDATED_AT"]),
                         "channels": channels,
                     })
@@ -1215,14 +1351,15 @@ class DBManager:
             return []
 
     def get_adcs_filter_all(self) -> list[dict[str, Any]]:
-        """SAT_ADCS_FILTER 전체 — CHENNEL1 순. 실패 시 []."""
+        """SAT_ADCS_FILTER history — SNAPSHOT_ID IS NOT NULL, SNAPSHOT_ID·CHENNEL1 순."""
         try:
             with self._lock:
                 if self._conn is None:
                     logger.error("get_adcs_filter_all: DB 미연결")
                     return []
                 cur = self._conn.execute(
-                    "SELECT * FROM SAT_ADCS_FILTER ORDER BY CHENNEL1 ASC",
+                    "SELECT * FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IS NOT NULL "
+                    "ORDER BY SNAPSHOT_ID ASC, CHENNEL1 ASC",
                 )
                 return [_row_to_dict(r) for r in cur.fetchall()]
         except sqlite3.Error as e:
@@ -1232,14 +1369,44 @@ class DBManager:
             logger.error("get_adcs_filter_all 실패: %s", e)
             return []
 
+    def get_snapshots_by_ids(self, snapshot_ids: list[int]) -> list[dict[str, Any]]:
+        """SAT_SNAPSHOT 헤더 조회 — SNAPSHOT_ID 순."""
+        try:
+            if not snapshot_ids:
+                return []
+            ids = [int(v) for v in snapshot_ids]
+            placeholders = ", ".join("?" for _ in ids)
+            with self._lock:
+                if self._conn is None:
+                    logger.error("get_snapshots_by_ids: DB 미연결")
+                    return []
+                cur = self._conn.execute(
+                    f"SELECT SNAPSHOT_ID, SNAPSHOT_AT FROM SAT_SNAPSHOT "
+                    f"WHERE SNAPSHOT_ID IN ({placeholders}) "
+                    f"ORDER BY SNAPSHOT_ID ASC",
+                    ids,
+                )
+                return [_row_to_dict(r) for r in cur.fetchall()]
+        except (ValueError, TypeError) as e:
+            logger.error("get_snapshots_by_ids 변환 오류: %s", e)
+            return []
+        except sqlite3.Error as e:
+            logger.error("get_snapshots_by_ids 실패(SQLite): %s", e)
+            return []
+        except Exception as e:
+            logger.error("get_snapshots_by_ids 실패: %s", e)
+            return []
+
     def delete_adcs_filter(self) -> bool:
-        """SAT_ADCS_FILTER 전체 삭제 (ACK 후)."""
+        """SAT_ADCS_FILTER history 삭제 (ACK 후, live 행 유지)."""
         try:
             with self._lock:
                 if self._conn is None:
                     logger.error("delete_adcs_filter: DB 미연결")
                     return False
-                self._conn.execute("DELETE FROM SAT_ADCS_FILTER")
+                self._conn.execute(
+                    "DELETE FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IS NOT NULL",
+                )
                 self._conn.commit()
             return True
         except sqlite3.Error as e:
@@ -1247,6 +1414,57 @@ class DBManager:
             return False
         except Exception as e:
             logger.error("delete_adcs_filter 실패: %s", e)
+            return False
+
+    def delete_snapshots_by_ids(self, snapshot_ids: list[int]) -> bool:
+        """SAT_SNAPSHOT 및 연결된 PWR/TLM/ADCS history 일괄 삭제."""
+        try:
+            if not snapshot_ids:
+                return True
+            ids = [int(v) for v in snapshot_ids]
+            placeholders = ", ".join("?" for _ in ids)
+            with self._lock:
+                if self._conn is None:
+                    logger.error("delete_snapshots_by_ids: DB 미연결")
+                    return False
+                pwr_rows = self._conn.execute(
+                    f"SELECT HISTORY_ID FROM SAT_PWR_HISTORY "
+                    f"WHERE SNAPSHOT_ID IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                pwr_hids = [int(r[0]) for r in pwr_rows]
+                if pwr_hids:
+                    ph = ", ".join("?" for _ in pwr_hids)
+                    self._conn.execute(
+                        f"DELETE FROM SAT_PWR_HISTORY_CHANNEL WHERE HISTORY_ID IN ({ph})",
+                        pwr_hids,
+                    )
+                self._conn.execute(
+                    f"DELETE FROM SAT_PWR_HISTORY WHERE SNAPSHOT_ID IN ({placeholders})",
+                    ids,
+                )
+                self._conn.execute(
+                    f"DELETE FROM SAT_TLM_HISTORY WHERE SNAPSHOT_ID IN ({placeholders})",
+                    ids,
+                )
+                self._conn.execute(
+                    f"DELETE FROM SAT_ADCS_FILTER WHERE SNAPSHOT_ID IN ({placeholders})",
+                    ids,
+                )
+                self._conn.execute(
+                    f"DELETE FROM SAT_SNAPSHOT WHERE SNAPSHOT_ID IN ({placeholders})",
+                    ids,
+                )
+                self._conn.commit()
+            return True
+        except (ValueError, TypeError) as e:
+            logger.error("delete_snapshots_by_ids 변환 오류: %s", e)
+            return False
+        except sqlite3.Error as e:
+            logger.error("delete_snapshots_by_ids 실패(SQLite): %s", e)
+            return False
+        except Exception as e:
+            logger.error("delete_snapshots_by_ids 실패: %s", e)
             return False
 
     def update_integrity_result(self, file_path: str, is_violated: int) -> bool:
@@ -1323,6 +1541,27 @@ class DBManager:
         except Exception as e:
             logger.error("reset_integrity_violations 실패: %s", e)
             return False
+
+    @staticmethod
+    def snapshot_ids_from_records(records: list[dict[str, Any]]) -> list[int]:
+        """history 행 dict 목록에서 SNAPSHOT_ID 추출 (중복 제거·오름차순)."""
+        try:
+            ids: set[int] = set()
+            col = demon_config.SNAPSHOT_ID_COL
+            for row in records:
+                if not isinstance(row, dict):
+                    continue
+                raw = row.get(col)
+                if raw is None:
+                    continue
+                ids.add(int(raw))
+            return sorted(ids)
+        except (ValueError, TypeError) as e:
+            logger.error("snapshot_ids_from_records 변환 오류: %s", e)
+            return []
+        except Exception as e:
+            logger.error("snapshot_ids_from_records 실패: %s", e)
+            return []
 
     @staticmethod
     def history_ids_from_records(records: list[dict[str, Any]]) -> list[int]:

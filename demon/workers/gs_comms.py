@@ -234,6 +234,7 @@ class GScomms:
         try:
             cleanup: dict[str, Any] = {
                 "event_ids": [],
+                "snapshot_ids": [],
                 "tlm_history_ids": [],
                 "pwr_history_ids": [],
                 "delete_adcs": False,
@@ -309,6 +310,23 @@ class GScomms:
                 )
                 has_any = True
 
+            snapshot_ids = sorted(
+                set(
+                    self._ctx.db.snapshot_ids_from_records(pwr_records or [])
+                    + self._ctx.db.snapshot_ids_from_records(tlm_records or [])
+                    + self._ctx.db.snapshot_ids_from_records(adcs_records or []),
+                ),
+            )
+            if snapshot_ids:
+                headers = self._ctx.db.get_snapshots_by_ids(snapshot_ids)
+                if headers:
+                    payload[demon_config.GS_PACKET_TYPE_SNAPSHOT] = {
+                        "records": [
+                            normalize_record_timestamps(rec) for rec in headers
+                        ],
+                    }
+                cleanup["snapshot_ids"] = snapshot_ids
+
             if not has_any:
                 return None, cleanup
             return payload, cleanup
@@ -316,6 +334,7 @@ class GScomms:
             logger.error("_build_bulk_transmit 실패: %s", e)
             return None, {
                 "event_ids": [],
+                "snapshot_ids": [],
                 "tlm_history_ids": [],
                 "pwr_history_ids": [],
                 "delete_adcs": False,
@@ -333,17 +352,22 @@ class GScomms:
                 if not self._ctx.db.delete_event(event_id):
                     logger.warning("delete_event 실패 event_id=%s", event_id)
 
-            if cleanup.get("delete_adcs"):
-                if not self._ctx.db.delete_adcs_filter():
-                    logger.warning("delete_adcs_filter 실패")
+            snapshot_ids = cleanup.get("snapshot_ids") or []
+            if snapshot_ids:
+                if not self._ctx.db.delete_snapshots_by_ids(snapshot_ids):
+                    logger.warning("delete_snapshots_by_ids 실패 ids=%s", snapshot_ids)
+            else:
+                if cleanup.get("delete_adcs"):
+                    if not self._ctx.db.delete_adcs_filter():
+                        logger.warning("delete_adcs_filter 실패")
 
-            tlm_ids = cleanup.get("tlm_history_ids") or []
-            if tlm_ids and not self._ctx.db.delete_tlm_history(tlm_ids):
-                logger.warning("delete_tlm_history 실패 ids=%s", tlm_ids)
+                tlm_ids = cleanup.get("tlm_history_ids") or []
+                if tlm_ids and not self._ctx.db.delete_tlm_history(tlm_ids):
+                    logger.warning("delete_tlm_history 실패 ids=%s", tlm_ids)
 
-            pwr_ids = cleanup.get("pwr_history_ids") or []
-            if pwr_ids and not self._ctx.db.delete_pwr_history(pwr_ids):
-                logger.warning("delete_pwr_history 실패 ids=%s", pwr_ids)
+                pwr_ids = cleanup.get("pwr_history_ids") or []
+                if pwr_ids and not self._ctx.db.delete_pwr_history(pwr_ids):
+                    logger.warning("delete_pwr_history 실패 ids=%s", pwr_ids)
 
             logger.info("SAT_BULK_TELEMETRY ACK 처리 완료")
         except Exception as e:

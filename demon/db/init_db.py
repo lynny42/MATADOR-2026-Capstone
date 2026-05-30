@@ -113,6 +113,7 @@ DDL_STATEMENTS: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS SAT_TLM_HISTORY (
       HISTORY_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      SNAPSHOT_ID INTEGER,
       TLM_ID INTEGER NOT NULL,
       UPDATED_AT TEXT NOT NULL,
       MISSION_MODE INTEGER NOT NULL,
@@ -136,6 +137,13 @@ DDL_STATEMENTS: list[str] = [
     CREATE INDEX IF NOT EXISTS IDX_TLM_HISTORY_UPDATED_AT
     ON SAT_TLM_HISTORY(UPDATED_AT)
     """,
+    # SAT_SNAPSHOT — PWR/TLM/ADCS history 공통 상관 ID (UDP DO flush 기준)
+    """
+    CREATE TABLE IF NOT EXISTS SAT_SNAPSHOT (
+      SNAPSHOT_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      SNAPSHOT_AT TEXT NOT NULL
+    )
+    """,
     # SAT_PWR_META — 스위치별 전력 이상
     """
     CREATE TABLE IF NOT EXISTS SAT_PWR_META (
@@ -157,6 +165,7 @@ DDL_STATEMENTS: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS SAT_PWR_HISTORY (
       HISTORY_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      SNAPSHOT_ID INTEGER,
       UPDATED_AT TEXT NOT NULL
     )
     """,
@@ -220,6 +229,7 @@ DDL_STATEMENTS: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS SAT_ADCS_FILTER (
       CHENNEL1 INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      SNAPSHOT_ID INTEGER,
       TIMESTAMP TEXT NOT NULL,
       CMDCOUNTER INTEGER NOT NULL,
       QBN_0 REAL,
@@ -509,6 +519,56 @@ def _migrate_integrity_hash_column(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_unified_snapshot_schema(conn: sqlite3.Connection) -> None:
+    """SAT_SNAPSHOT 테이블 및 history 테이블 SNAPSHOT_ID 컬럼 추가 (기존 DB 호환)."""
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS SAT_SNAPSHOT (
+              SNAPSHOT_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              SNAPSHOT_AT TEXT NOT NULL
+            )
+            """,
+        )
+        for table in ("SAT_PWR_HISTORY", "SAT_TLM_HISTORY", "SAT_ADCS_FILTER"):
+            if not _table_has_column(conn, table, "SNAPSHOT_ID"):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN SNAPSHOT_ID INTEGER")
+                logger.info("%s: SNAPSHOT_ID 컬럼 추가", table)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS IDX_PWR_HISTORY_SNAPSHOT_ID "
+            "ON SAT_PWR_HISTORY(SNAPSHOT_ID)",
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS IDX_TLM_HISTORY_SNAPSHOT_ID "
+            "ON SAT_TLM_HISTORY(SNAPSHOT_ID)",
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS IDX_ADCS_FILTER_SNAPSHOT_ID "
+            "ON SAT_ADCS_FILTER(SNAPSHOT_ID)",
+        )
+        # 구 ADCS 누적 행: 최신 1행만 current(NULL), 나머지는 CHENNEL1을 SNAPSHOT_ID로 이관
+        if _table_has_column(conn, "SAT_ADCS_FILTER", "SNAPSHOT_ID"):
+            row = conn.execute(
+                "SELECT MAX(CHENNEL1) AS mx FROM SAT_ADCS_FILTER",
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                max_ch = int(row[0])
+                conn.execute(
+                    """
+                    UPDATE SAT_ADCS_FILTER
+                    SET SNAPSHOT_ID = CHENNEL1
+                    WHERE SNAPSHOT_ID IS NULL AND CHENNEL1 < ?
+                    """,
+                    (max_ch,),
+                )
+    except sqlite3.Error as e:
+        logger.error("통합 SNAPSHOT 스키마 마이그레이션 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("통합 SNAPSHOT 스키마 마이그레이션 실패: %s", e)
+        raise
+
+
 def init_db(db_path: Path) -> None:
     conn: sqlite3.Connection | None = None
     try:
@@ -526,6 +586,7 @@ def init_db(db_path: Path) -> None:
         _migrate_adcs_filter_autoincrement(conn)
         _migrate_tlm_cfs_hk_columns(conn)
         _migrate_adcs_filter_mag_columns(conn)
+        _migrate_unified_snapshot_schema(conn)
         _seed_sat_tlm_current(conn)
         conn.commit()
     except sqlite3.Error as e:

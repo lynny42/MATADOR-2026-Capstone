@@ -122,12 +122,17 @@ def test_db_manager_api(tmp_db: Path) -> None:
 
 
 def test_do_flush_pending(tmp_db: Path) -> None:
-    """GNC 필드 merge 후 DO MID 에서만 DB flush 되는지."""
+    """GNC 필드 merge 후 DO MID 에서만 DB flush + 통합 SNAPSHOT 적재."""
     db = DBManager(tmp_db)
     db.init_db()
     shutdown = threading.Event()
     ctx = RuntimeContext(config=DaemonConfig(db_path=tmp_db), shutdown_event=shutdown, db=db)
     rx = UDPReceiver(ctx)
+
+    if db.get_latest_snapshot_id() >= 0:
+        _fail("SNAPSHOT exists before any flush")
+    if db.get_tlm_history():
+        _fail("TLM history exists before flush")
 
     rx._merge_tlm_pending({"ADCS_MODE": 2, "SUN_VALID": 1})
     row_mid = db.get_tlm_current()
@@ -135,6 +140,14 @@ def test_do_flush_pending(tmp_db: Path) -> None:
         _fail("DB updated before DO flush")
 
     rx._merge_tlm_pending({"WBN_X": -0.002})
+    with rx._adcs_lock:
+        rx._latest_adcs_data = {
+            "QBN_0": 1.0,
+            "Q_VALID": 1,
+            "ST_VALID": 0,
+            "SUN_VALID": 1,
+            "H_MGMTON": 0,
+        }
     rx._flush_tlm_pending_to_db()
 
     row = db.get_tlm_current()
@@ -144,9 +157,45 @@ def test_do_flush_pending(tmp_db: Path) -> None:
         _fail(f"after flush ADCS_MODE/SUN_VALID {row}")
     if abs(float(row.get("WBN_X", 0)) + 0.002) > 1e-9:
         _fail(f"after flush WBN_X {row.get('WBN_X')}")
-    _ok("DO-style flush: pending → SAT_TLM_CURRENT once")
 
-    rx._merge_tlm_pending({"_DO_RW_TCMD_X": 0.5, "ADCS_MODE": 3})
+    snap_id = db.get_latest_snapshot_id()
+    if snap_id < 1:
+        _fail(f"SNAPSHOT_ID missing after flush got {snap_id}")
+
+    tlm_hist = db.get_tlm_history()
+    if len(tlm_hist) != 1:
+        _fail(f"TLM history count expected 1 got {len(tlm_hist)}")
+    if int(tlm_hist[0].get("SNAPSHOT_ID", -1)) != snap_id:
+        _fail(f"TLM SNAPSHOT_ID mismatch {tlm_hist[0].get('SNAPSHOT_ID')} vs {snap_id}")
+
+    pwr_hist = db.get_pwr_history()
+    if len(pwr_hist) != 1:
+        _fail(f"PWR history count expected 1 got {len(pwr_hist)}")
+    if int(pwr_hist[0].get("SNAPSHOT_ID", -1)) != snap_id:
+        _fail(f"PWR SNAPSHOT_ID mismatch")
+
+    adcs_hist = db.get_adcs_filter_all()
+    if len(adcs_hist) != 1:
+        _fail(f"ADCS history count expected 1 got {len(adcs_hist)}")
+    if int(adcs_hist[0].get("SNAPSHOT_ID", -1)) != snap_id:
+        _fail(f"ADCS SNAPSHOT_ID mismatch")
+
+    headers = db.get_snapshots_by_ids([snap_id])
+    if len(headers) != 1 or headers[0].get("SNAPSHOT_AT") is None:
+        _fail(f"SAT_SNAPSHOT header missing {headers}")
+
+    _ok("DO flush: live TLM + unified SNAPSHOT_ID (PWR/TLM/ADCS)")
+
+    rx._merge_tlm_pending({"ADCS_MODE": 3})
+    rx._flush_tlm_pending_to_db()
+    snap_id2 = db.get_latest_snapshot_id()
+    if snap_id2 <= snap_id:
+        _fail(f"second flush should new SNAPSHOT_ID {snap_id2} <= {snap_id}")
+    if len(db.get_tlm_history()) != 2:
+        _fail("second flush should append TLM history only once more")
+    _ok("DO flush: second SNAPSHOT increments without duplicate on merge-only")
+
+    rx._merge_tlm_pending({"_DO_RW_TCMD_X": 0.5, "ADCS_MODE": 4})
     snap = DBManager.filter_tlm_current_fields(rx._tlm_pending)
     if "_DO_RW_TCMD_X" in snap or any(k.startswith("_") for k in snap):
         _fail("internal keys in filtered tlm")
@@ -321,14 +370,13 @@ def test_gs_bulk_transmit(db_path: Path) -> None:
     if e1 < 1 or e2 < 1:
         _fail("GS bulk: insert_event seed")
 
-    db.insert_adcs_filter({"Q_VALID": 1, "ST_VALID": 0})
+    db.upsert_adcs_current({"Q_VALID": 1, "ST_VALID": 0})
     tlm_row = db.get_tlm_current()
     if tlm_row is None:
         _fail("GS bulk: get_tlm_current")
-    if not db.insert_tlm_history(tlm_row):
-        _fail("GS bulk: insert_tlm_history")
-    if db.insert_pwr_history_snapshot() < 0:
-        _fail("GS bulk: insert_pwr_history_snapshot")
+    snap_id = db.insert_unified_snapshot()
+    if snap_id < 1:
+        _fail("GS bulk: insert_unified_snapshot")
 
     gs.transmit_all()
 
@@ -352,6 +400,7 @@ def test_gs_bulk_transmit(db_path: Path) -> None:
         _fail(f"GS bulk: expected 2 events, got {events}")
 
     for key in (
+        demon_config.GS_PACKET_TYPE_SNAPSHOT,
         demon_config.GS_PACKET_TYPE_ADCS_FILTER,
         demon_config.GS_PACKET_TYPE_TLM_HISTORY,
         demon_config.GS_PACKET_TYPE_PWR_HISTORY,

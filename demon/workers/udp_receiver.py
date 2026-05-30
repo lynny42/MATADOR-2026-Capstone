@@ -364,7 +364,7 @@ class UDPReceiver:
             logger.error("_merge_tlm_pending 실패: %s", e)
 
     def _flush_tlm_pending_to_db(self) -> None:
-        """ADCS DO(0x0945) 수신 후 pending → SAT_TLM_CURRENT 1회 반영 + ADCS 스냅샷 누적."""
+        """ADCS DO(0x0945) 수신 후 live 갱신 + 통합 SNAPSHOT history append."""
         try:
             with self._tlm_pending_lock:
                 snapshot = dict(self._tlm_pending)
@@ -372,13 +372,15 @@ class UDPReceiver:
                 return
             if not self._ctx.db.upsert_tlm_current(snapshot):
                 return
-            tlm_row = self._ctx.db.get_tlm_current()
-            if tlm_row is not None:
-                self._ctx.db.insert_tlm_history(tlm_row)
             with self._adcs_lock:
                 adcs_snapshot = dict(self._latest_adcs_data)
             if adcs_snapshot:
-                if not self._ctx.db.insert_adcs_filter(adcs_snapshot):
-                    logger.warning("ADCS 주기 스냅샷 insert_adcs_filter 실패")
+                if not self._ctx.db.upsert_adcs_current(adcs_snapshot):
+                    logger.warning("ADCS live upsert_adcs_current 실패")
+            snap_id = self._ctx.db.insert_unified_snapshot()
+            if snap_id < 0:
+                logger.warning("insert_unified_snapshot 실패 (DO flush)")
+            else:
+                logger.debug("DO flush → SNAPSHOT_ID=%s", snap_id)
         except Exception as e:
             logger.error("_flush_tlm_pending_to_db 실패: %s", e)
