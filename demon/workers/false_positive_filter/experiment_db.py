@@ -7,6 +7,7 @@ adcs_series 가 필요한 시나리오는 self._adcs_series 에 리스트 보관
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -300,13 +301,20 @@ class ExperimentMockDB:
         return list(self._integrity)
 
 
-def try_real_db() -> Any | None:
-    """demon DBManager 있으면 사용, 없으면 None."""
+def try_real_db(db_path=None) -> Any | None:
+    """demon DBManager — db_path 미지정 시 default_db_path 사용."""
     try:
-        from demon.db.db_manager import DBManager
+        from pathlib import Path
 
-        db = DBManager()
-        db.init_db()
+        from ...db.db_manager import DBManager
+        from ...db.paths import default_db_path
+
+        path = Path(db_path) if db_path is not None else default_db_path()
+        db = DBManager(path)
+        if not db.init_db():
+            return None
         return db
-    except Exception:
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error("try_real_db 실패: %s", e)
         return None

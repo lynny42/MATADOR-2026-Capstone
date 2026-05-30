@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from .. import config as demon_config
 from ..core.context import RuntimeContext
 from ..core.time_utils import utc_now_iso
+from .false_positive_filter.fpf_scenario_injector import adcs_attack_payload, tlm_attack_payload
 
 logger = logging.getLogger(__name__)
 
@@ -298,8 +299,8 @@ class AttackSimulator:
 
     def _inject_logical_attack(self) -> bool:
         try:
-            ok_adcs = self._ctx.db.insert_adcs_filter(self._adcs_attack_payload())
-            ok_tlm = self._ctx.db.upsert_tlm_current(self._tlm_attack_payload())
+            ok_adcs = self._ctx.db.insert_adcs_filter(adcs_attack_payload())
+            ok_tlm = self._ctx.db.upsert_tlm_current(tlm_attack_payload())
             if ok_adcs:
                 logger.info("공격 시뮬: SAT_ADCS_FILTER 이상 스냅샷 INSERT")
             if ok_tlm:
@@ -311,54 +312,11 @@ class AttackSimulator:
 
     @staticmethod
     def _adcs_attack_payload() -> dict[str, Any]:
-        return {
-            "QBN_0": 0.55,
-            "QBN_1": 0.55,
-            "QBN_2": 0.55,
-            "QBN_3": 0.55,
-            "ST_QBN_0": 1.0,
-            "ST_QBN_1": 0.0,
-            "ST_QBN_2": 0.0,
-            "ST_QBN_3": 0.0,
-            "Q_VALID": 1,
-            "ST_VALID": 1,
-            "TCMD_X": 0.8,
-            "TCMD_Y": 0.6,
-            "TCMD_Z": 0.4,
-            "IMU_WBN_X": 0.0,
-            "IMU_WBN_Y": 0.0,
-            "IMU_WBN_Z": 0.0,
-            "WERR_X": 0.25,
-            "WERR_Y": 0.20,
-            "WERR_Z": 0.18,
-            "QERR_0": 0.7,
-            "QERR_1": 0.3,
-            "QERR_2": 0.2,
-            "QERR_3": 0.1,
-            "MOMENTUM_NMS_0": 0.01,
-            "MOMENTUM_NMS_1": 0.01,
-            "MOMENTUM_NMS_2": 0.01,
-            "DEVICE_ENABLED_RW0": 0,
-            "DEVICE_ENABLED_RW1": 0,
-            "DEVICE_ENABLED_RW2": 0,
-            "MCMD_X": 0.1,
-            "MCMD_Y": 0.1,
-            "MCMD_Z": 0.1,
-        }
+        return adcs_attack_payload()
 
     @staticmethod
     def _tlm_attack_payload() -> dict[str, Any]:
-        return {
-            "ADCS_MODE": 2,
-            "MISSION_MODE": 2,
-            "SUN_VALID": 0,
-            "SVB_X": 0.1,
-            "SVB_Y": 0.2,
-            "SVB_Z": 0.9,
-            "WBN_X": 0.05,
-            "WBN_Y": -0.04,
-            "WBN_Z": 0.03,
-        }
+        return tlm_attack_payload()
 
     @staticmethod
     def _config_bool(name: str, default: bool) -> bool:

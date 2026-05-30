@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .. import config as demon_config
 from .init_db import init_db as apply_schema
@@ -191,10 +192,48 @@ class DBManager:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._accumulation_frozen = False
+        self._scenario_inject_active = False
 
     @property
     def db_path(self) -> Path:
         return self._db_path
+
+    def set_accumulation_frozen(self, frozen: bool) -> None:
+        """시나리오 주입 후 Serial/UDP/AnomalyDetector 누적 쓰기를 중지한다."""
+        try:
+            with self._lock:
+                self._accumulation_frozen = bool(frozen)
+        except Exception as e:
+            logger.error("set_accumulation_frozen 실패: %s", e)
+
+    def is_accumulation_frozen(self) -> bool:
+        try:
+            with self._lock:
+                return bool(self._accumulation_frozen)
+        except Exception as e:
+            logger.error("is_accumulation_frozen 실패: %s", e)
+            return False
+
+    def _accumulation_write_blocked(self) -> bool:
+        return self._accumulation_frozen and not self._scenario_inject_active
+
+    @contextmanager
+    def scenario_inject_writes(self) -> Iterator["DBManager"]:
+        """FPF 시나리오 주입 시에만 누적 freeze 를 우회해 DB 를 덮어쓴다."""
+        try:
+            with self._lock:
+                self._scenario_inject_active = True
+            yield self
+        except Exception as e:
+            logger.error("scenario_inject_writes 실패: %s", e)
+            raise
+        finally:
+            try:
+                with self._lock:
+                    self._scenario_inject_active = False
+            except Exception as e:
+                logger.error("scenario_inject_writes 종료 실패: %s", e)
 
     def init_db(self) -> bool:
         """스키마 적용 + 연결 + SAT_PWR_META 시드(SW_ID 0~3)."""
@@ -324,6 +363,8 @@ class DBManager:
     def insert_tlm_history(self, tlm: dict[str, Any]) -> bool:
         """SAT_TLM_HISTORY append."""
         try:
+            if self._accumulation_write_blocked():
+                return True
             with self._lock:
                 if self._conn is None:
                     logger.error("insert_tlm_history: DB 미연결")
@@ -345,6 +386,8 @@ class DBManager:
         Returns: HISTORY_ID (실패 시 -1).
         """
         try:
+            if self._accumulation_write_blocked():
+                return -1
             now = utc_now_iso()
             with self._lock:
                 if self._conn is None:
@@ -456,6 +499,8 @@ class DBManager:
     def upsert_tlm_current(self, tlm: dict[str, Any]) -> bool:
         """SAT_TLM_CURRENT TLM_ID=1 행 부분 UPDATE."""
         try:
+            if self._accumulation_write_blocked():
+                return True
             safe = self.filter_tlm_current_fields(tlm)
             if not safe:
                 return True
@@ -546,6 +591,8 @@ class DBManager:
         pwr_sample: {sw_id, voltage, current_a} (timestamp 는 DBManager 가 설정)
         """
         try:
+            if self._accumulation_write_blocked():
+                return True
             sw_id = int(pwr_sample["sw_id"])
             voltage = float(pwr_sample["voltage"])
             current_a = float(pwr_sample["current_a"])
@@ -605,6 +652,8 @@ class DBManager:
     def update_pwr_exceed_meta(self, exceed_info: dict[str, Any]) -> bool:
         """AnomalyDetector — EXCEED_COUNT / CONSECUTIVE_EXCEED / ANOMALY_FLAG 갱신."""
         try:
+            if self._accumulation_write_blocked():
+                return True
             sw_id = int(exceed_info["sw_id"])
             exceed_count = int(exceed_info["exceed_count"])
             consecutive = int(exceed_info["consecutive_exceed"])
@@ -999,6 +1048,8 @@ class DBManager:
     def insert_adcs_filter(self, data: dict[str, Any]) -> bool:
         """이상 감지 시점 ADCS 스냅샷 — SAT_ADCS_FILTER INSERT (CHENNEL1 AUTOINCREMENT)."""
         try:
+            if self._accumulation_write_blocked():
+                return True
             ts = str(data.get("TIMESTAMP", utc_now_iso()))
 
             row: dict[str, Any] = {
