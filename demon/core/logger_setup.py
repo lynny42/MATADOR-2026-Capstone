@@ -8,27 +8,36 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
-import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .. import config as demon_config
 
 logger = logging.getLogger(__name__)
 
 
-class _UtcFormatter(logging.Formatter):
-    """logging.Formatter — asctime 을 UTC 로 출력."""
+class _AppTzFormatter(logging.Formatter):
+    """logging.Formatter — asctime 을 config.TIMESTAMP_TIMEZONE 으로 출력."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        try:
+            self._tz = ZoneInfo(demon_config.TIMESTAMP_TIMEZONE)
+        except Exception as e:
+            logger.error("_AppTzFormatter tz 실패: %s", e)
+            self._tz = ZoneInfo("UTC")
+        super().__init__(*args, **kwargs)
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         try:
-            ct = time.gmtime(record.created)
+            dt = datetime.fromtimestamp(record.created, tz=self._tz)
             fmt = datefmt or self.datefmt
             if fmt:
-                return time.strftime(fmt, ct)
-            return time.strftime("%Y-%m-%d %H:%M:%S UTC", ct)
+                return dt.strftime(fmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
-            logger.error("UtcFormatter.formatTime 실패: %s", e)
-            return "1970-01-01 00:00:00 UTC"
+            logger.error("AppTzFormatter.formatTime 실패: %s", e)
+            return "1970-01-01 00:00:00"
 
 
 def _attach_file_handler(formatter: logging.Formatter) -> None:
@@ -62,8 +71,7 @@ def setup_logging() -> None:
 
         root.setLevel(demon_config.LOG_LEVEL)
 
-        formatter_cls = _UtcFormatter if demon_config.LOG_USE_UTC else logging.Formatter
-        formatter = formatter_cls(
+        formatter = _AppTzFormatter(
             fmt=demon_config.LOG_FORMAT,
             datefmt=demon_config.LOG_DATEFMT,
         )

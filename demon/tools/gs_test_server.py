@@ -32,7 +32,6 @@ import socket
 import struct
 import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -194,7 +193,9 @@ def send_satellite_command(
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    from ..core.time_utils import now
+
+    return now().strftime("%Y-%m-%d %H:%M:%S KST")
 
 
 def _safe_records(pkt: dict[str, Any]) -> list[dict[str, Any]]:

@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     setup_logging()
-    logger.info("타임스탬프 기준: UTC (DB·로그·이벤트 동일)")
+    from . import config as demon_config
+
+    logger.info(
+        "타임스탬프 기준: %s (DB·로그·이벤트 동일)",
+        demon_config.TIMESTAMP_TIMEZONE,
+    )
     try:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(line_buffering=True)

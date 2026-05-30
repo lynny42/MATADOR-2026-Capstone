@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol
 
 from .. import config as demon_config
 from ..core.context import RuntimeContext
-from ..core.time_utils import utc_now_iso
+from ..core.time_utils import normalize_record_timestamps, normalize_timestamp_iso, now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +141,12 @@ class GScomms:
                     key_set.get("CHENNEL1", 0),
                 ),
             )
-            detected_at = str(
+            raw_detected = (
                 result.get("detected_at")
                 or key_set.get("detected_at")
-                or utc_now_iso(),
+                or now_iso()
             )
+            detected_at = normalize_timestamp_iso(raw_detected) or now_iso()
 
             if is_attack == "Y":
                 event_type = demon_config.GS_EVENT_ATTACK_CONFIRMED
@@ -287,9 +288,10 @@ class GScomms:
             for start in range(0, total, batch_size):
                 chunk = records[start : start + batch_size]
                 history_ids = self._ctx.db.history_ids_from_records(chunk)
+                norm_chunk = [normalize_record_timestamps(rec) for rec in chunk]
                 payload = {
                     "packet_type": packet_type,
-                    "records": chunk,
+                    "records": norm_chunk,
                 }
 
                 def on_ack(
@@ -319,9 +321,10 @@ class GScomms:
             records = self._ctx.db.get_adcs_filter_all()
             if not records:
                 return
+            norm_records = [normalize_record_timestamps(rec) for rec in records]
             payload = {
                 "packet_type": demon_config.GS_PACKET_TYPE_ADCS_FILTER,
-                "records": records,
+                "records": norm_records,
             }
 
             def on_ack(_ack: dict[str, Any]) -> None:
@@ -352,9 +355,10 @@ class GScomms:
                     continue
                 if event_id not in id_set:
                     continue
+                norm_event = normalize_record_timestamps(event)
                 payload = {
                     "packet_type": demon_config.GS_PACKET_TYPE_EVENT,
-                    "event": event,
+                    "event": norm_event,
                 }
                 captured_id = event_id
 
@@ -397,9 +401,10 @@ class GScomms:
                 return
             if isinstance(records, dict):
                 records = [records]
+            norm_records = [normalize_record_timestamps(rec) for rec in records]
             payload = {
                 "packet_type": demon_config.GS_PACKET_TYPE_INTEGRITY,
-                "records": records,
+                "records": norm_records,
             }
 
             def on_ack(_ack: dict[str, Any]) -> None:

@@ -177,13 +177,14 @@ ATTACK_HASH_CF_FILENAME = "matador_gs_inject.txt"
 ATTACK_HASH_CF_PAYLOAD = "MATADOR ground-station cf file injection\n"
 
 # ============================================================
-# 로깅
+# 시각 / 로깅
 # ============================================================
+# DB·로그·이벤트 공통 타임존 (IANA). KST 운용 시 Asia/Seoul.
+TIMESTAMP_TIMEZONE = "Asia/Seoul"
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
-# 로그 asctime 도 UTC (DB UPDATED_AT 과 날짜 불일치 방지)
-LOG_USE_UTC = True
-LOG_DATEFMT = "%Y-%m-%d %H:%M:%S UTC"
+# 로그 asctime — TIMESTAMP_TIMEZONE 과 동일 (DB UPDATED_AT 과 날짜 불일치 방지)
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S KST"
 # None 이면 stdout 만. 경로 지정 시 파일 핸들러 추가.
 LOG_FILE_PATH: str | None = None
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
