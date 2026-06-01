@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import unittest
 
+from ma_detector.core.ma_onboard_view import derive_ma_fields_from_event
 from ma_detector.core.bulk_history_merge import (
+    build_event_queue_row,
+    build_ma_reference_packet,
+    extract_bulk_event_records,
+    find_nearest_history_for_event,
     merge_bulk_telemetry_packet,
     merge_bulk_telemetry_sections,
+    resolve_event_history_link,
 )
 
 
@@ -250,15 +256,59 @@ class BulkHistoryMergeTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["SNAPSHOT_ID"], 30)
-        self.assertEqual(row["EVENT_ID"], 42)
-        self.assertEqual(row["EVENT_TYPE"], "ATTACK_CONFIRMED")
-        self.assertTrue(row["IS_ANOMALY"])
-        self.assertEqual(row["WEIGHT"], 78)
+        self.assertNotIn("EVENT_ID", row)
+        self.assertNotIn("IS_ANOMALY", row)
         self.assertEqual(row["SW_0_VOLTAGE"], 2.85)
         self.assertEqual(row["SW_0_ANOMALY_FLAG"], 1)
         self.assertEqual(row["IMU_WBN_X"], 0.01)
-        self.assertEqual(row["MODULE_SCORES"]["physical"], 0.82)
-        self.assertIn("event", row["SOURCE_RECORDS"])
+        self.assertNotIn("event", row.get("SOURCE_RECORDS", {}))
+
+        events = extract_bulk_event_records(bulk)
+        self.assertEqual(len(events), 1)
+        event_row = build_event_queue_row(events[0])
+        self.assertEqual(event_row["EVENT_ID"], 42)
+        self.assertEqual(event_row["EVENT_TYPE"], "ATTACK_CONFIRMED")
+        self.assertTrue(derive_ma_fields_from_event(event_row)["IS_ANOMALY"])
+        self.assertEqual(event_row["WEIGHT"], 78)
+        self.assertEqual(event_row["MODULE_SCORES"]["physical"], 0.82)
+
+    def test_multiple_bulk_events_extracted(self) -> None:
+        bulk = {
+            "packet_type": "SAT_BULK_TELEMETRY",
+            "SAT_EVENT_QUEUE": {
+                "events": [
+                    {
+                        "EVENT_ID": 1,
+                        "SNAPSHOT_ID": 10,
+                        "DETECTED_AT": "2026-05-31T12:00:00+09:00",
+                        "EVENT_TYPE": "SEU_DETECTED",
+                        "WEIGHT": 28,
+                    },
+                    {
+                        "EVENT_ID": 2,
+                        "SNAPSHOT_ID": 11,
+                        "DETECTED_AT": "2026-05-31T12:00:01+09:00",
+                        "EVENT_TYPE": "ATTACK_CONFIRMED",
+                        "WEIGHT": 100,
+                    },
+                ]
+            },
+            "SAT_TLM_HISTORY": {
+                "records": [
+                    {"SNAPSHOT_ID": 10, "UPDATED_AT": "2026-05-31T12:00:00+09:00", "MISSION_MODE": 2},
+                    {"SNAPSHOT_ID": 11, "UPDATED_AT": "2026-05-31T12:00:01+09:00", "MISSION_MODE": 2},
+                ]
+            },
+        }
+        events = extract_bulk_event_records(bulk)
+        self.assertEqual(len(events), 2)
+        rows = merge_bulk_telemetry_packet(bulk)
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn("EVENT_ID", rows[0])
+        seu_row = build_event_queue_row(events[0])
+        attack_row = build_event_queue_row(events[1])
+        self.assertFalse(derive_ma_fields_from_event(seu_row)["IS_ANOMALY"])
+        self.assertTrue(derive_ma_fields_from_event(attack_row)["IS_ANOMALY"])
 
     def test_bulk_json_mirror_fields_and_wire_payload(self) -> None:
         bulk = {
@@ -337,6 +387,71 @@ class BulkHistoryMergeTest(unittest.TestCase):
         self.assertEqual(row["IS_VIOLATED"], 1)
         self.assertIn("SAT_TLM_HISTORY", row["WIRE_PAYLOAD"])
         self.assertEqual(row["BULK_NOTE"], "comm-window")
+
+    def test_find_nearest_history_by_time_not_snapshot_id(self) -> None:
+        event = {
+            "EVENT_ID": 99,
+            "SNAPSHOT_ID": 999,
+            "DETECTED_AT": "2026-05-31T12:00:01+09:00",
+            "EVENT_TYPE": "ATTACK_CONFIRMED",
+            "WEIGHT": 90,
+        }
+        history_rows = [
+            {
+                "HISTORY_ID": 1,
+                "SNAPSHOT_ID": 10,
+                "UPDATED_AT": "2026-05-31T12:00:00+09:00",
+                "IMU_WBN_X": 0.01,
+            },
+            {
+                "HISTORY_ID": 2,
+                "SNAPSHOT_ID": 11,
+                "UPDATED_AT": "2026-05-31T12:00:01+09:00",
+                "IMU_WBN_X": 0.02,
+            },
+        ]
+        row, delta = find_nearest_history_for_event(event, history_rows, tolerance_sec=5.0)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["HISTORY_ID"], 2)
+        self.assertIsNotNone(delta)
+        assert delta is not None
+        self.assertLessEqual(delta, 1.0)
+
+        linked_row, history_id = resolve_event_history_link(
+            event,
+            history_rows,
+            tolerance_sec=5.0,
+        )
+        self.assertEqual(history_id, 2)
+        self.assertEqual(linked_row["SNAPSHOT_ID"], 11)
+
+    def test_build_ma_reference_keeps_history_telemetry(self) -> None:
+        history = {
+            "HISTORY_ID": 2,
+            "SNAPSHOT_ID": 11,
+            "UPDATED_AT": "2026-05-31T12:00:01+09:00",
+            "IMU_WBN_X": 0.02,
+            "MISSION_MODE": 2,
+        }
+        event_row = build_event_queue_row(
+            {
+                "EVENT_ID": 11,
+                "SNAPSHOT_ID": 31,
+                "DETECTED_AT": "2026-05-31T12:00:01+09:00",
+                "EVENT_TYPE": "ATTACK_CONFIRMED",
+                "WEIGHT": 100,
+                "PIPEOVERFLOWRRCNT": 7,
+            },
+        )
+        event_row = derive_ma_fields_from_event(event_row)
+        packet = build_ma_reference_packet(history, event_row, time_delta_sec=0.0)
+        self.assertEqual(packet["IMU_WBN_X"], 0.02)
+        self.assertEqual(packet["MISSION_MODE"], 2)
+        self.assertTrue(packet["IS_ANOMALY"])
+        self.assertEqual(packet["ONBOARD_EVENT"]["EVENT_ID"], 11)
+        self.assertEqual(packet["PIPEOVERFLOWRRCNT"], 7)
+        self.assertNotIn("event", packet.get("SOURCE_RECORDS", {}))
 
 
 if __name__ == "__main__":

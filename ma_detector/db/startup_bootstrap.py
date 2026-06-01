@@ -1,4 +1,4 @@
-"""Startup schema creation and baseline seed injection."""
+﻿"""Startup schema creation and baseline seed injection."""
 
 from __future__ import annotations
 
@@ -34,7 +34,6 @@ TLM_SEED = {
     "SVB_Z": 0.52,
     "SUN_VALID": 1,
     "APPENABLESTATE": 1,
-    "IS_ANOMALY": False,
     "OBC_P_HASH": "0x8F12A9C0",
     "EXPECTED_CRC": "0x8F12A9C0",
     "APPCSERRCOUNTER": 0,
@@ -96,8 +95,6 @@ def build_seed_records(count: int = MIN_BASELINE_ROWS) -> list[dict[str, Any]]:
                 **TLM_SEED,
                 **ADCS_SEED,
                 "UPDATED_AT": (base_time + timedelta(seconds=index)).isoformat(),
-                "FALSE_POSITIVE_WEIGHT": 0,
-                "WEIGHT": 0,
             }
             merged["OBC_S_TICK"] = int(TLM_SEED["OBC_S_TICK"]) + index * 20
             merged["HEAP_FREE"] = float(TLM_SEED["HEAP_FREE"]) - index * 120
@@ -198,6 +195,9 @@ def ensure_schema() -> bool:
         gs_repository.refresh_column_cache()
         ensure_tlm_adcs_split_columns()
         ensure_bulk_json_columns()
+        from ma_detector.db.event_queue_schema import ensure_event_queue_table
+
+        ensure_event_queue_table()
         logger.info("ground-station schema ensured from %s", SCHEMA_PATH.name)
         return True
     except Exception as error:

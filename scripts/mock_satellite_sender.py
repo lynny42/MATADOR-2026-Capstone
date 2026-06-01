@@ -1,4 +1,4 @@
-"""Send pipeline case packets to ground-station TCP port 6000 (length-prefix JSON)."""
+﻿"""Send pipeline case packets to ground-station TCP port 6000 (length-prefix JSON)."""
 
 from __future__ import annotations
 
@@ -14,11 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ma_detector.core.packet_protocol import (
-    BULK_HISTORY_TYPES,
-    build_bulk_telemetry_packet,
-    normalize_packet_type,
-)
+from ma_detector.core.packet_protocol import combine_uplink_packets_to_bulk
 
 CASES_PATH = ROOT / "backend" / "test_data" / "pipeline_cases.json"
 
@@ -38,20 +34,7 @@ def _load_case(case_id: str) -> list[dict]:
 
 def _combine_history_packets(packets: list[dict], sent_at: str | None = None) -> list[dict]:
     """Merge separate bulk history packets into one SAT_BULK_TELEMETRY uplink."""
-    sections: dict[str, dict] = {}
-    remaining: list[dict] = []
-    for packet in packets:
-        packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
-        if packet_type in BULK_HISTORY_TYPES and isinstance(packet.get("records"), list):
-            sections[packet_type] = {"records": packet["records"]}
-            continue
-        remaining.append(packet)
-
-    if not sections:
-        return packets
-
-    combined = build_bulk_telemetry_packet(sections, sent_at=sent_at)
-    return remaining + [combined]
+    return combine_uplink_packets_to_bulk(packets, sent_at=sent_at)
 
 
 def _send_packet(host: str, port: int, packet: dict, timeout_sec: float) -> dict:

@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ma_detector.core.packet_protocol import combine_uplink_packets_to_bulk
+
 CASES_PATH = ROOT / "backend" / "test_data" / "pipeline_cases.json"
 DEFAULT_BASE_URL = "http://localhost:8000"
 RECEIVE_PATH = "/api/telemetry/receive"
@@ -50,7 +52,7 @@ def _get_json(base_url: str, path: str) -> dict:
 
 
 def run_case(base_url: str, case_id: str, case_data: dict) -> None:
-    packets = case_data.get("packets", [])
+    packets = combine_uplink_packets_to_bulk(case_data.get("packets", []))
     title = case_data.get("title", case_id)
     print(f"\n=== Case {case_id}: {title} ({len(packets)} packets) ===")
     for index, packet in enumerate(packets, start=1):

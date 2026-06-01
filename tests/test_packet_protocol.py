@@ -1,4 +1,4 @@
-"""Tests for satellite packet protocol helpers."""
+﻿"""Tests for satellite packet protocol helpers."""
 
 from __future__ import annotations
 
@@ -9,21 +9,19 @@ from ma_detector.core.packet_protocol import (
     BULK_HISTORY_TYPES,
     BULK_TELEMETRY_PACKET_TYPE,
     build_bulk_telemetry_packet,
+    combine_uplink_packets_to_bulk,
     detection_snapshots_from_history,
     event_is_attack_anomaly,
     expand_bulk_telemetry_packet,
     flatten_integrity_record,
     infer_subsystem_from_file_path,
-    is_accumulated_bulk_packet,
     is_bulk_telemetry_packet,
     latest_record_time_key,
     merge_history_snapshots,
     normalize_packet_type,
-    packet_buffer_keys,
     select_integrity_record,
     select_nearest_record_for_key,
     should_append_baseline,
-    slice_packet_for_key,
     summarize_uplink_packet,
     timestamp_to_epoch,
 )
@@ -33,17 +31,6 @@ class PacketProtocolTest(unittest.TestCase):
     def test_packet_type_aliases(self) -> None:
         self.assertEqual(normalize_packet_type("SAT_TLM_CURRENT"), "SAT_TLM_HISTORY")
         self.assertEqual(normalize_packet_type("SAT_PWR_META"), "SAT_PWR_HISTORY")
-
-    def test_accumulated_bulk_does_not_fan_out_buffer_keys(self) -> None:
-        packet = {
-            "packet_type": "SAT_TLM_HISTORY",
-            "records": [
-                {"UPDATED_AT": "2026-05-30T12:00:00+00:00"},
-                {"UPDATED_AT": "2026-05-30T12:01:00+00:00"},
-            ],
-        }
-        self.assertTrue(is_accumulated_bulk_packet(packet))
-        self.assertEqual(packet_buffer_keys(packet), [])
 
     def test_latest_record_time_key(self) -> None:
         packet = {
@@ -130,18 +117,6 @@ class PacketProtocolTest(unittest.TestCase):
         self.assertEqual(infer_subsystem_from_file_path("/cf/apps/adcs.so"), "ADCS")
         self.assertEqual(infer_subsystem_from_file_path("/cf/apps/obc.so"), "OBC")
 
-    def test_slice_packet_for_key_ignores_other_records(self) -> None:
-        packet = {
-            "packet_type": "SAT_ADCS_FILTER",
-            "records": [
-                {"TIMESTAMP": "2026-05-30T12:00:00+00:00", "CHENNEL1": 9, "QBN_0": 0.1},
-                {"TIMESTAMP": "2026-05-30T12:01:00+00:00", "CHENNEL1": 8, "QBN_0": 0.9},
-            ],
-        }
-        sliced = slice_packet_for_key(packet, "2026-05-30T12:01:00")
-        self.assertEqual(sliced["_active_record"]["QBN_0"], 0.9)
-        self.assertNotIn("CHENNEL1", sliced["_active_record"])
-
     def test_merge_sat_tlm_history_record(self) -> None:
         detector = MAIntegratedDetector()
         merged = detector._merge_packet_sections(
@@ -164,29 +139,19 @@ class PacketProtocolTest(unittest.TestCase):
         self.assertEqual(merged["packet_type"], "SAT_TLM_HISTORY")
         self.assertEqual(merged["MISSION_MODE"], 2)
 
-    def test_seu_event_does_not_create_buffer_key(self) -> None:
-        packet = {
-            "packet_type": "SAT_EVENT_QUEUE",
-            "event": {
-                "DETECTED_AT": "2026-05-30T12:00:05+00:00",
-                "EVENT_TYPE": "SEU_DETECTED",
-                "WEIGHT": 28,
-            },
+    def test_event_is_attack_anomaly(self) -> None:
+        seu_event = {
+            "DETECTED_AT": "2026-05-30T12:00:05+00:00",
+            "EVENT_TYPE": "SEU_DETECTED",
+            "WEIGHT": 28,
         }
-        self.assertFalse(event_is_attack_anomaly(packet["event"]))
-        self.assertEqual(packet_buffer_keys(packet), [])
-
-    def test_attack_event_creates_buffer_key(self) -> None:
-        packet = {
-            "packet_type": "SAT_EVENT_QUEUE",
-            "event": {
-                "DETECTED_AT": "2026-05-30T12:01:00+00:00",
-                "EVENT_TYPE": "ATTACK_CONFIRMED",
-                "WEIGHT": 100,
-            },
+        attack_event = {
+            "DETECTED_AT": "2026-05-30T12:01:00+00:00",
+            "EVENT_TYPE": "ATTACK_CONFIRMED",
+            "WEIGHT": 100,
         }
-        self.assertTrue(event_is_attack_anomaly(packet["event"]))
-        self.assertEqual(packet_buffer_keys(packet), ["2026-05-30T12:01:00"])
+        self.assertFalse(event_is_attack_anomaly(seu_event))
+        self.assertTrue(event_is_attack_anomaly(attack_event))
 
     def test_should_append_baseline_requires_zero_weight(self) -> None:
         self.assertTrue(should_append_baseline({"IS_ANOMALY": False, "FALSE_POSITIVE_WEIGHT": 0}))
@@ -330,6 +295,28 @@ class PacketProtocolTest(unittest.TestCase):
         event_child = next(child for child in children if child["packet_type"] == "SAT_EVENT_QUEUE")
         self.assertEqual(len(event_child["events"]), 1)
         self.assertEqual(event_child["events"][0]["EVENT_ID"], 42)
+
+    def test_combine_uplink_packets_to_bulk(self) -> None:
+        packets = [
+            {
+                "packet_type": "SAT_EVENT_QUEUE",
+                "event": {
+                    "EVENT_ID": 1,
+                    "DETECTED_AT": "2026-05-30T12:05:00+00:00",
+                    "EVENT_TYPE": "ATTACK_CONFIRMED",
+                    "WEIGHT": 100,
+                },
+            },
+            {
+                "packet_type": "SAT_TLM_HISTORY",
+                "records": [{"UPDATED_AT": "2026-05-30T12:05:00+00:00", "MISSION_MODE": 2}],
+            },
+        ]
+        combined = combine_uplink_packets_to_bulk(packets)
+        self.assertEqual(len(combined), 1)
+        self.assertTrue(is_bulk_telemetry_packet(combined[0]))
+        self.assertIn("SAT_EVENT_QUEUE", combined[0])
+        self.assertIn("SAT_TLM_HISTORY", combined[0])
 
     def test_build_and_summarize_bulk_telemetry(self) -> None:
         sections = {

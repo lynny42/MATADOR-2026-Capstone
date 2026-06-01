@@ -1,4 +1,4 @@
-"""Service layer that builds dashboard API responses from MySQL."""
+﻿"""Service layer that builds dashboard API responses from MySQL."""
 
 from __future__ import annotations
 
@@ -17,13 +17,14 @@ from ma_detector.core.target_context import (
     normalize_target_subsystem,
     report_matches_target,
 )
+from ma_detector.core.ma_onboard_view import is_attack_event_row
 from ma_detector.db import gs_repository
 from ma_detector.db.database import require_db
 from ma_detector.registry.registry_manager import RegistryManager
 
 logger = logging.getLogger(__name__)
 
-# Rows inserted within this wall-clock gap belong to one satellite uplink window.
+# Legacy fallback when BULK_SENT_AT is missing on old rows.
 COMM_SESSION_GAP_SEC = 30
 DETECTION_MATCH_TOLERANCE_SEC = 5
 MAX_COMMUNICATIONS = 200
@@ -168,13 +169,15 @@ class DashboardService:
         if preview_detector is not None:
             dashboard_rows = preview_detector.get_dashboard_records()
             history_rows = preview_detector.get_history_records()
+            event_rows = []
         else:
             require_db()
             dashboard_rows = gs_repository.query_recent_dashboards(100)
             history_rows = gs_repository.load_recent_tlm_history(TLM_HISTORY_CLUSTER_LIMIT)
+            event_rows = gs_repository.load_recent_event_queue(TLM_HISTORY_CLUSTER_LIMIT)
         detections = [self._to_detection(row) for row in dashboard_rows]
         detections = self._sort_detections_for_display(detections)
-        communications = self._build_communications(history_rows, detections)
+        communications = self._build_communications(history_rows, detections, event_rows)
         latest_comm = communications[-1] if communications else None
         latest_detections = list(latest_comm.get("detections", [])) if latest_comm else []
         latest_time = latest_comm.get("communicated_at") if latest_comm else None
@@ -445,9 +448,9 @@ class DashboardService:
 
         detector.set_replay_mode(preview)
         try:
-            for row in gs_repository.load_anomaly_history():
+            for packet in gs_repository.load_attack_replay_packets():
                 detector.receive_telemetry(
-                    _dump_replay_packet(row),
+                    _dump_replay_packet(packet),
                     reprocess=True,
                 )
         finally:
@@ -614,77 +617,220 @@ class DashboardService:
         except Exception:
             return str(value)
 
-    def _cluster_history_sessions(
+    def _bulk_sent_at_from_row(self, row: dict[str, Any]) -> str | None:
+        """Resolve onboard bulk envelope time from a history or event row."""
+        try:
+            formatted = self._format_communicated_at(row.get("BULK_SENT_AT"))
+            if formatted:
+                return formatted
+            wire_payload = row.get("WIRE_PAYLOAD")
+            if isinstance(wire_payload, str):
+                try:
+                    wire_payload = json.loads(wire_payload)
+                except json.JSONDecodeError:
+                    wire_payload = None
+            if isinstance(wire_payload, dict):
+                formatted = self._format_communicated_at(wire_payload.get("sent_at"))
+                if formatted:
+                    return formatted
+            return None
+        except Exception as error:
+            logger.error("bulk sent_at resolve failed: %s", error)
+            return None
+
+    def _bulk_session_key(
+        self,
+        *,
+        bulk_sent_at: str | None,
+        comm_session: str | None = None,
+        legacy_row: dict[str, Any] | None = None,
+    ) -> str | None:
+        """One SAT_BULK_TELEMETRY uplink maps to one dashboard communication key."""
+        try:
+            _ = comm_session
+            if bulk_sent_at:
+                # Group by onboard bulk envelope only. comm_session is metadata;
+                # mixing NULL vs comm-N on the same BULK_SENT_AT must not split UI rows.
+                return bulk_sent_at
+            if legacy_row is not None:
+                created = self._format_communicated_at(
+                    legacy_row.get("CREATED_AT") or legacy_row.get("UPDATED_AT"),
+                )
+                if created:
+                    return f"legacy-ingest:{created}"
+                history_id = legacy_row.get("HISTORY_ID")
+                if history_id is not None:
+                    return f"legacy-row:{history_id}"
+            return None
+        except Exception as error:
+            logger.error("bulk session key build failed: %s", error)
+            return None
+
+    def _bulk_key_from_history_row(self, row: dict[str, Any]) -> str | None:
+        try:
+            bulk_sent_at = self._bulk_sent_at_from_row(row)
+            comm_session = str(row.get("COMM_SESSION") or row.get("_comm_session") or "").strip() or None
+            return self._bulk_session_key(
+                bulk_sent_at=bulk_sent_at,
+                comm_session=comm_session,
+                legacy_row=row if bulk_sent_at is None else None,
+            )
+        except Exception as error:
+            logger.error("history bulk key resolve failed: %s", error)
+            return None
+
+    def _bulk_key_from_event_row(self, event: dict[str, Any]) -> str | None:
+        try:
+            bulk_sent_at = self._bulk_sent_at_from_row(event)
+            comm_session = str(event.get("COMM_SESSION") or "").strip() or None
+            if bulk_sent_at:
+                return self._bulk_session_key(bulk_sent_at=bulk_sent_at, comm_session=comm_session)
+            event_time = self._format_communicated_at(
+                event.get("DETECTED_AT") or event.get("TIMESTAMP") or event.get("CREATED_AT"),
+            )
+            event_id = event.get("EVENT_QUEUE_ID") or event.get("EVENT_ID")
+            if event_time and event_id is not None:
+                prefix = comm_session or "event"
+                return f"{prefix}|{event_id}:{event_time}"
+            return event_time
+        except Exception as error:
+            logger.error("event bulk key resolve failed: %s", error)
+            return None
+
+    def _event_row_time(self, event: dict[str, Any]) -> datetime | None:
+        try:
+            return self._parse_datetime_value(
+                event.get("DETECTED_AT") or event.get("TIMESTAMP") or event.get("CREATED_AT"),
+            )
+        except Exception as error:
+            logger.error("event row time parse failed: %s", error)
+            return None
+
+    def _cluster_bulk_sessions(
         self,
         history_rows: list[dict[str, Any]],
+        event_rows: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Group onboard history rows that arrived in the same uplink burst."""
+        """Group rows by SAT_BULK_TELEMETRY envelope (BULK_SENT_AT), not ingest timestamps."""
         try:
-            dated_rows: list[tuple[datetime, dict[str, Any]]] = []
-            for row in history_rows:
-                created_at = self._parse_datetime_value(row.get("CREATED_AT"))
-                if created_at is None:
-                    fallback = self._parse_datetime_value(row.get("UPDATED_AT") or row.get("DETECTED_AT"))
-                    if fallback is None:
-                        continue
-                    created_at = fallback
-                dated_rows.append((created_at, row))
+            groups: dict[str, dict[str, Any]] = {}
 
-            if not dated_rows:
-                return []
-
-            dated_rows.sort(key=lambda item: item[0])
-            sessions: list[dict[str, Any]] = []
-            current_created = dated_rows[0][0]
-            current_rows = [dated_rows[0][1]]
-            last_created = current_created
-
-            for created_at, row in dated_rows[1:]:
-                if (created_at - last_created).total_seconds() > COMM_SESSION_GAP_SEC:
-                    sessions.append(
-                        {
-                            "created_start": current_created,
-                            "created_end": last_created,
-                            "rows": current_rows,
-                        }
-                    )
-                    current_created = created_at
-                    current_rows = [row]
-                else:
-                    current_rows.append(row)
-                last_created = created_at
-
-            sessions.append(
-                {
-                    "created_start": current_created,
-                    "created_end": last_created,
-                    "rows": current_rows,
-                }
-            )
-
-            for session in sessions:
-                onboard_times = [
-                    self._parse_datetime_value(item.get("UPDATED_AT") or item.get("DETECTED_AT"))
-                    for item in session["rows"]
-                ]
-                valid_onboard = [value for value in onboard_times if value is not None]
-                session["received_at"] = self._format_communicated_at(session["created_end"])
-                session["communicated_at"] = session["received_at"]
-                session["onboard_snapshot_at"] = (
-                    self._format_communicated_at(max(valid_onboard)) if valid_onboard else session["received_at"]
+            def ensure_group(key: str) -> dict[str, Any]:
+                return groups.setdefault(
+                    key,
+                    {
+                        "bulk_key": key,
+                        "bulk_sent_at": None,
+                        "comm_session": None,
+                        "rows": [],
+                        "events": [],
+                        "attack_event_times": [],
+                        "created_times": [],
+                        "onboard_times": [],
+                    },
                 )
-                session["onboard_start"] = min(valid_onboard) if valid_onboard else session["created_start"]
-                session["onboard_end"] = max(valid_onboard) if valid_onboard else session["created_end"]
-                session["sample_count"] = len(session["rows"])
-                session["has_anomaly_rows"] = any(int(item.get("IS_ANOMALY", 0) or 0) == 1 for item in session["rows"])
+
+            for row in history_rows:
+                key = self._bulk_key_from_history_row(row)
+                if not key:
+                    continue
+                group = ensure_group(key)
+                group["rows"].append(row)
+                bulk_sent_at = self._bulk_sent_at_from_row(row)
+                if bulk_sent_at and group["bulk_sent_at"] is None:
+                    group["bulk_sent_at"] = bulk_sent_at
+                comm_session = str(row.get("COMM_SESSION") or row.get("_comm_session") or "").strip()
+                if comm_session and group["comm_session"] is None:
+                    group["comm_session"] = comm_session
+                created_at = self._parse_datetime_value(row.get("CREATED_AT"))
+                if created_at is not None:
+                    group["created_times"].append(created_at)
+                onboard_at = self._parse_datetime_value(row.get("UPDATED_AT") or row.get("SNAPSHOT_AT"))
+                if onboard_at is not None:
+                    group["onboard_times"].append(onboard_at)
+
+            for event in event_rows:
+                key = self._bulk_key_from_event_row(event)
+                if not key:
+                    continue
+                group = ensure_group(key)
+                group["events"].append(event)
+                bulk_sent_at = self._bulk_sent_at_from_row(event)
+                if bulk_sent_at and group["bulk_sent_at"] is None:
+                    group["bulk_sent_at"] = bulk_sent_at
+                comm_session = str(event.get("COMM_SESSION") or "").strip()
+                if comm_session and group["comm_session"] is None:
+                    group["comm_session"] = comm_session
+                created_at = self._parse_datetime_value(event.get("CREATED_AT"))
+                if created_at is not None:
+                    group["created_times"].append(created_at)
+                if is_attack_event_row(event):
+                    parsed = self._event_row_time(event)
+                    if parsed is not None:
+                        group["attack_event_times"].append(parsed)
+
+            sessions: list[dict[str, Any]] = []
+            for key, group in groups.items():
+                created_times = group["created_times"]
+                onboard_times = group["onboard_times"]
+                received_at = (
+                    self._format_communicated_at(max(created_times))
+                    if created_times
+                    else group["bulk_sent_at"] or key
+                )
+                bulk_sent_at = group["bulk_sent_at"] or received_at
+                onboard_start = min(onboard_times) if onboard_times else None
+                onboard_end = max(onboard_times) if onboard_times else None
+                attack_times = sorted(set(group["attack_event_times"]))
+                sample_count = len(group["rows"]) or len(group["events"])
+                sessions.append(
+                    {
+                        "bulk_key": key,
+                        "bulk_sent_at": bulk_sent_at,
+                        "comm_session": group["comm_session"],
+                        "created_start": min(created_times) if created_times else None,
+                        "created_end": max(created_times) if created_times else None,
+                        "rows": group["rows"],
+                        "events": group["events"],
+                        "received_at": received_at,
+                        "communicated_at": key,
+                        "onboard_snapshot_at": (
+                            self._format_communicated_at(max(onboard_times))
+                            if onboard_times
+                            else bulk_sent_at
+                        ),
+                        "onboard_start": onboard_start,
+                        "onboard_end": onboard_end,
+                        "sample_count": sample_count,
+                        "has_anomaly_rows": bool(attack_times),
+                        "attack_event_times": attack_times,
+                    }
+                )
+
+            sessions.sort(
+                key=lambda item: (
+                    item.get("bulk_sent_at") or item.get("received_at") or item.get("bulk_key") or "",
+                )
+            )
             return sessions
         except Exception as error:
-            logger.error("history session clustering failed: %s", error)
+            logger.error("bulk session clustering failed: %s", error)
             return []
 
     def _session_anomaly_event_times(self, session: dict[str, Any]) -> list[datetime]:
         try:
+            cached = session.get("attack_event_times")
+            if isinstance(cached, list) and cached:
+                return [item for item in cached if isinstance(item, datetime)]
             event_times: list[datetime] = []
+            for row in session.get("events", []):
+                if not is_attack_event_row(row):
+                    continue
+                parsed = self._event_row_time(row)
+                if parsed is not None:
+                    event_times.append(parsed)
+            if event_times:
+                return event_times
             for row in session.get("rows", []):
                 if int(row.get("IS_ANOMALY", 0) or 0) != 1:
                     continue
@@ -710,13 +856,31 @@ class DashboardService:
             best_session: dict[str, Any] | None = None
             best_delta = float("inf")
             for session in sessions:
-                if not session.get("has_anomaly_rows"):
-                    continue
-                for event_time in self._session_anomaly_event_times(session):
-                    delta = abs((detect_time - event_time).total_seconds())
+                for anchor in self._session_anomaly_event_times(session):
+                    delta = abs((detect_time - anchor).total_seconds())
                     if delta <= tolerance and delta < best_delta:
                         best_delta = delta
                         best_session = session
+            if best_session is not None:
+                return best_session
+
+            detect_bulk = self._format_communicated_at(detection.get("bulk_sent_at"))
+            if detect_bulk:
+                for session in sessions:
+                    if session.get("bulk_sent_at") == detect_bulk:
+                        return session
+
+            for session in sessions:
+                if not session.get("has_anomaly_rows"):
+                    continue
+                bulk_sent_at = session.get("bulk_sent_at")
+                if isinstance(bulk_sent_at, str):
+                    bulk_dt = self._parse_datetime_value(bulk_sent_at)
+                    if bulk_dt is not None:
+                        delta = abs((detect_time - bulk_dt).total_seconds())
+                        if delta <= COMM_SESSION_GAP_SEC and delta < best_delta:
+                            best_delta = delta
+                            best_session = session
             return best_session
         except Exception as error:
             logger.error("detection session assignment failed: %s", error)
@@ -726,8 +890,10 @@ class DashboardService:
         self,
         history_rows: list[dict[str, Any]],
         detections: list[dict[str, Any]],
+        event_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        sessions = self._cluster_history_sessions(history_rows)
+        events = event_rows or []
+        sessions = self._cluster_bulk_sessions(history_rows, events)
         if not sessions:
             communication_map: dict[str, dict[str, Any]] = {}
             for row in history_rows:
@@ -745,8 +911,10 @@ class DashboardService:
                 }
         else:
             communication_map = {
-                self._communication_time_key(str(session["communicated_at"])): {
+                str(session["bulk_key"]): {
                     "communicated_at": session["communicated_at"],
+                    "bulk_sent_at": session.get("bulk_sent_at"),
+                    "comm_session": session.get("comm_session"),
                     "received_at": session.get("received_at", session["communicated_at"]),
                     "onboard_snapshot_at": session.get("onboard_snapshot_at"),
                     "status": "NORMAL",
@@ -763,11 +931,13 @@ class DashboardService:
             session = self._assign_detection_to_session(detection, sessions) if sessions else None
             if session is None:
                 continue
-            key = self._communication_time_key(str(session["communicated_at"]))
+            key = str(session["bulk_key"])
             entry = communication_map.setdefault(
                 key,
                 {
                     "communicated_at": session["communicated_at"],
+                    "bulk_sent_at": session.get("bulk_sent_at"),
+                    "comm_session": session.get("comm_session"),
                     "received_at": session.get("received_at", session["communicated_at"]),
                     "onboard_snapshot_at": session.get("onboard_snapshot_at"),
                     "status": "NORMAL",
@@ -778,7 +948,10 @@ class DashboardService:
             entry["status"] = "ANOMALY"
             entry["detections"].append(detection)
 
-        communications = sorted(communication_map.values(), key=lambda item: item["communicated_at"])
+        communications = sorted(
+            communication_map.values(),
+            key=lambda item: item.get("bulk_sent_at") or item.get("received_at") or item["communicated_at"],
+        )
         if len(communications) > MAX_COMMUNICATIONS:
             communications = communications[-MAX_COMMUNICATIONS:]
         for communication in communications:

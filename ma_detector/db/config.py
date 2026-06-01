@@ -9,6 +9,7 @@ DB_POOL_SIZE = 5
 
 # Actual MySQL table names (lowercase on deployed schema)
 TABLE_TLM_HISTORY = "gs_tlm_history"
+TABLE_EVENT_QUEUE = "gs_event_queue"
 TABLE_PWR_META = "gs_pwr_meta"
 TABLE_ANOMALY_DASHBOARD = "gs_anomaly_ma_dashboard"
 TABLE_ANOMALY_DETAIL = "gs_anomaly_detail"

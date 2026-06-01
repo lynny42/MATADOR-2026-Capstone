@@ -1,4 +1,4 @@
-"""MySQL read/write helpers for ground-station tables."""
+﻿"""MySQL read/write helpers for ground-station tables."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ma_detector.core.event_queue_columns import strip_event_fields_from_tlm_packet
 from ma_detector.core.tlm_adcs_columns import sync_legacy_tlm_columns
 from ma_detector.db.config import (
     TABLE_ANOMALY_DASHBOARD,
     TABLE_ANOMALY_DETAIL,
     TABLE_ANOMALY_DISCARD_LOG,
+    TABLE_EVENT_QUEUE,
     TABLE_PWR_META,
     TABLE_TLM_HISTORY,
 )
@@ -39,6 +41,9 @@ _JSON_COLUMNS = frozenset(
 
 _AUTO_COLUMNS = frozenset({"HISTORY_ID", "PWR_META_ID", "DETAIL_ID", "LOG_ID", "CREATED_AT"})
 
+# Bulk-wide archive keys: keep on merge rows for MA ingest, omit from gs_tlm_history INSERT.
+_TLM_BULK_ONLY_COLUMNS = frozenset({"WIRE_PAYLOAD", "SOURCE_RECORDS"})
+
 _column_cache: dict[str, list[str]] = {}
 
 
@@ -51,6 +56,7 @@ def refresh_column_cache() -> None:
             return
         tables = [
             TABLE_TLM_HISTORY,
+            TABLE_EVENT_QUEUE,
             TABLE_PWR_META,
             TABLE_ANOMALY_DASHBOARD,
             TABLE_ANOMALY_DETAIL,
@@ -157,6 +163,25 @@ def prepare_packet_for_db(packet: dict[str, Any]) -> dict[str, Any]:
         return dict(packet)
 
 
+def build_tlm_history_insert_row(prepared: dict[str, Any]) -> dict[str, Any]:
+    """Build one gs_tlm_history INSERT dict without bulk-wide JSON duplication."""
+    try:
+        row = dict(prepared)
+        for key in _TLM_BULK_ONLY_COLUMNS:
+            row.pop(key, None)
+        payload = {
+            key: value
+            for key, value in prepared.items()
+            if key not in _TLM_BULK_ONLY_COLUMNS and value is not None
+        }
+        row["PAYLOAD"] = payload
+        row.pop("RAW_PAYLOAD", None)
+        return row
+    except Exception as error:
+        logger.error("tlm history insert row build failed: %s", error)
+        return dict(prepared)
+
+
 def _merge_stored_payloads(row: dict[str, Any]) -> dict[str, Any]:
     """Merge PAYLOAD / RAW_PAYLOAD JSON columns into the row dict."""
     try:
@@ -189,8 +214,6 @@ def enrich_packet_from_db(row: dict[str, Any]) -> dict[str, Any]:
         expected_hash = packet.get("EXPECTED_HASH")
         if expected_hash is not None:
             packet.setdefault("EXPECTED_CRC", expected_hash)
-            if packet.get("OBC_P_HASH") is None and int(packet.get("IS_VIOLATED", 0) or 0) != 1:
-                packet.setdefault("OBC_P_HASH", expected_hash)
 
         for wheel_index in range(3):
             err_key = f"DEVICE_ERR_RW{wheel_index}"
@@ -251,12 +274,9 @@ def insert_tlm_history(packet: dict[str, Any]) -> int | None:
     try:
         if not is_db_available():
             return None
-        prepared = prepare_packet_for_db(packet)
-        row = dict(prepared)
-        row["PAYLOAD"] = prepared
-        row["RAW_PAYLOAD"] = prepared
-        if row.get("IS_ANOMALY") is not None:
-            row["IS_ANOMALY"] = int(bool(row["IS_ANOMALY"]))
+        tlm_only = strip_event_fields_from_tlm_packet(packet)
+        prepared = prepare_packet_for_db(tlm_only)
+        row = build_tlm_history_insert_row(prepared)
         sql, params = _build_insert(TABLE_TLM_HISTORY, row)
         if not params:
             return None
@@ -269,6 +289,151 @@ def insert_tlm_history(packet: dict[str, Any]) -> int | None:
     except Exception as error:
         logger.error("%s insert failed: %s", TABLE_TLM_HISTORY, error)
         return None
+
+
+def insert_event_queue_row(row: dict[str, Any]) -> int | None:
+    """Insert one onboard event row and return EVENT_QUEUE_ID."""
+    try:
+        if not is_db_available():
+            return None
+        from ma_detector.core.event_queue_columns import GS_EVENT_LEGACY_DERIVED_COLUMNS
+
+        payload = dict(row)
+        for column_name, _ddl in GS_EVENT_LEGACY_DERIVED_COLUMNS:
+            payload.pop(column_name, None)
+        payload.pop("HISTORY_ID", None)
+        payload.pop("SNAPSHOT_ID", None)
+        payload.pop("COMM_SESSION", None)
+        if isinstance(payload.get("PAYLOAD"), dict):
+            payload["PAYLOAD"] = dict(payload["PAYLOAD"])
+        sql, params = _build_insert(TABLE_EVENT_QUEUE, payload)
+        if not params:
+            return None
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            event_queue_id = int(cursor.lastrowid)
+            cursor.close()
+        return event_queue_id
+    except Exception as error:
+        logger.error("%s insert failed: %s", TABLE_EVENT_QUEUE, error)
+        return None
+
+
+def enrich_event_queue_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Parse JSON columns on one raw gs_event_queue row."""
+    try:
+        item = dict(row)
+        for key in ("PAYLOAD", "MODULE_SCORES"):
+            if key in item:
+                item[key] = _parse_json_value(item[key])
+        return item
+    except Exception as error:
+        logger.error("event queue row enrich failed: %s", error)
+        return dict(row)
+
+
+def query_event_queue_row(event_queue_id: int) -> dict[str, Any]:
+    """Fetch one gs_event_queue row by primary key."""
+    try:
+        if not is_db_available():
+            return {}
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"SELECT * FROM `{TABLE_EVENT_QUEUE}` WHERE EVENT_QUEUE_ID = %s LIMIT 1",
+                (int(event_queue_id),),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        if not row:
+            return {}
+        return enrich_event_queue_row(dict(row))
+    except Exception as error:
+        logger.error("event queue row query failed: %s", error)
+        return {}
+
+
+def query_history_row(history_id: int) -> dict[str, Any]:
+    """Fetch one gs_tlm_history row by HISTORY_ID."""
+    try:
+        if not is_db_available():
+            return {}
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"SELECT * FROM `{TABLE_TLM_HISTORY}` WHERE HISTORY_ID = %s LIMIT 1",
+                (int(history_id),),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        if not row:
+            return {}
+        return enrich_packet_from_db(dict(row))
+    except Exception as error:
+        logger.error("history row query failed: %s", error)
+        return {}
+
+
+def query_attack_events(limit: int = 5000) -> list[dict[str, Any]]:
+    """Load attack-class onboard events from gs_event_queue."""
+    try:
+        from ma_detector.core.ma_onboard_view import is_attack_event_row
+
+        if not is_db_available():
+            return []
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"""
+                SELECT * FROM `{TABLE_EVENT_QUEUE}`
+                WHERE EVENT_TYPE = 'ATTACK_CONFIRMED'
+                   OR COALESCE(WEIGHT, 0) >= 50
+                ORDER BY COALESCE(DETECTED_AT, TIMESTAMP, CREATED_AT) ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        return [
+            enriched
+            for row in rows
+            if is_attack_event_row(enriched := enrich_event_queue_row(dict(row)))
+        ]
+    except Exception as error:
+        logger.error("attack event query failed: %s", error)
+        return []
+
+
+def load_attack_replay_packets(limit: int = 5000) -> list[dict[str, Any]]:
+    """Build MA replay packets from gs_event_queue joined to gs_tlm_history."""
+    try:
+        from ma_detector.core.bulk_history_merge import (
+            build_ma_reference_packet,
+            find_nearest_history_for_event,
+        )
+
+        packets: list[dict[str, Any]] = []
+        for event_row in query_attack_events(limit):
+            payload = event_row.get("PAYLOAD")
+            event_ref = payload if isinstance(payload, dict) else event_row
+            history_row: dict[str, Any] | None = None
+            history_id = event_row.get("HISTORY_ID")
+            if history_id is not None:
+                history_row = query_history_row(int(history_id)) or None
+            if history_row is None:
+                detect_time = event_row.get("DETECTED_AT") or event_row.get("TIMESTAMP")
+                if detect_time:
+                    window = query_history_window(str(detect_time), window_size_sec=30, limit=20)
+                    history_row, _delta = find_nearest_history_for_event(event_ref, window)
+            if history_row is None:
+                continue
+            packets.append(build_ma_reference_packet(history_row, event_row))
+        return packets
+    except Exception as error:
+        logger.error("attack replay packet load failed: %s", error)
+        return []
 
 
 def _build_pwr_channel_payload(prepared: dict[str, Any], sw_id: int) -> dict[str, Any]:
@@ -299,7 +464,11 @@ def insert_pwr_meta_rows(packet: dict[str, Any], history_id: int | None = None) 
     try:
         if not is_db_available():
             return False
-        prepared = prepare_packet_for_db(packet)
+        effective_history_id = history_id if history_id is not None else packet.get("HISTORY_ID")
+        if effective_history_id is None:
+            logger.error("%s insert skipped: missing HISTORY_ID", TABLE_PWR_META)
+            return False
+        prepared = prepare_packet_for_db(strip_event_fields_from_tlm_packet(packet))
         updated_at = prepared.get("UPDATED_AT")
         inserted = False
         with get_connection() as conn:
@@ -310,7 +479,7 @@ def insert_pwr_meta_rows(packet: dict[str, Any], history_id: int | None = None) 
                     continue
                 channel_payload = _build_pwr_channel_payload(prepared, sw_id)
                 row = {
-                    "HISTORY_ID": history_id,
+                    "HISTORY_ID": int(effective_history_id),
                     "UPDATED_AT": updated_at,
                     "SW_ID": sw_id,
                     "VOLTAGE": prepared.get(f"SW_{sw_id}_VOLTAGE"),
@@ -510,7 +679,7 @@ def query_evaluation_snapshot(detect_id: int) -> dict[str, Any]:
 
 
 def query_anomaly_row_near(detect_time: str, tolerance_sec: int = 5) -> dict[str, Any]:
-    """Return nearest IS_ANOMALY=1 telemetry row around detect_time."""
+    """Return nearest attack event + linked telemetry around detect_time."""
     try:
         if not is_db_available() or not detect_time:
             return {}
@@ -518,11 +687,17 @@ def query_anomaly_row_near(detect_time: str, tolerance_sec: int = 5) -> dict[str
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 f"""
-                SELECT * FROM `{TABLE_TLM_HISTORY}`
-                WHERE IS_ANOMALY = 1
-                  AND UPDATED_AT BETWEEN DATE_SUB(%s, INTERVAL %s SECOND)
-                                     AND DATE_ADD(%s, INTERVAL %s SECOND)
-                ORDER BY ABS(TIMESTAMPDIFF(SECOND, UPDATED_AT, %s)) ASC
+                SELECT * FROM `{TABLE_EVENT_QUEUE}`
+                WHERE (EVENT_TYPE = 'ATTACK_CONFIRMED' OR COALESCE(WEIGHT, 0) >= 50)
+                  AND COALESCE(DETECTED_AT, TIMESTAMP) BETWEEN DATE_SUB(%s, INTERVAL %s SECOND)
+                                                             AND DATE_ADD(%s, INTERVAL %s SECOND)
+                ORDER BY ABS(
+                    TIMESTAMPDIFF(
+                        SECOND,
+                        COALESCE(DETECTED_AT, TIMESTAMP),
+                        %s
+                    )
+                ) ASC
                 LIMIT 1
                 """,
                 (detect_time, tolerance_sec, detect_time, tolerance_sec, detect_time),
@@ -531,7 +706,28 @@ def query_anomaly_row_near(detect_time: str, tolerance_sec: int = 5) -> dict[str
             cursor.close()
         if not row:
             return {}
-        return enrich_packet_from_db(dict(row))
+        event_row = enrich_event_queue_row(dict(row))
+        history_id = event_row.get("HISTORY_ID")
+        if history_id is not None:
+            history = query_history_row(int(history_id))
+            if history:
+                from ma_detector.core.bulk_history_merge import build_ma_reference_packet
+
+                return build_ma_reference_packet(history, event_row)
+        payload = event_row.get("PAYLOAD")
+        event_ref = payload if isinstance(payload, dict) else event_row
+        detect_at = event_row.get("DETECTED_AT") or event_row.get("TIMESTAMP")
+        if detect_at:
+            from ma_detector.core.bulk_history_merge import (
+                build_ma_reference_packet,
+                find_nearest_history_for_event,
+            )
+
+            window = query_history_window(str(detect_at), window_size_sec=tolerance_sec, limit=10)
+            history_row, _delta = find_nearest_history_for_event(event_ref, window)
+            if history_row is not None:
+                return build_ma_reference_packet(history_row, event_row)
+        return event_row
     except Exception as error:
         logger.error("anomaly row near detect_time query failed: %s", error)
         return {}
@@ -598,9 +794,20 @@ def load_baseline_history(limit: int = 500) -> list[dict[str, Any]]:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 f"""
-                SELECT * FROM `{TABLE_TLM_HISTORY}`
-                WHERE IS_ANOMALY = 0
-                ORDER BY UPDATED_AT DESC
+                SELECT h.*
+                FROM `{TABLE_TLM_HISTORY}` h
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM `{TABLE_EVENT_QUEUE}` e
+                    WHERE (e.EVENT_TYPE = 'ATTACK_CONFIRMED' OR COALESCE(e.WEIGHT, 0) >= 50)
+                      AND ABS(
+                          TIMESTAMPDIFF(
+                              SECOND,
+                              COALESCE(e.DETECTED_AT, e.TIMESTAMP),
+                              h.UPDATED_AT
+                          )
+                      ) <= 5
+                )
+                ORDER BY h.UPDATED_AT DESC
                 LIMIT %s
                 """,
                 (limit,),
@@ -616,32 +823,47 @@ def load_baseline_history(limit: int = 500) -> list[dict[str, Any]]:
 
 
 def load_replay_payloads(from_time: str, to_time: str) -> list[str]:
-    """Load RAW_PAYLOAD (or PAYLOAD fallback) JSON strings for replay."""
+    """Load attack replay JSON strings for gs_event_queue rows in a time range."""
     try:
         if not is_db_available():
             return []
         with get_connection() as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(dictionary=True)
             cursor.execute(
                 f"""
-                SELECT COALESCE(RAW_PAYLOAD, PAYLOAD) AS REPLAY_PAYLOAD
-                FROM `{TABLE_TLM_HISTORY}`
-                WHERE UPDATED_AT BETWEEN %s AND %s
-                  AND IS_ANOMALY = 1
-                ORDER BY UPDATED_AT ASC
+                SELECT * FROM `{TABLE_EVENT_QUEUE}`
+                WHERE (EVENT_TYPE = 'ATTACK_CONFIRMED' OR COALESCE(WEIGHT, 0) >= 50)
+                  AND COALESCE(DETECTED_AT, TIMESTAMP, CREATED_AT)
+                      BETWEEN %s AND %s
+                ORDER BY COALESCE(DETECTED_AT, TIMESTAMP, CREATED_AT) ASC
                 """,
                 (from_time, to_time),
             )
             rows = cursor.fetchall()
             cursor.close()
+        from ma_detector.core.bulk_history_merge import (
+            build_ma_reference_packet,
+            find_nearest_history_for_event,
+        )
+
         payloads: list[str] = []
-        for (raw_payload,) in rows:
-            if raw_payload is None:
+        for row in rows:
+            event_row = enrich_event_queue_row(dict(row))
+            payload = event_row.get("PAYLOAD")
+            event_ref = payload if isinstance(payload, dict) else event_row
+            history_row: dict[str, Any] | None = None
+            history_id = event_row.get("HISTORY_ID")
+            if history_id is not None:
+                history_row = query_history_row(int(history_id)) or None
+            if history_row is None:
+                detect_time = event_row.get("DETECTED_AT") or event_row.get("TIMESTAMP")
+                if detect_time:
+                    window = query_history_window(str(detect_time), window_size_sec=30, limit=20)
+                    history_row, _delta = find_nearest_history_for_event(event_ref, window)
+            if history_row is None:
                 continue
-            if isinstance(raw_payload, (dict, list)):
-                payloads.append(json.dumps(raw_payload, ensure_ascii=False, default=str))
-            else:
-                payloads.append(str(raw_payload))
+            packet = build_ma_reference_packet(history_row, event_row)
+            payloads.append(json.dumps(packet, ensure_ascii=False, default=str))
         return payloads
     except Exception as error:
         logger.error("replay payload load failed: %s", error)
@@ -726,6 +948,32 @@ def load_recent_tlm_history(limit: int = 600) -> list[dict[str, Any]]:
         return []
 
 
+def load_recent_event_queue(limit: int = 500) -> list[dict[str, Any]]:
+    """Load recent onboard events for dashboard communication clustering."""
+    try:
+        if not is_db_available():
+            return []
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT * FROM `{TABLE_EVENT_QUEUE}`
+                    ORDER BY COALESCE(DETECTED_AT, TIMESTAMP, CREATED_AT) DESC
+                    LIMIT %s
+                ) AS recent
+                ORDER BY COALESCE(DETECTED_AT, TIMESTAMP, CREATED_AT) ASC
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        return [enrich_event_queue_row(dict(row)) for row in rows]
+    except Exception as error:
+        logger.error("recent event queue load failed: %s", error)
+        return []
+
+
 def fetch_next_detect_id() -> int:
     """Return next detect id based on current table max."""
     try:
@@ -759,23 +1007,9 @@ def clear_ma_results() -> bool:
 
 
 def load_anomaly_history(limit: int = 5000) -> list[dict[str, Any]]:
-    """Load IS_ANOMALY=1 telemetry rows for MA reprocessing."""
+    """Load attack replay packets built from gs_event_queue + gs_tlm_history."""
     try:
-        require_db()
-        with get_connection() as conn:
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute(
-                f"""
-                SELECT * FROM `{TABLE_TLM_HISTORY}`
-                WHERE IS_ANOMALY = 1
-                ORDER BY UPDATED_AT ASC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cursor.fetchall()
-            cursor.close()
-        return [enrich_packet_from_db(dict(row)) for row in rows]
+        return load_attack_replay_packets(limit)
     except Exception as error:
         logger.error("anomaly history load failed: %s", error)
         return []

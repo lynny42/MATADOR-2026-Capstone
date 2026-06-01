@@ -35,9 +35,9 @@ TARGET_EMPHASIS: dict[str, dict[str, set[str]]] = {
 
 # Power channel hints when only sw_id_list is present (Arduino/capstone SW 0~3).
 SW_ID_DEFAULT_SUBSYSTEM: dict[int, str] = {
-    0: "EPS",
+    0: "ADCS",
     1: "OBC",
-    2: "ADCS",
+    2: "EPS",
     3: "COM",
 }
 

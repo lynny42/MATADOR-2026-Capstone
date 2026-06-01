@@ -1,4 +1,4 @@
-"""Satellite TCP packet type aliases, time keys, and record slicing helpers."""
+﻿"""Satellite TCP packet type aliases, time keys, and record slicing helpers."""
 
 from __future__ import annotations
 
@@ -24,19 +24,6 @@ SATELLITE_TRANSMIT_ORDER: tuple[str, ...] = (
 )
 
 META_PACKET_TYPES = frozenset({"SAT_EVENT_QUEUE_META"})
-
-CORE_BUFFER_TYPES = (
-    "SAT_ADCS_FILTER",
-    "SAT_TLM_HISTORY",
-    "SAT_PWR_HISTORY",
-)
-
-OPTIONAL_BUFFER_TYPES = (
-    "SAT_EVENT_QUEUE",
-    "SAT_INTEGRITY_HASH",
-)
-
-ALL_BUFFER_TYPES = CORE_BUFFER_TYPES + OPTIONAL_BUFFER_TYPES
 
 BULK_HISTORY_TYPES = frozenset(
     {
@@ -309,6 +296,74 @@ def build_bulk_telemetry_packet(
         return {"packet_type": BULK_TELEMETRY_PACKET_TYPE}
 
 
+def combine_uplink_packets_to_bulk(
+    packets: list[dict[str, Any]],
+    *,
+    sent_at: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fold legacy separate uplink packets into one SAT_BULK_TELEMETRY."""
+    try:
+        if not packets:
+            return []
+
+        if len(packets) == 1 and is_bulk_telemetry_packet(packets[0]):
+            return [dict(packets[0])]
+
+        sections: dict[str, dict[str, Any]] = {}
+        events: list[dict[str, Any]] = []
+        meta: dict[str, Any] | None = None
+        passthrough: list[dict[str, Any]] = []
+
+        for packet in packets:
+            if is_bulk_telemetry_packet(packet):
+                return [dict(packet)]
+
+            ptype = normalize_packet_type(str(packet.get("packet_type", "")).strip())
+            if ptype == "SAT_EVENT_QUEUE_META":
+                meta = {key: value for key, value in packet.items() if key != "packet_type"}
+                continue
+
+            if ptype == "SAT_EVENT_QUEUE":
+                event = packet.get("event", packet)
+                if isinstance(event, dict):
+                    cleaned = scrub_record(event)
+                    if cleaned:
+                        events.append(cleaned)
+                continue
+
+            if ptype in BULK_HISTORY_TYPES or ptype in BULK_METADATA_TYPES:
+                bucket = sections.setdefault(ptype, {"records": []})
+                records = packet.get("records")
+                if isinstance(records, list):
+                    for record in records:
+                        if isinstance(record, dict):
+                            cleaned = scrub_record(record)
+                            if cleaned:
+                                bucket["records"].append(cleaned)
+                continue
+
+            passthrough.append(dict(packet))
+
+        if not sections and not events:
+            return passthrough or list(packets)
+
+        if events:
+            event_section: dict[str, Any] = {}
+            if meta:
+                event_section.update(meta)
+            if len(events) == 1 and "events" not in event_section:
+                event_section["event"] = events[0]
+            else:
+                event_section["events"] = events
+            sections["SAT_EVENT_QUEUE"] = event_section
+
+        bulk = build_bulk_telemetry_packet(sections, sent_at=sent_at)
+        return passthrough + [bulk]
+    except Exception as error:
+        logger.error("combine uplink packets failed: %s", error)
+        return list(packets)
+
+
 def summarize_uplink_packet(packet: dict[str, Any]) -> str:
     """One-line human-readable summary for logs and ingest trace."""
     try:
@@ -570,19 +625,6 @@ def record_epoch(record: dict[str, Any]) -> float | None:
         return None
 
 
-def is_accumulated_bulk_packet(packet: dict[str, Any]) -> bool:
-    """Return True when a packet carries multiple onboard-sampled rows from one comm window."""
-    try:
-        packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
-        if packet_type not in BULK_HISTORY_TYPES:
-            return False
-        records = packet.get("records")
-        return isinstance(records, list) and len(records) > 1
-    except Exception as error:
-        logger.error("accumulated bulk packet check failed: %s", error)
-        return False
-
-
 def latest_record_time_key(packet: dict[str, Any]) -> str:
     """Return the latest onboard sample timestamp inside one accumulated packet."""
     try:
@@ -607,65 +649,6 @@ def latest_record_time_key(packet: dict[str, Any]) -> str:
         return record_time_key(packet)
     except Exception as error:
         logger.error("latest record time key lookup failed: %s", error)
-        return ""
-
-
-def packet_buffer_keys(packet: dict[str, Any]) -> list[str]:
-    """Return buffer bucket keys for an incoming packet.
-
-    Event packets define anomaly buckets. Accumulated multi-record history packets do not
-    fan out one bucket per onboard second; they attach to existing buckets or to the latest
-    communication snapshot when no event bucket exists yet.
-    """
-    try:
-        packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
-
-        if packet_type == "SAT_EVENT_QUEUE":
-            event = packet.get("event", packet)
-            if isinstance(event, dict) and event_is_attack_anomaly(event):
-                key = record_time_key(event)
-                if key:
-                    return [key]
-            return []
-
-        if is_accumulated_bulk_packet(packet):
-            return []
-
-        records = packet.get("records")
-        if isinstance(records, list) and len(records) == 1 and isinstance(records[0], dict):
-            key = record_time_key(records[0])
-            if key:
-                return [key]
-
-        for field in ("DETECTED_AT", "TIMESTAMP", "UPDATED_AT"):
-            key = time_key_from_value(packet.get(field))
-            if key:
-                return [key]
-
-        return [datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")]
-    except Exception as error:
-        logger.error("packet buffer key build failed: %s", error)
-        return [datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")]
-
-
-def communication_snapshot_key(bulk_packets: dict[str, dict[str, Any]]) -> str:
-    """Pick the latest onboard sample timestamp across accumulated bulk packets."""
-    try:
-        latest_key = ""
-        latest_epoch = float("-inf")
-        for packet in bulk_packets.values():
-            if not isinstance(packet, dict):
-                continue
-            key = latest_record_time_key(packet)
-            epoch = time_key_to_epoch(key)
-            if epoch is None:
-                continue
-            if epoch >= latest_epoch:
-                latest_epoch = epoch
-                latest_key = key
-        return latest_key
-    except Exception as error:
-        logger.error("communication snapshot key build failed: %s", error)
         return ""
 
 
@@ -756,50 +739,6 @@ def select_records_for_key(
     except Exception as error:
         logger.error("record selection for key failed: %s", error)
         return []
-
-
-def iter_accumulated_records(packet: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return every onboard row contained in one accumulated packet."""
-    try:
-        records = packet.get("records")
-        if isinstance(records, list) and records:
-            return [scrub_record(record) for record in records if isinstance(record, dict)]
-        active = select_active_record(packet)
-        return [active] if active else []
-    except Exception as error:
-        logger.error("accumulated record iteration failed: %s", error)
-        return []
-
-
-def slice_packet_for_key(
-    packet: dict[str, Any],
-    key: str,
-    tolerance_sec: float = DEFAULT_RECORD_MATCH_TOLERANCE_SEC,
-) -> dict[str, Any]:
-    """Build a single-bucket view of a multi-record satellite packet."""
-    try:
-        packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
-        sliced: dict[str, Any] = {
-            "packet_type": packet_type,
-            "_buffer_key": key,
-        }
-
-        if packet_type == "SAT_EVENT_QUEUE":
-            event_rows = select_records_for_key(packet, key, tolerance_sec)
-            if event_rows:
-                sliced["event"] = event_rows[0]
-            return sliced
-
-        matched = select_records_for_key(packet, key, tolerance_sec)
-        if matched:
-            sliced["records"] = matched
-            sliced["_active_record"] = matched[0]
-            return sliced
-
-        return dict(packet)
-    except Exception as error:
-        logger.error("packet slice for key failed: %s", error)
-        return dict(packet)
 
 
 def select_active_record(packet: dict[str, Any]) -> dict[str, Any]:
@@ -908,119 +847,3 @@ def select_integrity_record(
     except Exception as error:
         logger.error("integrity record selection failed: %s", error)
         return None
-
-
-def resolve_integrity_packet(
-    packets_by_type: dict[str, dict[str, Any]],
-    bulk_packets: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return SAT_INTEGRITY_HASH packet with records merged from bucket and bulk sources."""
-    try:
-        merged_records: list[dict[str, Any]] = []
-        seen_fingerprints: set[tuple[Any, ...]] = set()
-        shell: dict[str, Any] = {"packet_type": "SAT_INTEGRITY_HASH"}
-
-        for source in (packets_by_type, bulk_packets or {}):
-            if not isinstance(source, dict):
-                continue
-            for raw_type, packet in source.items():
-                if normalize_packet_type(str(raw_type)) != "SAT_INTEGRITY_HASH":
-                    continue
-                if not isinstance(packet, dict):
-                    continue
-                shell.setdefault("_buffer_key", packet.get("_buffer_key"))
-                shell.setdefault("_match_tolerance_sec", packet.get("_match_tolerance_sec"))
-                records = packet.get("records")
-                if isinstance(records, list):
-                    iterable = records
-                else:
-                    iterable = [packet]
-                for record in iterable:
-                    if not isinstance(record, dict):
-                        continue
-                    cleaned = scrub_record(record)
-                    fingerprint = (
-                        cleaned.get("FILE_PATH"),
-                        cleaned.get("FILE_ID"),
-                        cleaned.get("IS_VIOLATED"),
-                        record_time_key(cleaned),
-                    )
-                    if fingerprint in seen_fingerprints:
-                        continue
-                    seen_fingerprints.add(fingerprint)
-                    merged_records.append(cleaned)
-
-        if not merged_records:
-            return None
-        shell["records"] = merged_records
-        return shell
-    except Exception as error:
-        logger.error("integrity packet resolve failed: %s", error)
-        return None
-
-
-def apply_violated_integrity_target(
-    merged: dict[str, Any],
-    integrity_packet: dict[str, Any] | None,
-    buffer_key: str | None = None,
-    tolerance_sec: float = DEFAULT_RECORD_MATCH_TOLERANCE_SEC,
-) -> None:
-    """Ensure IS_VIOLATED=1 integrity rows set hash fields and TARGET from FILE_PATH."""
-    try:
-        if not integrity_packet:
-            return
-        rec = select_integrity_record(
-            integrity_packet,
-            buffer_key=buffer_key,
-            tolerance_sec=tolerance_sec,
-        )
-        if not rec or int(rec.get("IS_VIOLATED", 0) or 0) != 1:
-            return
-        merged.update(flatten_integrity_record(rec))
-        file_target = infer_subsystem_from_file_path(rec.get("FILE_PATH"))
-        if file_target:
-            merged["TARGET_SUBSYSTEM"] = file_target
-    except Exception as error:
-        logger.error("violated integrity target apply failed: %s", error)
-
-
-def apply_buffer_event_meta(merged: dict[str, Any], event_meta: list[dict[str, Any]] | None) -> None:
-    """Attach non-attack onboard event metadata without opening the anomaly pipeline."""
-    try:
-        if not event_meta or merged.get("IS_ANOMALY", False):
-            return
-
-        best = max(event_meta, key=lambda item: int(item.get("WEIGHT", 0) or 0))
-        weight = int(best.get("WEIGHT", 0) or 0)
-        merged["WEIGHT"] = weight
-        merged["FALSE_POSITIVE_WEIGHT"] = weight
-        merged["EVENT_TYPE"] = best.get("EVENT_TYPE", merged.get("EVENT_TYPE", ""))
-        merged["EVENT_ID"] = best.get("EVENT_ID", merged.get("EVENT_ID"))
-        merged["EXCEPTION_CODE"] = best.get("EXCEPTION_CODE", merged.get("EXCEPTION_CODE"))
-        merged["FALSE_POSITIVE_EXCEPTION"] = best.get("EXCEPTION_CODE", merged.get("FALSE_POSITIVE_EXCEPTION", ""))
-        merged["FALSE_POSITIVE_RESULT"] = "N"
-        merged["IS_ANOMALY"] = False
-    except Exception as error:
-        logger.error("buffer event meta apply failed: %s", error)
-
-
-def buffer_has_core_types(packets: dict[str, dict[str, Any]]) -> bool:
-    """Return True when all core packet types are present in one buffer bucket."""
-    try:
-        canonical = {normalize_packet_type(packet_type) for packet_type in packets}
-        return all(packet_type in canonical for packet_type in CORE_BUFFER_TYPES)
-    except Exception as error:
-        logger.error("core buffer type check failed: %s", error)
-        return False
-
-
-def missing_buffer_types(packets: dict[str, dict[str, Any]]) -> list[str]:
-    """List canonical packet types still missing from one buffer bucket."""
-    try:
-        canonical = {normalize_packet_type(packet_type) for packet_type in packets}
-        missing = [packet_type for packet_type in ALL_BUFFER_TYPES if packet_type not in canonical]
-        return missing
-    except Exception as error:
-        logger.error("missing buffer type lookup failed: %s", error)
-        return list(ALL_BUFFER_TYPES)
-

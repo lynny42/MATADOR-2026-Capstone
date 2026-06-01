@@ -1,4 +1,4 @@
-"""Tests for the dashboard service with mocked MySQL dependencies."""
+﻿"""Tests for the dashboard service with mocked MySQL dependencies."""
 
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ SAMPLE_DASHBOARD_ROW = {
 SAMPLE_HISTORY_ROW = {
     "HISTORY_ID": 10,
     "UPDATED_AT": "2026-05-12 07:20:00",
+    "CREATED_AT": "2026-05-12 07:20:05",
+    "BULK_SENT_AT": "2026-05-12 07:20:00",
     "MISSION_MODE": 2,
     "ADCS_MODE": 1,
     "IS_ANOMALY": 1,
@@ -85,6 +87,7 @@ class DashboardServiceTest(unittest.TestCase):
             "backend.dashboard_service.gs_repository",
             query_recent_dashboards=lambda count=100: [dict(SAMPLE_DASHBOARD_ROW)],
             load_recent_tlm_history=lambda limit=600: [dict(SAMPLE_HISTORY_ROW)],
+            load_recent_event_queue=lambda limit=500: [],
             query_dashboard=lambda detect_id: dict(SAMPLE_DASHBOARD_ROW) if detect_id == 1 else None,
             query_detail_rows=lambda dashboard_id: [
                 {
@@ -156,28 +159,74 @@ class DashboardServiceTest(unittest.TestCase):
                 "HISTORY_ID": 1,
                 "UPDATED_AT": "2026-05-30 10:00:00",
                 "CREATED_AT": "2026-05-30 12:00:01",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
             },
             {
                 "HISTORY_ID": 2,
                 "UPDATED_AT": "2026-05-30 10:00:01",
                 "CREATED_AT": "2026-05-30 12:00:02",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
             },
             {
                 "HISTORY_ID": 3,
                 "UPDATED_AT": "2026-05-30 10:00:02",
                 "CREATED_AT": "2026-05-30 12:00:03",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
             },
             {
                 "HISTORY_ID": 4,
                 "UPDATED_AT": "2026-05-30 10:05:00",
                 "CREATED_AT": "2026-05-30 12:05:00",
+                "BULK_SENT_AT": "2026-05-30 10:05:00",
             },
         ]
         communications = self.service._build_communications(history_rows, [])
         self.assertEqual(len(communications), 2)
-        self.assertEqual(communications[-1]["communicated_at"], "2026-05-30 12:05:00")
+        self.assertEqual(communications[-1]["bulk_sent_at"], "2026-05-30 10:05:00")
         self.assertEqual(communications[-2]["sample_count"], 3)
         self.assertEqual(communications[-2]["anomaly_count"], 0)
+
+    def test_build_communications_splits_same_ingest_time_different_bulk(self) -> None:
+        history_rows = [
+            {
+                "HISTORY_ID": 1,
+                "CREATED_AT": "2026-05-30 12:00:01",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+            },
+            {
+                "HISTORY_ID": 2,
+                "CREATED_AT": "2026-05-30 12:00:02",
+                "BULK_SENT_AT": "2026-05-30 10:05:00",
+            },
+        ]
+        communications = self.service._build_communications(history_rows, [])
+        self.assertEqual(len(communications), 2)
+
+    def test_build_communications_merges_same_bulk_sent_at_different_comm_session(self) -> None:
+        """NULL vs comm-N on the same BULK_SENT_AT must not duplicate the dropdown."""
+        history_rows = [
+            {
+                "HISTORY_ID": 1,
+                "CREATED_AT": "2026-05-30 12:00:01",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+                "COMM_SESSION": "comm-3",
+            },
+            {
+                "HISTORY_ID": 2,
+                "CREATED_AT": "2026-05-30 12:00:02",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+                "COMM_SESSION": None,
+            },
+            {
+                "HISTORY_ID": 3,
+                "CREATED_AT": "2026-05-30 12:00:03",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+            },
+        ]
+        communications = self.service._build_communications(history_rows, [])
+        self.assertEqual(len(communications), 1)
+        self.assertEqual(communications[0]["bulk_sent_at"], "2026-05-30 10:00:00")
+        self.assertEqual(communications[0]["sample_count"], 3)
 
     def test_normal_communication_does_not_inherit_old_detections(self) -> None:
         history_rows = [
@@ -185,12 +234,14 @@ class DashboardServiceTest(unittest.TestCase):
                 "HISTORY_ID": 1,
                 "UPDATED_AT": "2026-05-30 17:19:30",
                 "CREATED_AT": "2026-05-30 17:29:55",
+                "BULK_SENT_AT": "2026-05-30 17:29:50",
                 "IS_ANOMALY": 0,
             },
             {
                 "HISTORY_ID": 2,
                 "UPDATED_AT": "2026-05-30 17:29:52",
                 "CREATED_AT": "2026-05-30 17:29:57",
+                "BULK_SENT_AT": "2026-05-30 17:29:50",
                 "IS_ANOMALY": 0,
             },
         ]
@@ -205,6 +256,59 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual(len(communications), 1)
         self.assertEqual(communications[0]["anomaly_count"], 0)
         self.assertEqual(communications[0]["status"], "NORMAL")
+
+    def test_build_communications_from_event_queue_when_history_empty(self) -> None:
+        event_rows = [
+            {
+                "EVENT_QUEUE_ID": 1,
+                "DETECTED_AT": "2026-05-30 12:00:01",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+                "EVENT_TYPE": "ATTACK_CONFIRMED",
+                "WEIGHT": 69,
+            },
+            {
+                "EVENT_QUEUE_ID": 2,
+                "DETECTED_AT": "2026-05-30 12:00:02",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+                "EVENT_TYPE": "SEU_DETECTED",
+                "WEIGHT": 10,
+            },
+        ]
+        communications = self.service._build_communications([], [], event_rows)
+        self.assertEqual(len(communications), 1)
+        self.assertEqual(communications[0]["bulk_sent_at"], "2026-05-30 10:00:00")
+        self.assertEqual(communications[0]["sample_count"], 2)
+
+    def test_build_communications_links_detection_via_event_queue(self) -> None:
+        history_rows = [
+            {
+                "HISTORY_ID": 10,
+                "UPDATED_AT": "2026-05-30 10:00:00",
+                "CREATED_AT": "2026-05-30 12:00:01",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+            },
+        ]
+        event_rows = [
+            {
+                "EVENT_QUEUE_ID": 1,
+                "HISTORY_ID": 10,
+                "DETECTED_AT": "2026-05-30 10:00:00",
+                "BULK_SENT_AT": "2026-05-30 10:00:00",
+                "EVENT_TYPE": "ATTACK_CONFIRMED",
+                "WEIGHT": 69,
+            },
+        ]
+        detections = [
+            {
+                "detect_id": 1,
+                "detect_time": "2026-05-30 10:00:01",
+                "ma_code": "ADCS_SENSOR_REPLAY_ATTACK_P2",
+            },
+        ]
+        communications = self.service._build_communications(history_rows, detections, event_rows)
+        self.assertEqual(len(communications), 1)
+        self.assertEqual(communications[0]["status"], "ANOMALY")
+        self.assertEqual(communications[0]["anomaly_count"], 1)
 
     def test_detection_detail_contains_rule_details(self) -> None:
         state = self.service.get_dashboard_state()

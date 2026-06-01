@@ -53,18 +53,11 @@ ADCS_JSON_COLUMNS: tuple[tuple[str, str], ...] = (
     *[(field, f"`{field}` double DEFAULT NULL") for field in _ADCS_DOUBLE_FIELDS],
 )
 
-# Event fields from SAT_EVENT_QUEUE.events[].
-EVENT_JSON_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("DETECTED_AT", "`DETECTED_AT` datetime(3) DEFAULT NULL"),
-    ("PRIORITY", "`PRIORITY` int DEFAULT NULL"),
-    ("IS_SENT", "`IS_SENT` tinyint DEFAULT NULL"),
-    ("MODULE_SCORES", "`MODULE_SCORES` json DEFAULT NULL"),
-)
-
 # Bulk envelope + lossless archive.
 BULK_META_COLUMNS: tuple[tuple[str, str], ...] = (
     ("BULK_SENT_AT", "`BULK_SENT_AT` datetime(3) DEFAULT NULL"),
     ("BULK_NOTE", "`BULK_NOTE` varchar(255) DEFAULT NULL"),
+    ("COMM_SESSION", "`COMM_SESSION` varchar(64) DEFAULT NULL"),
     ("WIRE_PAYLOAD", "`WIRE_PAYLOAD` json DEFAULT NULL"),
     ("SOURCE_RECORDS", "`SOURCE_RECORDS` json DEFAULT NULL"),
 )
@@ -101,7 +94,6 @@ def all_bulk_json_column_ddls() -> list[tuple[str, str]]:
     columns: list[tuple[str, str]] = []
     columns.extend(TLM_JSON_COLUMNS)
     columns.extend(ADCS_JSON_COLUMNS)
-    columns.extend(EVENT_JSON_COLUMNS)
     columns.extend(BULK_META_COLUMNS)
     columns.extend(INTEGRITY_JSON_COLUMNS)
     columns.extend(pwr_channel_column_ddls())

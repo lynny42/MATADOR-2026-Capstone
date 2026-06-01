@@ -1,4 +1,4 @@
-"""Tests for TCP length-prefix framing and packet buffer deduplication."""
+﻿"""Tests for TCP length-prefix framing and bulk telemetry deduplication."""
 
 from __future__ import annotations
 
@@ -21,96 +21,51 @@ class TCPFramingTest(unittest.TestCase):
 
 
 class PacketBufferDedupTest(unittest.TestCase):
-    def test_duplicate_packet_is_ignored(self) -> None:
+    def test_duplicate_bulk_packet_is_ignored(self) -> None:
         async def scenario() -> None:
-            buffer = PacketBufferManager(timeout_sec=5.0, on_flush=lambda *_args: None)
-            packet = {
-                "packet_type": "SAT_EVENT_QUEUE",
-                "event": {
-                    "DETECTED_AT": "2026-05-30T12:01:00+00:00",
-                    "EVENT_TYPE": "ATTACK_CONFIRMED",
-                    "WEIGHT": 100,
+            persisted: list[dict] = []
+
+            def on_persist(bulk: dict) -> None:
+                persisted.append(bulk)
+
+            buffer = PacketBufferManager(on_bulk_telemetry_persist=on_persist)
+            bulk = {
+                "packet_type": "SAT_BULK_TELEMETRY",
+                "sent_at": "2026-05-30T12:05:00+00:00",
+                "SAT_TLM_HISTORY": {
+                    "records": [{"UPDATED_AT": "2026-05-30T12:05:00+00:00", "MISSION_MODE": 2}]
                 },
             }
-            first = await buffer.receive(packet)
-            second = await buffer.receive(packet)
-            self.assertNotEqual(first.get("status"), "duplicate_ignored")
+            first = await buffer.receive(bulk)
+            second = await buffer.receive(bulk)
+            self.assertEqual(first.get("status"), "bulk_telemetry_stored")
             self.assertEqual(second.get("status"), "duplicate_ignored")
+            self.assertEqual(len(persisted), 1)
 
         asyncio.run(scenario())
 
-    def test_bulk_completion_triggers_single_flush(self) -> None:
+    def test_non_bulk_packet_is_ignored(self) -> None:
         async def scenario() -> None:
-            flush_keys: list[str] = []
+            persisted: list[dict] = []
 
-            def on_flush(key, packets, bulk_packets, event_meta=None, comm_session=None):
-                flush_keys.append(key)
-
-            buffer = PacketBufferManager(timeout_sec=5.0, on_flush=on_flush)
-            packets = [
-                {
-                    "packet_type": "SAT_EVENT_QUEUE",
-                    "event": {
-                        "EVENT_ID": 401,
-                        "DETECTED_AT": "2026-05-30T12:05:00+00:00",
-                        "EVENT_TYPE": "ATTACK_CONFIRMED",
-                        "WEIGHT": 100,
-                        "FALSE_POSITIVE_RESULT": "Y",
-                    },
-                },
-                {
-                    "packet_type": "SAT_INTEGRITY_HASH",
-                    "records": [
-                        {
-                            "FILE_PATH": "/cf/apps/adcs.so",
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "IS_VIOLATED": 1,
-                        }
-                    ],
-                },
-                {
-                    "packet_type": "SAT_ADCS_FILTER",
-                    "records": [
-                        {
-                            "TIMESTAMP": "2026-05-30T12:05:00+00:00",
-                            "QERR_0": 0.99,
-                        }
-                    ],
-                },
+            buffer = PacketBufferManager(on_bulk_telemetry_persist=lambda bulk: persisted.append(bulk))
+            status = await buffer.receive(
                 {
                     "packet_type": "SAT_TLM_HISTORY",
-                    "records": [
-                        {
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "MISSION_MODE": 2,
-                        }
-                    ],
-                },
-                {
-                    "packet_type": "SAT_PWR_HISTORY",
-                    "records": [
-                        {
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "channels": [],
-                        }
-                    ],
-                },
-            ]
-            for packet in packets:
-                await buffer.receive(packet)
-
-            self.assertEqual(flush_keys, ["2026-05-30T12:05:00"])
+                    "records": [{"UPDATED_AT": "2026-05-30T12:05:00+00:00"}],
+                }
+            )
+            self.assertEqual(status.get("status"), "ignored")
+            self.assertEqual(status.get("reason"), "bulk_telemetry_required")
+            self.assertEqual(len(persisted), 0)
 
         asyncio.run(scenario())
 
-    def test_bulk_telemetry_triggers_single_flush(self) -> None:
+    def test_bulk_telemetry_triggers_persist(self) -> None:
         async def scenario() -> None:
-            flush_keys: list[str] = []
+            persisted: list[dict] = []
 
-            def on_flush(key, packets, bulk_packets, event_meta=None, comm_session=None):
-                flush_keys.append(key)
-
-            buffer = PacketBufferManager(timeout_sec=5.0, on_flush=on_flush)
+            buffer = PacketBufferManager(on_bulk_telemetry_persist=lambda bulk: persisted.append(bulk))
             bulk = {
                 "packet_type": "SAT_BULK_TELEMETRY",
                 "sent_at": "2026-05-30T12:05:00+00:00",
@@ -120,47 +75,16 @@ class PacketBufferDedupTest(unittest.TestCase):
                         "DETECTED_AT": "2026-05-30T12:05:00+00:00",
                         "EVENT_TYPE": "ATTACK_CONFIRMED",
                         "WEIGHT": 100,
-                        "FALSE_POSITIVE_RESULT": "Y",
                     }
                 },
-                "SAT_INTEGRITY_HASH": {
-                    "records": [
-                        {
-                            "FILE_PATH": "/cf/apps/adcs.so",
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "IS_VIOLATED": 1,
-                        }
-                    ],
-                },
-                "SAT_ADCS_FILTER": {
-                    "records": [
-                        {
-                            "TIMESTAMP": "2026-05-30T12:05:00+00:00",
-                            "QERR_0": 0.99,
-                        }
-                    ],
-                },
                 "SAT_TLM_HISTORY": {
-                    "records": [
-                        {
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "MISSION_MODE": 2,
-                        }
-                    ],
-                },
-                "SAT_PWR_HISTORY": {
-                    "records": [
-                        {
-                            "UPDATED_AT": "2026-05-30T12:05:00+00:00",
-                            "channels": [],
-                        }
-                    ],
+                    "records": [{"UPDATED_AT": "2026-05-30T12:05:00+00:00", "MISSION_MODE": 2}]
                 },
             }
             status = await buffer.receive(bulk)
-            self.assertEqual(status.get("status"), "pipeline_triggered")
-            self.assertTrue(status.get("bulk_telemetry"))
-            self.assertEqual(flush_keys, ["2026-05-30T12:05:00"])
+            self.assertEqual(status.get("status"), "bulk_telemetry_stored")
+            self.assertEqual(len(persisted), 1)
+            self.assertEqual(persisted[0].get("packet_type"), "SAT_BULK_TELEMETRY")
 
         asyncio.run(scenario())
 

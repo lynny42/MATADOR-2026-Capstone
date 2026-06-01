@@ -13,16 +13,21 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ma_detector.core.baseline import BaselineManager
-from ma_detector.core.bulk_history_merge import merge_bulk_telemetry_packet
+from ma_detector.core.bulk_history_merge import (
+    build_event_queue_row,
+    build_ma_reference_packet,
+    extract_bulk_event_records,
+    find_nearest_history_for_event,
+    merge_bulk_telemetry_packet,
+    promote_event_reference_fields,
+    resolve_event_history_link,
+)
 from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.core.packet_protocol import (
-    apply_buffer_event_meta,
-    apply_violated_integrity_target,
+    event_is_attack_anomaly,
     infer_subsystem_from_file_path,
-    iter_accumulated_records,
     normalize_packet_type,
     record_time_key,
-    resolve_integrity_packet,
     scrub_record,
     select_active_record,
     select_integrity_record,
@@ -30,16 +35,7 @@ from ma_detector.core.packet_protocol import (
     merge_history_snapshots,
     should_append_baseline,
     time_key_from_value,
-    time_key_to_epoch,
     timestamp_to_epoch,
-)
-
-_HISTORY_CORE_TYPES = frozenset(
-    {
-        "SAT_TLM_HISTORY",
-        "SAT_PWR_HISTORY",
-        "SAT_ADCS_FILTER",
-    }
 )
 from ma_detector.core.rule_activation import merge_default_activations
 from ma_detector.core.target_context import (
@@ -104,6 +100,7 @@ class MAIntegratedDetector:
             self._window_size_sec = DEFAULT_ANALYSIS_WINDOW_SEC
 
             self._gs_tlm_history: list[dict[str, Any]] = []
+            self._gs_event_queue: list[dict[str, Any]] = []
             self._gs_pwr_meta: list[dict[str, Any]] = []
             self._dashboard_rows: list[dict[str, Any]] = []
             self._detail_rows: list[dict[str, Any]] = []
@@ -111,11 +108,9 @@ class MAIntegratedDetector:
             self._next_detect_id = gs_repository.fetch_next_detect_id()
             self._last_ingest_error: str | None = None
             self._latest_novel_advisory: dict[str, Any] | None = None
+            self._next_event_queue_id = 1
             self._persisted_record_fingerprints: set[str] = set()
             self._persist_comm_session: str = ""
-            # comm_session -> time_key -> merged row fields pending DB insert
-            self._comm_snapshot_state: dict[str, dict[str, dict[str, Any]]] = {}
-            self._comm_session_types_seen: dict[str, set[str]] = {}
             self._history_persist_lock = threading.RLock()
         except Exception as error:
             logger.error("MA integrated detector initialization failed: %s", error)
@@ -131,6 +126,7 @@ class MAIntegratedDetector:
             self._telemetry_window = []
             self._window_size_sec = 600
             self._gs_tlm_history = []
+            self._gs_event_queue = []
             self._gs_pwr_meta = []
             self._dashboard_rows = []
             self._detail_rows = []
@@ -138,208 +134,18 @@ class MAIntegratedDetector:
             self._next_detect_id = 1
             self._last_ingest_error = None
             self._latest_novel_advisory = None
+            self._next_event_queue_id = 1
             self._persisted_record_fingerprints = set()
             self._persist_comm_session = ""
-            self._comm_snapshot_state = {}
-            self._comm_session_types_seen = {}
             self._history_persist_lock = threading.RLock()
 
-    def _history_match_tolerance_sec(self) -> float:
-        try:
-            return float(
-                self._threshold_config.get("packet_buffer", {}).get(
-                    "RECORD_MATCH_TOLERANCE_SEC",
-                    5,
-                )
-            )
-        except Exception as error:
-            logger.error("history match tolerance lookup failed: %s", error)
-            return 5.0
-
-    def _resolve_staging_key(self, session: str, time_key: str) -> str:
-        """Pick an existing bucket within tolerance, or keep the incoming second key."""
-        try:
-            if not time_key:
-                return time_key
-            state = self._comm_snapshot_state.get(session, {})
-            if not state:
-                return time_key
-            target_epoch = time_key_to_epoch(time_key)
-            if target_epoch is None:
-                return time_key
-            tolerance = self._history_match_tolerance_sec()
-            best_key = time_key
-            best_delta = tolerance + 1.0
-            for existing_key in state:
-                fingerprint = f"{session}:merged:{existing_key}"
-                if fingerprint in self._persisted_record_fingerprints:
-                    continue
-                existing_epoch = time_key_to_epoch(existing_key)
-                if existing_epoch is None:
-                    continue
-                delta = abs(existing_epoch - target_epoch)
-                if delta <= tolerance and delta < best_delta:
-                    best_delta = delta
-                    best_key = existing_key
-            return best_key
-        except Exception as error:
-            logger.error("staging key resolve failed: %s", error)
-            return time_key
-
-    def _coalesce_comm_snapshots(self, comm_session: str) -> None:
-        """Merge nearby pending buckets so TLM/PWR/ADCS from close timestamps share one row."""
-        try:
-            session = str(comm_session or "").strip() or "_default"
-            state = self._comm_snapshot_state.get(session, {})
-            if len(state) < 2:
-                return
-            tolerance = self._history_match_tolerance_sec()
-            keys = sorted(state.keys())
-            merged_into: dict[str, str] = {key: key for key in keys}
-
-            def canonical(key: str) -> str:
-                current = key
-                while merged_into[current] != current:
-                    current = merged_into[current]
-                return current
-
-            for index, key_a in enumerate(keys):
-                epoch_a = time_key_to_epoch(key_a)
-                if epoch_a is None:
-                    continue
-                for key_b in keys[index + 1 :]:
-                    epoch_b = time_key_to_epoch(key_b)
-                    if epoch_b is None:
-                        continue
-                    if abs(epoch_b - epoch_a) > tolerance:
-                        continue
-                    root_a = canonical(key_a)
-                    root_b = canonical(key_b)
-                    if root_a == root_b:
-                        continue
-                    epoch_root_a = time_key_to_epoch(root_a)
-                    epoch_root_b = time_key_to_epoch(root_b)
-                    if epoch_root_a is None or epoch_root_b is None:
-                        continue
-                    if epoch_root_a <= epoch_root_b:
-                        target, source = root_a, root_b
-                    else:
-                        target, source = root_b, root_a
-                    target_bucket = state.setdefault(target, {})
-                    for field, value in state.get(source, {}).items():
-                        if value is not None:
-                            target_bucket[field] = value
-                    state.pop(source, None)
-                    merged_into[source] = target
-            self._comm_snapshot_state[session] = state
-        except Exception as error:
-            logger.error("comm snapshot coalesce failed: %s", error)
-
-    def _stage_history_record(self, comm_session: str, normalized: dict[str, Any]) -> None:
-        """Merge one partial onboard row into the pending snapshot for its comm session."""
-        try:
-            session = str(comm_session or "").strip() or "_default"
-            time_key = time_key_from_value(normalized.get("UPDATED_AT"))
-            if not time_key:
-                return
-            staging_key = self._resolve_staging_key(session, time_key)
-            fingerprint = f"{session}:merged:{staging_key}"
-            if fingerprint in self._persisted_record_fingerprints:
-                return
-            bucket = self._comm_snapshot_state.setdefault(session, {}).setdefault(staging_key, {})
-            for field, value in normalized.items():
-                if value is not None:
-                    bucket[field] = value
-        except Exception as error:
-            logger.error("history record staging failed: %s", error)
-
-    @staticmethod
-    def _snapshot_is_complete(row: dict[str, Any]) -> bool:
-        """True when TLM, PWR, and ADCS fields are all present for one timestamp."""
-        try:
-            has_tlm = row.get("MISSION_MODE") is not None or row.get("SVB_X") is not None
-            has_pwr = row.get("SW_0_VOLTAGE") is not None
-            has_adcs = row.get("IMU_WBN_X") is not None
-            return bool(has_tlm and has_pwr and has_adcs)
-        except Exception as error:
-            logger.error("snapshot completeness check failed: %s", error)
-            return False
-
-    def _flush_comm_snapshots(
-        self,
-        comm_session: str,
-        *,
-        complete_only: bool = False,
-    ) -> tuple[int, int]:
-        """Insert merged gs_tlm_history rows for one comm session."""
-        inserted = 0
-        skipped = 0
-        try:
-            if self._is_replay_mode:
-                return inserted, skipped
-
-            session = str(comm_session or "").strip() or "_default"
-            state = self._comm_snapshot_state.get(session, {})
-            for time_key in sorted(list(state.keys())):
-                row = dict(state[time_key])
-                if complete_only and not self._snapshot_is_complete(row):
-                    continue
-                fingerprint = f"{session}:merged:{time_key}"
-                if fingerprint in self._persisted_record_fingerprints:
-                    skipped += 1
-                    state.pop(time_key, None)
-                    continue
-                row["UPDATED_AT"] = time_key.replace("T", " ")
-                row["HISTORY_ONLY"] = True
-                row["PACKET_TYPE"] = row.get("PACKET_TYPE") or row.get("packet_type")
-                if comm_session:
-                    row["_comm_session"] = comm_session
-                if self._insert_gs_tables(row):
-                    self._persisted_record_fingerprints.add(fingerprint)
-                    state.pop(time_key, None)
-                    inserted += 1
-                else:
-                    logger.error(
-                        "history row insert failed comm=%s time=%s",
-                        comm_session or "no-session",
-                        time_key,
-                    )
-            return inserted, skipped
-        except Exception as error:
-            logger.error("comm snapshot flush failed: %s", error)
-            return inserted, skipped
-
-    def _try_flush_ready_snapshots(self, comm_session: str) -> tuple[int, int]:
-        """Persist snapshots that already contain TLM+PWR+ADCS for the same second."""
-        try:
-            return self._flush_comm_snapshots(comm_session, complete_only=True)
-        except Exception as error:
-            logger.error("ready snapshot flush failed: %s", error)
-            return 0, 0
-
-    def flush_comm_session_history(self, comm_session: str) -> tuple[int, int]:
-        """Flush every pending snapshot when an uplink communication window ends."""
-        inserted = 0
-        skipped = 0
-        try:
-            with self._history_persist_lock:
-                session = str(comm_session or "").strip() or "_default"
-                inserted, skipped = self._flush_comm_snapshots(session, complete_only=True)
-                self._comm_snapshot_state.pop(session, None)
-                self._comm_session_types_seen.pop(session, None)
-            return inserted, skipped
-        except Exception as error:
-            logger.error("comm session history flush failed: %s", error)
-            return inserted, skipped
-
     def _begin_persist_comm_session(self, comm_session: str) -> None:
-        """Flush the previous uplink session, then start staging for the new one."""
+        """Reset dedup fingerprints when a new uplink comm session starts."""
         try:
             session = str(comm_session or "").strip()
             if not session:
                 return
             if self._persist_comm_session and self._persist_comm_session != session:
-                self.flush_comm_session_history(self._persist_comm_session)
                 self._persisted_record_fingerprints.clear()
             self._persist_comm_session = session
         except Exception as error:
@@ -363,149 +169,8 @@ class MAIntegratedDetector:
             logger.error("get novel advisory failed: %s", error)
             return None
 
-    def merge_buffered_packets(
-        self,
-        packets_by_type: dict[str, dict[str, Any]],
-        buffer_key: str | None = None,
-        match_tolerance_sec: float | None = None,
-        bulk_packets: dict[str, dict[str, Any]] | None = None,
-        event_meta: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Merge up to five packet types into one flattened telemetry dict."""
-        try:
-            merged: dict[str, Any] = {}
-            tolerance = float(
-                match_tolerance_sec
-                if match_tolerance_sec is not None
-                else self._threshold_config.get("packet_buffer", {}).get(
-                    "RECORD_MATCH_TOLERANCE_SEC",
-                    5,
-                )
-            )
-            order = [
-                "SAT_TLM_HISTORY",
-                "SAT_TLM_CURRENT",
-                "SAT_PWR_HISTORY",
-                "SAT_PWR_META",
-                "SAT_EVENT_QUEUE",
-                "SAT_INTEGRITY_HASH",
-                "SAT_ADCS_FILTER",
-            ]
-            seen_types: set[str] = set()
-            for packet_type in order:
-                canonical = normalize_packet_type(packet_type)
-                if canonical in seen_types:
-                    continue
-                packet = packets_by_type.get(packet_type)
-                if packet is None:
-                    for raw_type, raw_packet in packets_by_type.items():
-                        if normalize_packet_type(raw_type) == canonical and isinstance(raw_packet, dict):
-                            packet = raw_packet
-                            break
-                if packet is None and bulk_packets:
-                    bulk_packet = bulk_packets.get(packet_type)
-                    if bulk_packet is None:
-                        for raw_type, raw_bulk in bulk_packets.items():
-                            if normalize_packet_type(raw_type) == canonical and isinstance(raw_bulk, dict):
-                                bulk_packet = raw_bulk
-                                break
-                    if isinstance(bulk_packet, dict):
-                        packet = dict(bulk_packet)
-                if not isinstance(packet, dict):
-                    continue
-                seen_types.add(canonical)
-                payload = dict(packet)
-                payload["packet_type"] = canonical
-                if buffer_key:
-                    payload["_buffer_key"] = buffer_key
-                payload["_match_tolerance_sec"] = tolerance
-                normalized = self._merge_packet_sections(payload)
-                merged.update(normalized)
-            if buffer_key:
-                merged["_buffer_key"] = buffer_key
-            merged["_match_tolerance_sec"] = tolerance
-            self._normalize_filter_fields(merged)
-            integrity_packet = resolve_integrity_packet(packets_by_type, bulk_packets)
-            apply_buffer_event_meta(merged, event_meta)
-            apply_violated_integrity_target(merged, integrity_packet, buffer_key, tolerance)
-            if integrity_packet and int(merged.get("IS_VIOLATED", 0) or 0) != 1:
-                rec = select_integrity_record(integrity_packet, buffer_key=buffer_key, tolerance_sec=tolerance)
-                if rec:
-                    merged.update(flatten_integrity_record(rec))
-            if int(merged.get("IS_VIOLATED", 0) or 0) != 1:
-                adcs_thresholds = self._threshold_config.get("adcs_target_inference", {})
-                adcs_target = infer_adcs_attack_target(merged, adcs_thresholds)
-                if adcs_target:
-                    current = normalize_target_subsystem(merged.get("TARGET_SUBSYSTEM"))
-                    power_derived = {"EPS", "COM", "TCS", "OBC"}
-                    if not current or current in power_derived:
-                        merged["TARGET_SUBSYSTEM"] = adcs_target
-            merged.setdefault("UPDATED_AT", datetime.now(timezone.utc).isoformat())
-            merged.setdefault("DETECTED_AT", merged["UPDATED_AT"])
-            return merged
-        except Exception as error:
-            logger.error("buffered packet merge failed: %s", error)
-            return {}
-
-    def persist_accumulated_packet(self, packet: dict[str, Any]) -> tuple[int, int]:
-        """Stage onboard rows, then flush merged snapshots when TLM+PWR+ADCS align."""
-        inserted = 0
-        skipped = 0
-        try:
-            if self._is_replay_mode:
-                return inserted, skipped
-
-            with self._history_persist_lock:
-                comm_session = str(packet.get("_comm_session", "") or "").strip()
-                session = comm_session or "_default"
-                if comm_session:
-                    self._begin_persist_comm_session(comm_session)
-
-                packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
-                if packet_type in _HISTORY_CORE_TYPES:
-                    self._comm_session_types_seen.setdefault(session, set()).add(packet_type)
-
-                record_count = 0
-                for record in iter_accumulated_records(packet):
-                    record_count += 1
-                    payload = {
-                        "packet_type": packet_type,
-                        "records": [record],
-                        "_active_record": record,
-                    }
-                    normalized = self._merge_packet_sections(payload)
-                    normalized["PACKET_TYPE"] = packet_type
-                    if comm_session:
-                        normalized["_comm_session"] = comm_session
-                    self._stage_history_record(comm_session, normalized)
-                    self._coalesce_comm_snapshots(comm_session)
-                    batch_inserted, batch_skipped = self._try_flush_ready_snapshots(comm_session)
-                    inserted += batch_inserted
-                    skipped += batch_skipped
-
-                if _HISTORY_CORE_TYPES.issubset(self._comm_session_types_seen.get(session, set())):
-                    self._coalesce_comm_snapshots(comm_session)
-                    batch_inserted, batch_skipped = self._try_flush_ready_snapshots(comm_session)
-                    inserted += batch_inserted
-                    skipped += batch_skipped
-
-                pending = len(self._comm_snapshot_state.get(session, {}))
-                logger.info(
-                    "history persist type=%s comm=%s records=%s inserted=%s skipped=%s pending=%s",
-                    packet_type,
-                    comm_session or "no-session",
-                    record_count,
-                    inserted,
-                    skipped,
-                    pending,
-                )
-            return inserted, skipped
-        except Exception as error:
-            logger.error("accumulated packet persist failed: %s", error)
-            return inserted, skipped
-
     def persist_bulk_telemetry_packet(self, bulk: dict[str, Any]) -> tuple[int, int]:
-        """Merge SAT_BULK_TELEMETRY sections by SNAPSHOT_ID and insert one row per sample."""
+        """Merge telemetry by SNAPSHOT_ID, store events separately, run MA per attack event."""
         inserted = 0
         skipped = 0
         try:
@@ -519,7 +184,15 @@ class MAIntegratedDetector:
                     self._begin_persist_comm_session(comm_session)
 
                 merged_rows = merge_bulk_telemetry_packet(bulk)
-                attack_rows: list[dict[str, Any]] = []
+                stored_history_rows: list[dict[str, Any]] = []
+                fallback_history: dict[str, Any] | None = None
+                tolerance_sec = float(
+                    self._threshold_config.get("packet_buffer", {}).get(
+                        "RECORD_MATCH_TOLERANCE_SEC",
+                        5,
+                    )
+                )
+
                 for row in merged_rows:
                     snapshot_id = row.get("SNAPSHOT_ID")
                     sample_id = snapshot_id or row.get("SAMPLE_HISTORY_ID", row.get("SAMPLE_INDEX", ""))
@@ -532,39 +205,108 @@ class MAIntegratedDetector:
                         continue
                     if comm_session:
                         row["_comm_session"] = comm_session
-                    if self._insert_gs_tables(row):
-                        self._persisted_record_fingerprints.add(fingerprint)
-                        inserted += 1
-                        if row.get("IS_ANOMALY"):
-                            attack_rows.append(dict(row))
-                    else:
+                    history_id = self._insert_gs_tables(row)
+                    if history_id is None:
                         logger.error(
                             "bulk history row insert failed comm=%s sample=%s",
                             comm_session or "no-session",
                             sample_id,
                         )
+                        continue
+                    stored_row = dict(row)
+                    stored_row["HISTORY_ID"] = history_id
+                    self._persisted_record_fingerprints.add(fingerprint)
+                    inserted += 1
+                    stored_history_rows.append(stored_row)
+                    if fallback_history is None:
+                        fallback_history = stored_row
 
-                for row in attack_rows:
-                    pipeline_row = dict(row)
-                    pipeline_row["_bulk_persisted"] = True
-                    pipeline_row.setdefault("packet_type", "SAT_BULK_TELEMETRY")
-                    self.receive_telemetry(
-                        json.dumps(pipeline_row, ensure_ascii=False, default=str),
-                        skip_history_insert=True,
+                events_inserted = 0
+                events_skipped = 0
+                attack_runs = 0
+                bulk_sent_at = bulk.get("sent_at")
+                if isinstance(bulk_sent_at, str):
+                    bulk_sent_at = bulk_sent_at
+                else:
+                    bulk_sent_at = None
+
+                for event in extract_bulk_event_records(bulk):
+                    event_key = self._event_persist_fingerprint(session, event)
+                    if event_key in self._persisted_record_fingerprints:
+                        events_skipped += 1
+                        continue
+
+                    history_row, link_history_id = resolve_event_history_link(
+                        event,
+                        stored_history_rows,
+                        fallback_history=fallback_history,
+                        tolerance_sec=tolerance_sec,
                     )
+                    event_row = build_event_queue_row(
+                        event,
+                        bulk_sent_at=bulk_sent_at,
+                    )
+                    if not event_row:
+                        continue
+
+                    event_queue_id = self._insert_event_queue_row(event_row)
+                    if event_queue_id is None:
+                        logger.error(
+                            "event queue insert failed comm=%s event_id=%s",
+                            comm_session or "no-session",
+                            event.get("EVENT_ID"),
+                        )
+                        continue
+
+                    self._persisted_record_fingerprints.add(event_key)
+                    events_inserted += 1
+                    stored_event = dict(event_row)
+                    stored_event["EVENT_QUEUE_ID"] = event_queue_id
+
+                    if event_is_attack_anomaly(event) and history_row is not None:
+                        _, time_delta = find_nearest_history_for_event(
+                            event,
+                            stored_history_rows,
+                            tolerance_sec=tolerance_sec,
+                        )
+                        pipeline_row = build_ma_reference_packet(
+                            history_row,
+                            stored_event,
+                            time_delta_sec=time_delta,
+                        )
+                        pipeline_row["_bulk_persisted"] = True
+                        pipeline_row.setdefault("packet_type", "SAT_BULK_TELEMETRY")
+                        self.receive_telemetry(
+                            json.dumps(pipeline_row, ensure_ascii=False, default=str),
+                            skip_history_insert=True,
+                        )
+                        attack_runs += 1
 
                 logger.info(
-                    "bulk history persist comm=%s samples=%s inserted=%s skipped=%s attacks=%s",
+                    "bulk history persist comm=%s samples=%s inserted=%s skipped=%s "
+                    "events=%s events_skipped=%s attacks=%s",
                     comm_session or "no-session",
                     len(merged_rows),
                     inserted,
                     skipped,
-                    len(attack_rows),
+                    events_inserted,
+                    events_skipped,
+                    attack_runs,
                 )
             return inserted, skipped
         except Exception as error:
             logger.error("bulk telemetry persist failed: %s", error)
             return inserted, skipped
+
+    @staticmethod
+    def _event_persist_fingerprint(session: str, event: dict[str, Any]) -> str:
+        try:
+            detected = time_key_from_value(event.get("DETECTED_AT") or event.get("TIMESTAMP") or "")
+            event_id = event.get("EVENT_ID", "")
+            return f"{session}:event:{event_id}:{detected or 'unknown'}"
+        except Exception as error:
+            logger.error("event persist fingerprint build failed: %s", error)
+            return f"{session}:event:unknown"
 
     def build_baseline(self, history: list[dict[str, Any]]) -> None:
         """Build normal-operation baseline statistics from history records."""
@@ -1327,6 +1069,7 @@ class MAIntegratedDetector:
             normalized = self._merge_packet_sections(packet)
             normalized.setdefault("UPDATED_AT", datetime.now(timezone.utc).isoformat())
             normalized.setdefault("DETECTED_AT", normalized["UPDATED_AT"])
+            promote_event_reference_fields(normalized)
             self._normalize_filter_fields(normalized)
             return normalized
         except Exception as error:
@@ -1973,20 +1716,22 @@ class MAIntegratedDetector:
             logger.error("timestamp conversion failed: %s", error)
             return time.time()
 
-    def _insert_gs_tables(self, packet: dict[str, Any]) -> bool:
+    def _insert_gs_tables(self, packet: dict[str, Any]) -> int | None:
         try:
             if self._is_replay_mode:
-                return False
-            if not is_db_available():
-                logger.error("GS table insert skipped; database unavailable")
-                return False
+                return None
             prepared = gs_repository.prepare_packet_for_db(packet)
+            memory_id = len(self._gs_tlm_history) + 1
+            prepared["HISTORY_ID"] = memory_id
             self._gs_tlm_history.append(dict(prepared))
+            if not is_db_available():
+                return memory_id
             history_id = gs_repository.insert_tlm_history(prepared)
             if history_id is None:
                 logger.error("GS table insert returned no HISTORY_ID")
-                return False
-            gs_repository.insert_pwr_meta_rows(prepared, history_id)
+                return None
+            prepared["HISTORY_ID"] = history_id
+            gs_repository.insert_pwr_meta_rows(prepared, history_id=history_id)
             power_columns = {
                 key: value
                 for key, value in prepared.items()
@@ -1995,10 +1740,37 @@ class MAIntegratedDetector:
             if power_columns:
                 power_columns["UPDATED_AT"] = prepared.get("UPDATED_AT")
                 self._gs_pwr_meta.append(power_columns)
-            return True
+            return history_id
         except Exception as error:
             logger.error("GS table insert failed: %s", error)
-            return False
+            return None
+
+    def _insert_event_queue_row(self, row: dict[str, Any]) -> int | None:
+        try:
+            if self._is_replay_mode:
+                return None
+            stored = dict(row)
+            event_queue_id = self._next_event_queue_id
+            self._next_event_queue_id += 1
+            stored["EVENT_QUEUE_ID"] = event_queue_id
+            self._gs_event_queue.append(stored)
+            if not is_db_available():
+                return event_queue_id
+            db_id = gs_repository.insert_event_queue_row(stored)
+            if db_id is None:
+                return None
+            stored["EVENT_QUEUE_ID"] = db_id
+            return db_id
+        except Exception as error:
+            logger.error("event queue insert failed: %s", error)
+            return None
+
+    def get_event_queue_records(self) -> list[dict[str, Any]]:
+        try:
+            return [dict(row) for row in self._gs_event_queue]
+        except Exception as error:
+            logger.error("get event queue records failed: %s", error)
+            return []
 
     def _notify_ui_normal(self, packet: dict[str, Any]) -> None:
         try:
@@ -2017,8 +1789,11 @@ class MAIntegratedDetector:
     def _memory_insert_dashboard(self, report: dict[str, Any]) -> None:
         """Append one dashboard row to in-memory tables without DB writes (replay preview)."""
         try:
+            from ma_detector.core.ma_onboard_view import satellite_filter_from_ma_packet
+
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
-            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            filter_fields = satellite_filter_from_ma_packet(latest)
+            target = filter_fields.get("SATELLITE_TARGET_SUBSYSTEM") or ""
             row = {
                 "DETECT_TIME": latest.get("UPDATED_AT", datetime.now(timezone.utc).isoformat()),
                 "MODULE": report.get("module"),
@@ -2035,14 +1810,7 @@ class MAIntegratedDetector:
                 "UNREGISTERED_ACTION_IDS": list(report.get("unregistered_action_ids", [])),
                 "TRIGGERED_RULE_RESULTS": list(report.get("triggered_rule_results", [])),
                 "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
-                "SATELLITE_TARGET_SUBSYSTEM": target,
-                "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
-                "FALSE_POSITIVE_WEIGHT": latest.get("FALSE_POSITIVE_WEIGHT"),
-                "FALSE_POSITIVE_EXCEPTION": latest.get("FALSE_POSITIVE_EXCEPTION"),
-                "TARGET_SUBSYSTEM": latest.get("TARGET_SUBSYSTEM"),
-                "EVENT_ID": latest.get("EVENT_ID"),
-                "SW_ID_LIST": latest.get("SW_ID_LIST", []),
-                "SATELLITE_DETECTED_AT": latest.get("DETECTED_AT"),
+                **filter_fields,
             }
             detect_id = self._next_detect_id
             self._next_detect_id += 1
@@ -2063,8 +1831,11 @@ class MAIntegratedDetector:
 
     def _db_insert_dashboard(self, report: dict[str, Any]) -> None:
         try:
+            from ma_detector.core.ma_onboard_view import satellite_filter_from_ma_packet
+
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
-            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            filter_fields = satellite_filter_from_ma_packet(latest)
+            target = filter_fields.get("SATELLITE_TARGET_SUBSYSTEM") or ""
             row = {
                 "DETECT_TIME": latest.get("UPDATED_AT", datetime.now(timezone.utc).isoformat()),
                 "MODULE": report.get("module"),
@@ -2081,14 +1852,7 @@ class MAIntegratedDetector:
                 "UNREGISTERED_ACTION_IDS": list(report.get("unregistered_action_ids", [])),
                 "TRIGGERED_RULE_RESULTS": list(report.get("triggered_rule_results", [])),
                 "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
-                "SATELLITE_TARGET_SUBSYSTEM": target,
-                "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
-                "FALSE_POSITIVE_WEIGHT": latest.get("FALSE_POSITIVE_WEIGHT"),
-                "FALSE_POSITIVE_EXCEPTION": latest.get("FALSE_POSITIVE_EXCEPTION"),
-                "TARGET_SUBSYSTEM": latest.get("TARGET_SUBSYSTEM"),
-                "EVENT_ID": latest.get("EVENT_ID"),
-                "SW_ID_LIST": latest.get("SW_ID_LIST", []),
-                "SATELLITE_DETECTED_AT": latest.get("DETECTED_AT"),
+                **filter_fields,
             }
             detect_id = gs_repository.insert_dashboard_row(row)
             if detect_id is None:

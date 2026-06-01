@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from ma_detector.core.packet_protocol import (
+    DEFAULT_RECORD_MATCH_TOLERANCE_SEC,
     event_is_attack_anomaly,
     extract_event_queue_section_events,
     infer_subsystem_from_file_path,
@@ -15,6 +16,11 @@ from ma_detector.core.packet_protocol import (
     scrub_record,
     time_key_from_value,
     time_key_to_epoch,
+)
+from ma_detector.core.event_queue_columns import (
+    ONBOARD_EVENT_WIRE_FIELDS,
+    apply_onboard_event_to_queue_row,
+    parse_module_scores,
 )
 from ma_detector.core.target_context import infer_target_from_sw_ids
 from ma_detector.core.tlm_adcs_columns import (
@@ -30,92 +36,44 @@ TLM_SKIP_FLAT_FIELDS = frozenset({"channels", "HISTORY_ID", "UPDATED_AT"}) | MET
 ADCS_SKIP_FLAT_FIELDS = frozenset({"HISTORY_ID", "TIMESTAMP"}) | METADATA_SKIP_FIELDS
 PWR_SKIP_FLAT_FIELDS = frozenset({"HISTORY_ID", "UPDATED_AT", "channels"}) | METADATA_SKIP_FIELDS
 
-EVENT_COPY_FIELDS = (
+EVENT_REFERENCE_FIELDS = ONBOARD_EVENT_WIRE_FIELDS
+
+EVENT_QUEUE_META_FIELDS = frozenset(
+    {
+        "EVENT_QUEUE_ID",
+        "HISTORY_ID",
+        "SNAPSHOT_ID",
+        "COMM_SESSION",
+        "BULK_SENT_AT",
+        "PAYLOAD",
+        "CREATED_AT",
+    }
+)
+
+MA_GATE_FIELDS = (
     "EVENT_ID",
     "EVENT_TYPE",
-    "PRIORITY",
-    "IS_SENT",
-    "SW_ID",
     "WEIGHT",
-    "EXCEPTION_CODE",
-    "PIPEOVERFLOWRRCNT",
-    "CHILDQUEUECOUNT",
-    "FILEWRITEERRCOUNTER",
-    "CMDREJECTEDCOUNTER",
-    "CH1_CH2_FAULT_CRC",
-    "CH1_FAULT_FILE_SIZE_MISMATCH",
-    "PROCESSOR_RESET_COUNT",
+    "TARGET_SUBSYSTEM",
+    "SW_ID",
     "DETECTED_AT",
-    "TIMESTAMP",
-    "MODULE_SCORES",
+    "FALSE_POSITIVE_RESULT",
+    "FALSE_POSITIVE_WEIGHT",
+    "FALSE_POSITIVE_EXCEPTION",
+    "EXCEPTION_CODE",
 )
 
 
-def _parse_module_scores(value: Any) -> dict[str, Any] | None:
-    try:
-        if isinstance(value, dict):
-            return dict(value)
-        if isinstance(value, str) and value.strip():
-            parsed = json.loads(value)
-            if isinstance(parsed, dict):
-                return parsed
-        return None
-    except Exception as error:
-        logger.error("module scores parse failed: %s", error)
-        return None
-
-
 def apply_event_fields_to_row(row: dict[str, Any], event: dict[str, Any]) -> None:
-    """Attach SAT_EVENT_QUEUE fields and anomaly flags to one merged history row."""
+    """Legacy helper: copy onboard event fields onto a dict (tests / old merge paths)."""
     try:
+        apply_onboard_event_to_queue_row(row, event)
         cleaned = scrub_record(event)
-        for key in EVENT_COPY_FIELDS:
-            if key in cleaned and cleaned[key] is not None:
-                row[key] = cleaned[key]
-
-        combined_crc = cleaned.get("CH1_CH2_FAULT_CRC")
-        if combined_crc is not None:
-            row["CH1_FAULT_CRC"] = combined_crc
-            row["CH2_FAULT_CRC"] = combined_crc
-
-        module_scores = _parse_module_scores(cleaned.get("MODULE_SCORES"))
-        if module_scores is not None:
-            row["MODULE_SCORES"] = module_scores
-
-        weight = int(cleaned.get("WEIGHT", 0) or 0)
-        event_type = str(cleaned.get("EVENT_TYPE", ""))
-        is_anomaly = event_is_attack_anomaly(cleaned)
-        row["IS_ANOMALY"] = is_anomaly
-        row["FALSE_POSITIVE_RESULT"] = "Y" if is_anomaly else "N"
-        row["FALSE_POSITIVE_WEIGHT"] = weight
-        row["WEIGHT"] = weight
-        exception_code = cleaned.get("EXCEPTION_CODE")
-        if exception_code is not None:
-            row["FALSE_POSITIVE_EXCEPTION"] = str(exception_code)
-
-        detected_at = cleaned.get("DETECTED_AT") or cleaned.get("TIMESTAMP")
-        if detected_at:
-            detected_key = time_key_from_value(detected_at)
-            row["DETECTED_AT"] = (
-                detected_key.replace("T", " ") if detected_key else detected_at
-            )
-
-        if not row.get("TARGET_SUBSYSTEM"):
-            file_target = infer_subsystem_from_file_path(cleaned.get("FILE_PATH"))
-            if file_target:
-                row["TARGET_SUBSYSTEM"] = file_target
-        if not row.get("TARGET_SUBSYSTEM") and cleaned.get("SW_ID") is not None:
-            row["TARGET_SUBSYSTEM"] = infer_target_from_sw_ids([cleaned.get("SW_ID")])
-
         sw_id = cleaned.get("SW_ID")
         if sw_id is not None:
             sw_list = row.setdefault("SW_ID_LIST", [])
             if isinstance(sw_list, list) and int(sw_id) not in sw_list:
                 sw_list.append(int(sw_id))
-
-        source = row.setdefault("SOURCE_RECORDS", {})
-        if isinstance(source, dict):
-            source["event"] = dict(cleaned)
     except Exception as error:
         logger.error("event field apply failed: %s", error)
 
@@ -654,10 +612,13 @@ def attach_bulk_envelope_fields(rows: list[dict[str, Any]], bulk: dict[str, Any]
         sent_at = bulk.get("sent_at")
         note = bulk.get("note")
         sent_key = time_key_from_value(sent_at) if sent_at else None
+        comm_session = str(bulk.get("_comm_session", "") or "").strip()
         for row in rows:
             row["WIRE_PAYLOAD"] = wire
             if sent_key:
                 row["BULK_SENT_AT"] = sent_key.replace("T", " ")
+            if comm_session:
+                row["COMM_SESSION"] = comm_session
             if note:
                 row["BULK_NOTE"] = str(note)
     except Exception as error:
@@ -697,11 +658,6 @@ def merge_bulk_telemetry_packet(bulk: dict[str, Any]) -> list[dict[str, Any]]:
             snapshot_records=snapshot_records,
         )
 
-        event_section = bulk.get("SAT_EVENT_QUEUE")
-        if isinstance(event_section, dict):
-            events = extract_event_queue_section_events(event_section)
-            apply_bulk_events_to_rows(rows, events)
-
         integrity_records = extract_bulk_section_records(bulk, "SAT_INTEGRITY_HASH")
         if integrity_records:
             apply_bulk_integrity_to_rows(rows, integrity_records)
@@ -711,3 +667,233 @@ def merge_bulk_telemetry_packet(bulk: dict[str, Any]) -> list[dict[str, Any]]:
     except Exception as error:
         logger.error("bulk telemetry packet merge failed: %s", error)
         return []
+
+
+def extract_bulk_event_records(bulk: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every SAT_EVENT_QUEUE event dict from one bulk uplink."""
+    try:
+        packet_type = normalize_packet_type(str(bulk.get("packet_type", "")).strip())
+        if packet_type != "SAT_BULK_TELEMETRY":
+            return []
+        event_section = bulk.get("SAT_EVENT_QUEUE")
+        if not isinstance(event_section, dict):
+            return []
+        events = extract_event_queue_section_events(event_section)
+        return [scrub_record(event) for event in events if isinstance(event, dict)]
+    except Exception as error:
+        logger.error("bulk event extract failed: %s", error)
+        return []
+
+
+def build_event_queue_row(
+    event: dict[str, Any],
+    *,
+    bulk_sent_at: str | None = None,
+) -> dict[str, Any]:
+    """Build one gs_event_queue insert row — onboard wire fields only."""
+    try:
+        row: dict[str, Any] = {}
+        apply_onboard_event_to_queue_row(row, event)
+        if bulk_sent_at:
+            sent_key = time_key_from_value(bulk_sent_at)
+            row["BULK_SENT_AT"] = sent_key.replace("T", " ") if sent_key else bulk_sent_at
+        row["PAYLOAD"] = scrub_record(event)
+        return row
+    except Exception as error:
+        logger.error("event queue row build failed: %s", error)
+        return {}
+
+
+def _history_row_epoch(row: dict[str, Any]) -> float | None:
+    try:
+        return time_key_to_epoch(
+            row.get("SNAPSHOT_AT") or row.get("UPDATED_AT") or row.get("DETECTED_AT"),
+        )
+    except Exception as error:
+        logger.error("history row epoch failed: %s", error)
+        return None
+
+
+def _event_epoch(event: dict[str, Any]) -> float | None:
+    try:
+        return time_key_to_epoch(event.get("DETECTED_AT") or event.get("TIMESTAMP"))
+    except Exception as error:
+        logger.error("event epoch failed: %s", error)
+        return None
+
+
+def _coerce_history_rows(
+    history_rows: list[dict[str, Any]] | dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        if isinstance(history_rows, dict):
+            return [dict(row) for row in history_rows.values() if isinstance(row, dict)]
+        return [dict(row) for row in history_rows if isinstance(row, dict)]
+    except Exception as error:
+        logger.error("history row list coerce failed: %s", error)
+        return []
+
+
+def find_nearest_history_for_event(
+    event: dict[str, Any],
+    history_rows: list[dict[str, Any]] | dict[int, dict[str, Any]],
+    *,
+    tolerance_sec: float = DEFAULT_RECORD_MATCH_TOLERANCE_SEC,
+) -> tuple[dict[str, Any] | None, float | None]:
+    """Pick gs_tlm_history row nearest to event DETECTED_AT within tolerance."""
+    try:
+        rows = _coerce_history_rows(history_rows)
+        if not rows:
+            return None, None
+
+        event_time = _event_epoch(event)
+        if event_time is None:
+            if len(rows) == 1:
+                return rows[0], None
+            snapshot_id = record_snapshot_id(event)
+            if snapshot_id is not None:
+                for row in rows:
+                    if row.get("SNAPSHOT_ID") == snapshot_id:
+                        return row, None
+            return None, None
+
+        within_tolerance: list[tuple[float, dict[str, Any]]] = []
+        nearest_any: tuple[float, dict[str, Any]] | None = None
+        snapshot_id = record_snapshot_id(event)
+
+        for row in rows:
+            row_time = _history_row_epoch(row)
+            if row_time is None:
+                continue
+            delta = abs(row_time - event_time)
+            if nearest_any is None or delta < nearest_any[0]:
+                nearest_any = (delta, row)
+            if delta <= tolerance_sec:
+                within_tolerance.append((delta, row))
+
+        pool = within_tolerance or ([nearest_any] if nearest_any is not None else [])
+        if not pool:
+            return None, None
+
+        if snapshot_id is not None:
+            snapshot_matches = [
+                item for item in pool if item[1].get("SNAPSHOT_ID") == snapshot_id
+            ]
+            if snapshot_matches:
+                pool = snapshot_matches
+
+        best_delta, best_row = sorted(pool, key=lambda item: item[0])[0]
+        return best_row, best_delta
+    except Exception as error:
+        logger.error("nearest history for event failed: %s", error)
+        return None, None
+
+
+def resolve_event_history_link(
+    event: dict[str, Any],
+    history_rows: list[dict[str, Any]] | dict[int, dict[str, Any]],
+    *,
+    fallback_history: dict[str, Any] | None = None,
+    tolerance_sec: float = DEFAULT_RECORD_MATCH_TOLERANCE_SEC,
+) -> tuple[dict[str, Any] | None, int | None]:
+    """Link one event to gs_tlm_history by time proximity (SNAPSHOT_ID tie-break only)."""
+    try:
+        row, _delta = find_nearest_history_for_event(
+            event,
+            history_rows,
+            tolerance_sec=tolerance_sec,
+        )
+        if row is None and fallback_history is not None:
+            row = fallback_history
+        if row is None:
+            return None, None
+        history_id = row.get("HISTORY_ID")
+        return row, history_id if isinstance(history_id, int) else None
+    except Exception as error:
+        logger.error("event history link resolve failed: %s", error)
+        return None, None
+
+
+def _event_payload_from_row(event_row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = event_row.get("PAYLOAD")
+        if isinstance(payload, dict):
+            return scrub_record(payload)
+        extracted: dict[str, Any] = {}
+        for key, value in event_row.items():
+            if key in EVENT_QUEUE_META_FIELDS:
+                continue
+            if value is not None:
+                extracted[key] = value
+        return scrub_record(extracted)
+    except Exception as error:
+        logger.error("event payload extract failed: %s", error)
+        return {}
+
+
+def build_ma_reference_packet(
+    history_row: dict[str, Any],
+    event_row: dict[str, Any],
+    *,
+    time_delta_sec: float | None = None,
+) -> dict[str, Any]:
+    """Build MA input: telemetry snapshot + onboard event reference (no history flatten)."""
+    try:
+        from ma_detector.core.ma_onboard_view import apply_ma_onboard_fields
+
+        packet = dict(history_row)
+        onboard_event = _event_payload_from_row(event_row)
+        packet["ONBOARD_EVENT"] = onboard_event
+        packet["EVENT_QUEUE_ID"] = event_row.get("EVENT_QUEUE_ID")
+        if time_delta_sec is not None:
+            packet["_EVENT_HISTORY_DELTA_SEC"] = round(float(time_delta_sec), 3)
+
+        apply_ma_onboard_fields(packet, event_row)
+
+        for key in MA_GATE_FIELDS:
+            if event_row.get(key) is not None:
+                packet[key] = event_row[key]
+            elif onboard_event.get(key) is not None:
+                packet[key] = onboard_event[key]
+
+        promote_event_reference_fields(packet)
+        return packet
+    except Exception as error:
+        logger.error("ma reference packet build failed: %s", error)
+        return dict(history_row)
+
+
+def promote_event_reference_fields(packet: dict[str, Any]) -> None:
+    """Fill missing rule-evidence columns from ONBOARD_EVENT without overwriting telemetry."""
+    try:
+        onboard = packet.get("ONBOARD_EVENT")
+        if not isinstance(onboard, dict):
+            return
+
+        for key in EVENT_REFERENCE_FIELDS:
+            if packet.get(key) is not None:
+                continue
+            value = onboard.get(key)
+            if value is not None:
+                packet[key] = value
+
+        combined_crc = onboard.get("CH1_CH2_FAULT_CRC")
+        if combined_crc is not None:
+            if packet.get("CH1_FAULT_CRC") is None:
+                packet["CH1_FAULT_CRC"] = combined_crc
+            if packet.get("CH2_FAULT_CRC") is None:
+                packet["CH2_FAULT_CRC"] = combined_crc
+
+        module_scores = parse_module_scores(onboard.get("MODULE_SCORES"))
+        if module_scores is not None and packet.get("MODULE_SCORES") is None:
+            packet["MODULE_SCORES"] = module_scores
+    except Exception as error:
+        logger.error("event reference field promote failed: %s", error)
+
+
+def merge_history_with_event(
+    history_row: dict[str, Any],
+    event_row: dict[str, Any],
+) -> dict[str, Any]:
+    """Backward-compatible alias for build_ma_reference_packet."""
+    return build_ma_reference_packet(history_row, event_row)

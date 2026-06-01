@@ -39,7 +39,7 @@ This branch also includes a FastAPI backend and a Next.js dashboard UI.
 ### Backend
 
 ```bash
-python3 -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
 ```
 

@@ -676,7 +676,9 @@ function RightPanel({
           >
             {(dashboard.communications || []).map((communication) => (
               <option key={communication.communicated_at} value={communication.communicated_at}>
-                {communication.received_at || communication.communicated_at}
+                {communication.bulk_sent_at || communication.received_at || communication.communicated_at}
+                {" · "}
+                {communication.sample_count || 0}샘플
                 {" · "}
                 {(communication.anomaly_count || 0) > 0
                   ? `MA ${communication.anomaly_count}건`

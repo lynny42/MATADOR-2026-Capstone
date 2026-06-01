@@ -1,4 +1,4 @@
-"""Telemetry ingest routes with five-packet buffering."""
+﻿"""Telemetry ingest routes for SAT_BULK_TELEMETRY uplinks."""
 
 from __future__ import annotations
 
@@ -7,13 +7,20 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 
-from api.ingest_trace import recent_ingest_events, recent_raw_packets, record_ingest_event
+from api.ingest_trace import (
+    format_packet_json,
+    get_raw_packet,
+    recent_ingest_events,
+    recent_raw_packets,
+    record_ingest_event,
+    record_raw_packet,
+)
 from api.packet_buffer import PacketBufferManager
 from api.state import get_detector
-from api.websocket_manager import ws_manager
-from ma_detector.core.packet_protocol import summarize_uplink_packet
 from ma_detector.core.bulk_history_merge import merge_bulk_telemetry_packet
+from ma_detector.core.packet_protocol import summarize_uplink_packet
 from ma_detector.db.database import is_db_available
 
 logger = logging.getLogger(__name__)
@@ -37,41 +44,12 @@ def _packet_buffer_settings() -> tuple[float, float]:
 
 
 def configure_buffer(timeout_sec: float | None = None, match_tolerance_sec: float | None = None) -> None:
-    """Initialize or update the packet buffer manager."""
+    """Initialize or update the bulk telemetry ingest manager."""
     global _buffer_manager
 
     default_timeout, default_tolerance = _packet_buffer_settings()
     timeout = float(timeout_sec if timeout_sec is not None else default_timeout)
     tolerance = float(match_tolerance_sec if match_tolerance_sec is not None else default_tolerance)
-
-    def _on_bulk_stored(packet: dict[str, Any]) -> None:
-        try:
-            detector = get_detector()
-            inserted, skipped = detector.persist_accumulated_packet(packet)
-            record_ingest_event(
-                "db_persist",
-                packet_type=str(packet.get("packet_type", "")),
-                comm_session=packet.get("_comm_session"),
-                summary=(
-                    f"inserted={inserted} skipped={skipped} "
-                    f"type={packet.get('packet_type', '')} "
-                    f"db={'ok' if is_db_available() else 'unavailable'}"
-                ),
-                extra={
-                    "inserted": inserted,
-                    "skipped": skipped,
-                    "db_available": is_db_available(),
-                    "record_count": len(packet.get("records", [])),
-                },
-            )
-        except Exception as error:
-            logger.error("accumulated history persist failed: %s", error)
-            record_ingest_event(
-                "db_persist_error",
-                packet_type=str(packet.get("packet_type", "")),
-                comm_session=packet.get("_comm_session"),
-                summary=str(error),
-            )
 
     def _on_bulk_telemetry_persist(bulk: dict[str, Any]) -> None:
         try:
@@ -104,119 +82,16 @@ def configure_buffer(timeout_sec: float | None = None, match_tolerance_sec: floa
                 summary=str(error),
             )
 
-    def _on_comm_session_end(comm_session: str) -> None:
-        try:
-            detector = get_detector()
-            inserted, skipped = detector.flush_comm_session_history(comm_session)
-            if inserted or skipped:
-                record_ingest_event(
-                    "db_persist",
-                    comm_session=comm_session,
-                    summary=f"comm_end inserted={inserted} skipped={skipped}",
-                    extra={"inserted": inserted, "skipped": skipped, "comm_end": True},
-                )
-        except Exception as error:
-            logger.error("comm session history flush failed: %s", error)
-
-    def _on_flush(
-        key: str,
-        packets: dict[str, dict[str, Any]],
-        bulk_packets: dict[str, dict[str, Any]],
-        event_meta: list[dict[str, Any]] | None = None,
-        comm_session: str | None = None,
-    ) -> None:
-        try:
-            detector = get_detector()
-            if comm_session:
-                inserted, skipped = detector.flush_comm_session_history(comm_session)
-                record_ingest_event(
-                    "db_persist",
-                    buffer_key=key,
-                    comm_session=comm_session,
-                    summary=(
-                        f"pipeline_flush inserted={inserted} skipped={skipped} "
-                        f"db={'ok' if is_db_available() else 'unavailable'}"
-                    ),
-                    extra={
-                        "inserted": inserted,
-                        "skipped": skipped,
-                        "pipeline_flush": True,
-                        "db_available": is_db_available(),
-                    },
-                )
-            merged = detector.merge_buffered_packets(
-                packets,
-                buffer_key=key,
-                match_tolerance_sec=tolerance,
-                bulk_packets=bulk_packets,
-                event_meta=event_meta,
-            )
-            if not merged:
-                logger.warning("merged packet is empty; pipeline skipped")
-                record_ingest_event(
-                    "pipeline_skipped",
-                    buffer_key=key,
-                    summary="merged packet empty",
-                )
-                return
-            merged["_buffer_key"] = key
-            merged["_match_tolerance_sec"] = tolerance
-            if comm_session:
-                merged["_comm_session"] = comm_session
-            is_anomaly = bool(merged.get("IS_ANOMALY"))
-            weight = int(merged.get("WEIGHT", merged.get("FALSE_POSITIVE_WEIGHT", 0)) or 0)
-            stage = "pipeline_flush" if is_anomaly else "buffer_merge"
-            flush_summary = (
-                f"buffer_key={key} IS_ANOMALY={is_anomaly} WEIGHT={weight} "
-                f"EVENT_TYPE={merged.get('EVENT_TYPE', '')}"
-            )
-            logger.info("%s: %s", stage, flush_summary)
-            record_ingest_event(
-                stage,
-                buffer_key=key,
-                comm_session=comm_session,
-                summary=flush_summary,
-                extra={
-                    "is_anomaly": is_anomaly,
-                    "weight": weight,
-                    "event_type": merged.get("EVENT_TYPE"),
-                    "target_subsystem": merged.get("TARGET_SUBSYSTEM"),
-                },
-            )
-            detector.receive_telemetry(
-                json.dumps(merged, ensure_ascii=False, default=str),
-                skip_history_insert=True,
-            )
-            if is_anomaly:
-                ws_manager.broadcast_sync(
-                    {
-                        "type": "PIPELINE_FLUSH",
-                        "buffer_key": key,
-                        "summary": flush_summary,
-                        "is_anomaly": is_anomaly,
-                    }
-                )
-        except Exception as error:
-            logger.error("buffer flush pipeline failed: %s", error)
-
     if _buffer_manager is None:
         _buffer_manager = PacketBufferManager(
-            timeout,
-            _on_flush,
+            timeout_sec=timeout,
             match_tolerance_sec=tolerance,
-            on_bulk_stored=_on_bulk_stored,
             on_bulk_telemetry_persist=_on_bulk_telemetry_persist,
-            on_comm_session_end=_on_comm_session_end,
         )
     else:
         _buffer_manager.update_timeout(timeout)
         _buffer_manager.update_match_tolerance(tolerance)
-        _buffer_manager.update_callbacks(
-            _on_flush,
-            on_bulk_stored=_on_bulk_stored,
-            on_bulk_telemetry_persist=_on_bulk_telemetry_persist,
-            on_comm_session_end=_on_comm_session_end,
-        )
+        _buffer_manager.update_callbacks(on_bulk_telemetry_persist=_on_bulk_telemetry_persist)
 
 
 def get_buffer_manager() -> PacketBufferManager:
@@ -239,28 +114,67 @@ def get_recent_ingest(limit: int = Query(default=30, ge=1, le=100)) -> dict[str,
 
 
 @router.get("/raw")
-def get_recent_raw_packets(limit: int = Query(default=10, ge=1, le=30)) -> dict[str, Any]:
-    """Return recent uplink payloads as parsed JSON objects (newest first)."""
+def get_recent_raw_packets(
+    limit: int = Query(default=10, ge=1, le=30),
+    include_body: bool = Query(default=False, description="Include full packet/raw_text in list (large JSON)"),
+) -> dict[str, Any]:
+    """Return recent uplink index rows (metadata only by default)."""
     try:
-        items = recent_raw_packets(limit)
+        items = recent_raw_packets(limit, include_body=include_body)
         return {"count": len(items), "items": items}
     except Exception as error:
         logger.error("recent raw packet query failed: %s", error)
         return {"count": 0, "items": [], "error": str(error)}
 
 
+@router.get("/raw/{entry_id}")
+def get_raw_packet_detail(
+    entry_id: int,
+    wire: bool = Query(default=False, description="Return original TCP wire JSON as plain text"),
+) -> Any:
+    """Return one full uplink payload by id from the ingest ring buffer."""
+    try:
+        item = get_raw_packet(entry_id)
+        if item is None:
+            return JSONResponse(status_code=404, content={"error": "raw packet not found", "id": entry_id})
+        if wire:
+            raw_text = item.get("raw_text")
+            if isinstance(raw_text, str) and raw_text:
+                return PlainTextResponse(content=raw_text, media_type="application/json; charset=utf-8")
+            packet = item.get("packet")
+            if isinstance(packet, dict):
+                return PlainTextResponse(
+                    content=format_packet_json(packet),
+                    media_type="application/json; charset=utf-8",
+                )
+            return PlainTextResponse(content="", media_type="text/plain")
+        return item
+    except Exception as error:
+        logger.error("raw packet detail query failed: %s", error)
+        return JSONResponse(status_code=500, content={"error": str(error)})
+
+
 @router.post("/receive")
 async def receive_telemetry(packet: dict[str, Any]) -> dict[str, Any]:
-    """Receive one satellite packet and buffer until merge."""
+    """Receive one SAT_BULK_TELEMETRY packet and persist merged history rows."""
     try:
         summary = summarize_uplink_packet(packet)
         status = await get_buffer_manager().receive(packet)
+        wire_text = json.dumps(packet, ensure_ascii=False, default=str)
+        record_raw_packet(
+            packet,
+            byte_length=len(wire_text.encode("utf-8")),
+            status=status,
+            raw_text=wire_text,
+            comm_session=status.get("comm_session"),
+        )
         record_ingest_event(
             "http_received",
             packet_type=str(packet.get("packet_type", "")),
             summary=summary,
             status=status,
             buffer_key=status.get("buffer_key"),
+            comm_session=status.get("comm_session"),
         )
         return status
     except Exception as error:

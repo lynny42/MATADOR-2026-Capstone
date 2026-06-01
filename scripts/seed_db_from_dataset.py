@@ -91,6 +91,8 @@ def _seed_baseline_rows(rows: list[dict[str, Any]]) -> int:
             packet["IS_ANOMALY"] = 0
             history_id = gs_repository.insert_tlm_history(packet)
             if history_id is not None:
+                packet["HISTORY_ID"] = history_id
+                gs_repository.insert_pwr_meta_rows(packet, history_id=history_id)
                 inserted += 1
         except Exception as error:
             logger.error("baseline insert failed: %s", error)
