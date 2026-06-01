@@ -72,6 +72,54 @@ class RuleActivationTest(unittest.TestCase):
         self.assertIn("activation", registry["E-02"])
         self.assertEqual(registry["E-02"]["activation"]["window_mode"], "snapshot_series")
 
+    def test_step_window_mode_uses_last_two_snapshots_only(self) -> None:
+        baseline = BaselineManager()
+        activation = {
+            "window_mode": "step",
+            "clauses": [
+                {
+                    "op": "step_delta",
+                    "column": "CMDREJECTEDCOUNTER",
+                    "direction": "increase",
+                    "weight": 1.0,
+                }
+            ],
+        }
+        long_window = [
+            {"UPDATED_AT": "t1", "CMDREJECTEDCOUNTER": 1},
+            {"UPDATED_AT": "t2", "CMDREJECTEDCOUNTER": 1},
+            {"UPDATED_AT": "t3", "CMDREJECTEDCOUNTER": 1},
+            {"UPDATED_AT": "t4", "CMDREJECTEDCOUNTER": 10},
+        ]
+        short_window = long_window[-2:]
+        step_score = evaluate_rule_activation(
+            activation,
+            long_window,
+            baseline,
+            {"SOFT": 2, "HARD": 3, "SEVERE": 4},
+            {},
+        )
+        short_score = evaluate_rule_activation(
+            {**activation, "window_mode": "snapshot_series"},
+            short_window,
+            baseline,
+            {"SOFT": 2, "HARD": 3, "SEVERE": 4},
+            {},
+        )
+        flat_score = evaluate_rule_activation(
+            activation,
+            [
+                {"UPDATED_AT": "t1", "CMDREJECTEDCOUNTER": 1},
+                {"UPDATED_AT": "t2", "CMDREJECTEDCOUNTER": 1},
+            ],
+            baseline,
+            {"SOFT": 2, "HARD": 3, "SEVERE": 4},
+            {},
+        )
+        self.assertGreater(step_score, 0.0)
+        self.assertEqual(step_score, short_score)
+        self.assertEqual(flat_score, 0.0)
+
     def test_step_delta_uses_max_pair_in_series(self) -> None:
         baseline = BaselineManager()
         activation = {

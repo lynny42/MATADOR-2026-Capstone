@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiSend } from "../lib/api";
 import { cn } from "../lib/cn";
 import {
@@ -34,9 +34,12 @@ function isColumnEvidenceVisible(columnValue) {
   if (!columnValue) {
     return false;
   }
+  if (columnValue.observed !== null && columnValue.observed !== undefined) {
+    return true;
+  }
   const percent = columnValue.abnormal_percent;
   if (percent === null || percent === undefined) {
-    return true;
+    return false;
   }
   return Math.abs(Number(percent)) > 0;
 }
@@ -76,20 +79,49 @@ export default function DashboardPage() {
   const [replayNotice, setReplayNotice] = useState("");
   const [error, setError] = useState("");
   const [snapshotIndex, setSnapshotIndex] = useState(null);
+  const selectedIdRef = useRef(null);
+  const selectedCommunicationAtRef = useRef("");
+  const snapshotIndexRef = useRef(null);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    selectedCommunicationAtRef.current = selectedCommunicationAt;
+  }, [selectedCommunicationAt]);
+
+  useEffect(() => {
+    snapshotIndexRef.current = snapshotIndex;
+  }, [snapshotIndex]);
 
   async function loadDashboard(options = {}) {
     try {
       const payload = await apiGet("/api/dashboard");
       setDashboard(payload);
       const latestAt = payload.latest_communication?.communicated_at || "";
-      const communicationAt = options.resetToLatest
-        ? latestAt
-        : (options.communicationAt ?? selectedCommunicationAt) || latestAt;
-      const targetId = options.clearCode ? null : options.detectId ?? selectedId;
-      setSelectedCommunicationAt(communicationAt);
+      const communications = payload.communications || [];
+
+      if (options.resetToLatest) {
+        setSelectedCommunicationAt(latestAt);
+        selectedCommunicationAtRef.current = latestAt;
+      } else {
+        const preserved =
+          options.communicationAt ??
+          selectedCommunicationAtRef.current ??
+          selectedCommunicationAt;
+        const exists = preserved
+          ? communications.some((item) => item.communicated_at === preserved)
+          : false;
+        const nextAt = exists ? preserved : latestAt;
+        setSelectedCommunicationAt(nextAt);
+        selectedCommunicationAtRef.current = nextAt;
+      }
+
+      const targetId = options.clearCode ? null : options.detectId ?? selectedIdRef.current;
       setSelectedId(targetId);
       if (targetId) {
-        await loadDetail(targetId);
+        await loadDetail(targetId, { syncCommunicationAt: false });
       } else {
         setSelectedDetail(null);
         setSnapshotIndex(null);
@@ -100,41 +132,25 @@ export default function DashboardPage() {
     }
   }
 
-  async function loadDetail(detectId, frameIndex = null) {
+  async function loadDetail(detectId, options = {}) {
+    const { syncCommunicationAt = true } = options;
     try {
-      const query =
-        frameIndex !== null && frameIndex !== undefined
-          ? `?snapshot_index=${frameIndex}`
-          : "";
-      const detail = await apiGet(`/api/detections/${detectId}${query}`);
+      const detail = await apiGet(`/api/detections/${detectId}`);
       setSelectedDetail(detail);
       setSelectedId(detectId);
-      if (detail.snapshot_frame) {
-        setSnapshotIndex(detail.snapshot_frame.index);
-      } else {
-        setSnapshotIndex(null);
-      }
-      if (detail.detect_time) {
+      setSnapshotIndex(null);
+      snapshotIndexRef.current = null;
+      if (syncCommunicationAt && detail.detect_time) {
         setSelectedCommunicationAt(detail.detect_time);
+        selectedCommunicationAtRef.current = detail.detect_time;
       }
     } catch (loadError) {
       setError(loadError.message);
     }
   }
 
-  function stepSnapshotFrame(direction) {
-    const frame = selectedDetail?.snapshot_frame;
-    if (!frame || selectedId == null) {
-      return;
-    }
-    const nextIndex = Math.max(0, Math.min(frame.index + direction, frame.total - 1));
-    if (nextIndex === frame.index) {
-      return;
-    }
-    loadDetail(selectedId, nextIndex);
-  }
-
   function selectCommunication(communicatedAt) {
+    selectedCommunicationAtRef.current = communicatedAt;
     setSelectedCommunicationAt(communicatedAt);
     setSelectedId(null);
     setSelectedDetail(null);
@@ -149,6 +165,7 @@ export default function DashboardPage() {
 
   function resetToLatestCommunication() {
     const latestAt = dashboard?.latest_communication?.communicated_at || "";
+    selectedCommunicationAtRef.current = latestAt;
     setSelectedCommunicationAt(latestAt);
     setSelectedId(null);
     setSelectedDetail(null);
@@ -407,9 +424,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadDashboard();
-    const timer = setInterval(() => loadDashboard(), 5000);
+    const timer = setInterval(() => loadDashboard({ preserveSnapshot: true }), 5000);
     return () => clearInterval(timer);
-  }, [selectedId, selectedCommunicationAt]);
+  }, []);
 
   const selectedCommunication = useMemo(() => {
     const targetAt = selectedCommunicationAt || dashboard?.latest_communication?.communicated_at;
@@ -541,13 +558,10 @@ export default function DashboardPage() {
           selectedCommunicationAt={selectedCommunicationAt}
           selectedId={selectedId}
           selectedDetail={selectedDetail}
-          snapshotIndex={snapshotIndex}
           onSelect={loadDetail}
           onCommunicationSelect={selectCommunication}
           onCodeClear={clearSelectedCode}
           onResetLatest={resetToLatestCommunication}
-          onSnapshotPrev={() => stepSnapshotFrame(-1)}
-          onSnapshotNext={() => stepSnapshotFrame(1)}
         />
       </section>
     </main>
@@ -645,13 +659,10 @@ function RightPanel({
   selectedCommunicationAt,
   selectedId,
   selectedDetail,
-  snapshotIndex,
   onSelect,
   onCommunicationSelect,
   onCodeClear,
-  onResetLatest,
-  onSnapshotPrev,
-  onSnapshotNext
+  onResetLatest
 }) {
   const latest = dashboard.latest_communication;
   return (
@@ -665,7 +676,11 @@ function RightPanel({
           >
             {(dashboard.communications || []).map((communication) => (
               <option key={communication.communicated_at} value={communication.communicated_at}>
-                {communication.communicated_at} · {communication.anomaly_count}개
+                {communication.received_at || communication.communicated_at}
+                {" · "}
+                {(communication.anomaly_count || 0) > 0
+                  ? `MA ${communication.anomaly_count}건`
+                  : "정상"}
               </option>
             ))}
           </select>
@@ -697,12 +712,7 @@ function RightPanel({
       </div>
 
       {selectedDetail ? (
-        <DetailPanel
-          selectedDetail={selectedDetail}
-          snapshotIndex={snapshotIndex}
-          onSnapshotPrev={onSnapshotPrev}
-          onSnapshotNext={onSnapshotNext}
-        />
+        <DetailPanel selectedDetail={selectedDetail} />
       ) : (
         <CommunicationSummary communication={selectedCommunication} onSelect={onSelect} />
       )}
@@ -719,9 +729,15 @@ function CommunicationSummary({ communication, onSelect }) {
     <div className={ui.detailCard}>
       <div className={ui.detailHeading}>
         <div>
-          <h3 className="m-0">{communication.communicated_at}</h3>
+          <h3 className="m-0">{communication.received_at || communication.communicated_at}</h3>
+          {communication.onboard_snapshot_at ? (
+            <p className={cn(ui.muted, "m-0 mt-1 text-sm")}>
+            </p>
+          ) : null}
         </div>
-        <strong className={ui.detailAccent}>{communication.anomaly_count || 0}개</strong>
+        <strong className={ui.detailAccent}>
+          {(communication.anomaly_count || 0) > 0 ? `MA ${communication.anomaly_count}건` : "정상"}
+        </strong>
       </div>
       {(communication.detections || []).length ? (
         <div className={ui.codeList}>
@@ -747,16 +763,12 @@ function CommunicationSummary({ communication, onSelect }) {
   );
 }
 
-function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshotNext }) {
+function DetailPanel({ selectedDetail }) {
   if (!selectedDetail) {
     return <div className={cn(ui.detailCard, ui.muted)}>코드를 선택하면 Rule 근거가 표시됩니다.</div>;
   }
 
   const frame = selectedDetail.snapshot_frame;
-  const frameLabel =
-    frame && frame.total > 0
-      ? `스냅샷 ${(snapshotIndex ?? frame.index) + 1} / ${frame.total} (10분·1초 시리즈)`
-      : null;
   const isUndefinedAction = selectedDetail.action_mapping_status === "undefined";
 
   return (
@@ -795,25 +807,9 @@ function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshot
         <span className={ui.filterCell}>대상: {selectedDetail.satellite_filter?.target_subsystem || "-"}</span>
         <span className={ui.filterCell}>이벤트: {selectedDetail.satellite_filter?.event_id || "-"}</span>
       </div>
-      {frameLabel ? (
-        <div className={ui.snapshotNav}>
-          <button type="button" className={ui.btnPill} onClick={onSnapshotPrev} disabled={!frame || frame.index <= 0}>
-            이전 1초
-          </button>
-          <p className={cn(ui.muted, "m-0 flex-1")}>{frameLabel}</p>
-          <button
-            type="button"
-            className={ui.btnPill}
-            onClick={onSnapshotNext}
-            disabled={!frame || frame.index >= frame.total - 1}
-          >
-            다음 1초
-          </button>
-        </div>
-      ) : null}
       {frame?.current_at ? (
         <p className={ui.muted}>
-          직전 스냅샷: {frame.previous_at || "(없음)"} → 현재: {frame.current_at}
+          직전 스냅샷: {frame.previous_at || "-"} → 현재: {frame.current_at}
         </p>
       ) : null}
 
@@ -872,8 +868,10 @@ function DetailPanel({ selectedDetail, snapshotIndex, onSnapshotPrev, onSnapshot
                   <div key={column} className={ui.columnCard}>
                     <b>{column}</b>
                     <span className={ui.muted}>관측: {String(value.observed ?? "-")}</span>
-                    <span className={ui.muted}>직전 스냅샷: {String(value.previous_observed ?? "-")}</span>
-                    <span className={ui.muted}>비교 기준: {String(value.normal)}</span>
+                    <span className={ui.muted}>
+                      직전 스냅샷: {String(value.previous_observed ?? "-")}
+                    </span>
+                    <span className={ui.muted}>비교 기준: {String(value.normal ?? "-")}</span>
                     <em className="text-[var(--accent)] not-italic">
                       직전 1초 대비 변화율: {formatStepMetricLabel(value.abnormal_percent)}
                     </em>

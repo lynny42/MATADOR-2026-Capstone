@@ -1,4 +1,4 @@
-# MATADOR-2026-Capstone
+﻿# MATADOR-2026-Capstone
 
 ## MA Integrated Detector
 
@@ -24,6 +24,13 @@ The pipeline follows:
 6. `get_ui_data`
 
 Rule/action/threshold definitions are stored under `ma_detector/config/`.
+
+### Design scope and config notes
+
+- **FalsePositiveFilter** (`PhysicalConsistencyModule`, `StatisticalConsistencyModule`, `SystemResponseModule`) is implemented on the **satellite onboard** side. The ground station trusts `SAT_EVENT_QUEUE` (`ATTACK_CONFIRMED` or `WEIGHT >= 50`) to gate the MA pipeline and stores `FALSE_POSITIVE_*` fields for display only.
+- **`CHENNEL1` wire field:** Test fixtures use the typo `CHENNEL1`; onboard schema uses `CHANNEL1` as `SAT_ADCS_FILTER` PK. The ground station ignores this field (`IGNORED_RECORD_FIELDS`) and matches ADCS rows by timestamp / buffer key, not channel id.
+- **`E-X5` disabled:** `rule_registry.json` sets `"enabled": false` for Ghost Telemetry triple-contradiction (ADCS↔EPS↔COM). Scoring code exists (`evidence_rules._ex5`); the rule stays off until cross-subsystem tuning is validated. Partial coverage remains via `E-10`, `E-11`, and `E-X1`.
+- **`window_mode` in rule JSON:** `_build_evaluation_window()` still loads up to 600×1 Hz rows from `gs_tlm_history`. Per-rule `activation.window_mode` then slices that series inside `evaluate_rule_activation()`: `"step"` uses only the last two snapshots for clause ops (`step_delta`, `repeat_ratio`, etc.); `"snapshot_series"` (default) uses the full window. `legacy_builtin` rules always receive the full window.
 
 ## Ground-station Dashboard
 

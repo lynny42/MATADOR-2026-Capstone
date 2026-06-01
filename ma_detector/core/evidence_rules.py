@@ -1,4 +1,4 @@
-﻿"""Evidence rule scoring functions for MA integrated detection."""
+"""Evidence rule scoring functions for MA integrated detection."""
 
 from __future__ import annotations
 
@@ -187,8 +187,10 @@ class EvidenceRules:
 
     def _e03(self, window: list[dict[str, Any]]) -> float:
         try:
+            integrity_violation = any(self._numeric(snapshot, "IS_VIOLATED") == 1 for snapshot in window)
+            mismatch = self._flag_mismatch(window, "OBC_P_HASH", "EXPECTED_CRC") or integrity_violation
             return (
-                self._flag_mismatch(window, "OBC_P_HASH", "EXPECTED_CRC") * 0.40
+                (1.0 if mismatch else 0.0) * 0.40
                 + self._z_max(window, "APPCSERRCOUNTER", "increase") * 0.20
                 + self._z_max(window, "OSCSERRCOUNTER", "increase") * 0.20
                 + self._flag_changed_from_baseline(window, "LASTVALCRC") * 0.20
@@ -435,6 +437,10 @@ class EvidenceRules:
         try:
             scores = []
             for index, snapshot in enumerate(window):
+                if self._numeric(snapshot, "IS_VIOLATED") == 1:
+                    scores.append(0.85)
+                    continue
+
                 if "OBC_P_HASH" in snapshot and "EXPECTED_CRC" in snapshot:
                     hash_mismatch = snapshot.get("OBC_P_HASH") != snapshot.get("EXPECTED_CRC")
                 else:

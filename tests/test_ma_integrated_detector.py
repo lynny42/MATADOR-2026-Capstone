@@ -1,9 +1,11 @@
-﻿"""Smoke tests for the MA integrated detector pipeline."""
+"""Smoke tests for the MA integrated detector pipeline."""
 
 from __future__ import annotations
 
 import json
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 from ma_detector import MAIntegratedDetector
 from ma_detector.ma_integrated_detector import DEFAULT_ANALYSIS_WINDOW_SEC
@@ -66,6 +68,52 @@ def _normal_record() -> dict:
         "ST_VALID": 1,
         "IS_SENT": 1,
     }
+
+
+@contextmanager
+def _ui_db_from_detector(detector: MAIntegratedDetector):
+    """Route get_ui_data() DB queries to the detector pipeline cache in unit tests."""
+
+    def _query_dashboard(detect_id: int):
+        for row in detector.get_dashboard_records():
+            if int(row.get("DETECT_ID", -1)) == int(detect_id):
+                return dict(row)
+        return None
+
+    def _query_detail_rows(dashboard_id: int):
+        return [
+            dict(row)
+            for row in detector._detail_rows
+            if int(row.get("DASHBOARD_ID", -1)) == int(dashboard_id)
+        ]
+
+    def _query_history_window(detect_time: str, window_size_sec: int, limit: int = 60):
+        if detector._telemetry_window:
+            return [dict(detector._telemetry_window[-1])]
+        return [dict(row) for row in detector.get_history_records()[-limit:]]
+
+    def _query_detection_history_rows(detect_time: str):
+        if detector._telemetry_window:
+            return [dict(detector._telemetry_window[-1])]
+        return [dict(row) for row in detector.get_history_records()]
+
+    with patch(
+        "ma_detector.ma_integrated_detector.gs_repository.query_dashboard",
+        side_effect=_query_dashboard,
+    ), patch(
+        "ma_detector.ma_integrated_detector.gs_repository.query_detail_rows",
+        side_effect=_query_detail_rows,
+    ), patch(
+        "ma_detector.ma_integrated_detector.gs_repository.query_history_window",
+        side_effect=_query_history_window,
+    ), patch(
+        "ma_detector.ma_integrated_detector.gs_repository.query_detection_history_rows",
+        side_effect=_query_detection_history_rows,
+    ), patch(
+        "ma_detector.ma_integrated_detector.gs_repository.load_recent_tlm_history",
+        side_effect=lambda limit=600: [dict(row) for row in detector.get_history_records()[-limit:]],
+    ):
+        yield
 
 
 def _official_satellite_packet(result: str = "Y") -> dict:
@@ -180,7 +228,8 @@ class MAIntegratedDetectorTest(unittest.TestCase):
         )
 
         detector.receive_telemetry(json.dumps(anomaly))
-        ui_payload = json.loads(detector.get_ui_data(1))
+        with _ui_db_from_detector(detector):
+            ui_payload = json.loads(detector.get_ui_data(1))
 
         self.assertNotIn("error", ui_payload)
         self.assertIn("ma_code", ui_payload)
@@ -193,7 +242,8 @@ class MAIntegratedDetectorTest(unittest.TestCase):
         detector.build_baseline([normal_packet for _ in range(4)])
 
         detector.receive_telemetry(json.dumps(_official_satellite_packet("Y")))
-        ui_payload = json.loads(detector.get_ui_data(1))
+        with _ui_db_from_detector(detector):
+            ui_payload = json.loads(detector.get_ui_data(1))
 
         self.assertNotIn("error", ui_payload)
         self.assertEqual(ui_payload["satellite_filter"]["result"], "Y")
@@ -225,6 +275,189 @@ class MAIntegratedDetectorTest(unittest.TestCase):
         ui_payload = json.loads(detector.get_ui_data(1))
 
         self.assertIn("error", ui_payload)
+
+    def test_seu_packet_does_not_append_baseline(self) -> None:
+        detector = MAIntegratedDetector()
+        detector.build_baseline([_normal_record() for _ in range(4)])
+        key = (2, 1)
+        initial_buffer_len = len(detector._baseline_manager._normal_buffers[key])
+
+        seu_packet = _normal_record()
+        seu_packet.update(
+            {
+                "IS_ANOMALY": False,
+                "FALSE_POSITIVE_RESULT": "N",
+                "FALSE_POSITIVE_WEIGHT": 28,
+                "SW_0_VOLTAGE": 99.0,
+            }
+        )
+        detector.receive_telemetry(json.dumps(seu_packet))
+
+        self.assertEqual(len(detector._baseline_manager._normal_buffers[key]), initial_buffer_len)
+
+    def test_zero_weight_normal_packet_appends_baseline(self) -> None:
+        detector = MAIntegratedDetector()
+        detector.build_baseline([_normal_record() for _ in range(4)])
+        key = (2, 1)
+        initial_buffer_len = len(detector._baseline_manager._normal_buffers[key])
+
+        normal_packet = _normal_record()
+        normal_packet.update(
+            {
+                "IS_ANOMALY": False,
+                "FALSE_POSITIVE_WEIGHT": 0,
+                "SW_0_VOLTAGE": 3.3,
+            }
+        )
+        detector.receive_telemetry(json.dumps(normal_packet))
+
+        self.assertEqual(len(detector._baseline_manager._normal_buffers[key]), initial_buffer_len + 1)
+
+    def test_persist_accumulated_packet_merges_types_into_one_row(self) -> None:
+        detector = MAIntegratedDetector()
+        timestamp = "2026-05-31T03:52:06.055508+09:00"
+        calls: list[dict] = []
+
+        def fake_insert(prepared: dict) -> int:
+            calls.append(dict(prepared))
+            return len(calls)
+
+        with patch("ma_detector.ma_integrated_detector.is_db_available", return_value=True):
+            with patch(
+                "ma_detector.ma_integrated_detector.gs_repository.insert_tlm_history",
+                side_effect=fake_insert,
+            ):
+                with patch(
+                    "ma_detector.ma_integrated_detector.gs_repository.insert_pwr_meta_rows",
+                    return_value=True,
+                ):
+                    detector.persist_accumulated_packet(
+                        {
+                            "packet_type": "SAT_TLM_HISTORY",
+                            "_comm_session": "comm-1",
+                            "records": [{"UPDATED_AT": timestamp, "MISSION_MODE": 2, "SVB_X": 0.9}],
+                        }
+                    )
+                    detector.persist_accumulated_packet(
+                        {
+                            "packet_type": "SAT_PWR_HISTORY",
+                            "_comm_session": "comm-1",
+                            "records": [
+                                {
+                                    "UPDATED_AT": timestamp,
+                                    "channels": [{"SW_ID": 0, "VOLTAGE": 3.3, "CURRENT_A": 0.1}],
+                                }
+                            ],
+                        }
+                    )
+                    inserted, skipped = detector.persist_accumulated_packet(
+                        {
+                            "packet_type": "SAT_ADCS_FILTER",
+                            "_comm_session": "comm-1",
+                            "records": [{"TIMESTAMP": timestamp, "IMU_WBN_X": 0.01}],
+                        }
+                    )
+                    self.assertEqual((inserted, skipped), (1, 0))
+                    self.assertEqual(len(calls), 1)
+                    row = calls[0]
+                    self.assertEqual(row.get("MISSION_MODE"), 2)
+                    self.assertEqual(row.get("SW_0_VOLTAGE"), 3.3)
+                    self.assertEqual(row.get("IMU_WBN_X"), 0.01)
+
+                    inserted, skipped = detector.persist_accumulated_packet(
+                        {
+                            "packet_type": "SAT_ADCS_FILTER",
+                            "_comm_session": "comm-1",
+                            "records": [{"TIMESTAMP": timestamp, "IMU_WBN_X": 0.02}],
+                        }
+                    )
+                    self.assertEqual((inserted, skipped), (0, 0))
+                    self.assertEqual(len(calls), 1)
+
+                    inserted, skipped = detector.flush_comm_session_history("comm-1")
+                    self.assertEqual((inserted, skipped), (0, 0))
+
+                    detector.persist_accumulated_packet(
+                        {
+                            "packet_type": "SAT_TLM_HISTORY",
+                            "_comm_session": "comm-2",
+                            "records": [{"UPDATED_AT": timestamp, "MISSION_MODE": 1}],
+                        }
+                    )
+                    inserted, skipped = detector.flush_comm_session_history("comm-1")
+                    self.assertEqual((inserted, skipped), (0, 0))
+
+    def test_persist_bulk_telemetry_packet_inserts_one_row_per_sample(self) -> None:
+        detector = MAIntegratedDetector()
+        calls: list[dict] = []
+
+        def fake_insert(prepared: dict) -> int:
+            calls.append(dict(prepared))
+            return len(calls)
+
+        bulk = {
+            "packet_type": "SAT_BULK_TELEMETRY",
+            "_comm_session": "comm-bulk-1",
+            "SAT_TLM_HISTORY": {
+                "records": [
+                    {
+                        "HISTORY_ID": 899,
+                        "UPDATED_AT": "2026-05-31T05:20:33+09:00",
+                        "MISSION_MODE": 2,
+                        "ERLOGENTRIES": 5,
+                    },
+                    {
+                        "HISTORY_ID": 900,
+                        "UPDATED_AT": "2026-05-31T05:20:40+09:00",
+                        "MISSION_MODE": 2,
+                        "ERLOGENTRIES": 6,
+                    },
+                ]
+            },
+            "SAT_ADCS_FILTER": {
+                "records": [
+                    {"TIMESTAMP": "2026-05-31T05:20:33+09:00", "IMU_WBN_X": 0.01, "ERLOGENTRIES": 0},
+                    {"TIMESTAMP": "2026-05-31T05:20:40+09:00", "IMU_WBN_X": 0.02, "ERLOGENTRIES": 0},
+                ]
+            },
+            "SAT_PWR_HISTORY": {
+                "records": [
+                    {
+                        "HISTORY_ID": 11495,
+                        "UPDATED_AT": "2026-05-31T05:20:33+09:00",
+                        "channels": [{"SW_ID": 0, "VOLTAGE": 3.2, "CURRENT_A": 0.1}],
+                    },
+                    {
+                        "HISTORY_ID": 11496,
+                        "UPDATED_AT": "2026-05-31T05:20:40+09:00",
+                        "channels": [{"SW_ID": 0, "VOLTAGE": 3.3, "CURRENT_A": 0.2}],
+                    },
+                ]
+            },
+        }
+
+        with patch("ma_detector.ma_integrated_detector.is_db_available", return_value=True):
+            with patch(
+                "ma_detector.ma_integrated_detector.gs_repository.insert_tlm_history",
+                side_effect=fake_insert,
+            ):
+                with patch(
+                    "ma_detector.ma_integrated_detector.gs_repository.insert_pwr_meta_rows",
+                    return_value=True,
+                ):
+                    inserted, skipped = detector.persist_bulk_telemetry_packet(bulk)
+                    self.assertEqual((inserted, skipped), (2, 0))
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(calls[0]["MISSION_MODE"], 2)
+                    self.assertEqual(calls[0]["IMU_WBN_X"], 0.01)
+                    self.assertEqual(calls[0]["SW_0_VOLTAGE"], 3.2)
+                    self.assertEqual(calls[0]["TLM_ERLOGENTRIES"], 5)
+                    self.assertEqual(calls[0]["ADCS_ERLOGENTRIES"], 0)
+                    self.assertEqual(calls[0]["ERLOGENTRIES"], 5)
+
+                    inserted, skipped = detector.persist_bulk_telemetry_packet(bulk)
+                    self.assertEqual((inserted, skipped), (0, 2))
+                    self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

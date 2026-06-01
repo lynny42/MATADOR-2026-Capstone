@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -12,18 +13,51 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ma_detector.core.baseline import BaselineManager
+from ma_detector.core.bulk_history_merge import merge_bulk_telemetry_packet
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.packet_protocol import (
+    apply_buffer_event_meta,
+    apply_violated_integrity_target,
+    infer_subsystem_from_file_path,
+    iter_accumulated_records,
+    normalize_packet_type,
+    record_time_key,
+    resolve_integrity_packet,
+    scrub_record,
+    select_active_record,
+    select_integrity_record,
+    flatten_integrity_record,
+    merge_history_snapshots,
+    should_append_baseline,
+    time_key_from_value,
+    time_key_to_epoch,
+    timestamp_to_epoch,
+)
+
+_HISTORY_CORE_TYPES = frozenset(
+    {
+        "SAT_TLM_HISTORY",
+        "SAT_PWR_HISTORY",
+        "SAT_ADCS_FILTER",
+    }
+)
 from ma_detector.core.rule_activation import merge_default_activations
 from ma_detector.core.target_context import (
     build_novel_attack_advisory,
+    expand_module_tokens,
+    infer_adcs_attack_target,
     infer_target_from_sw_ids,
     normalize_target_subsystem,
     report_matches_target,
     sort_reports_by_target,
 )
+from ma_detector.db import gs_repository
+from ma_detector.db.database import is_db_available
 from ma_detector.registry.registry_manager import RegistryManager
 
 logger = logging.getLogger(__name__)
+
+_RULE_SCORE_LOG_IDS = frozenset({"E-03", "E-X3", "E-05"})
 DEFAULT_ANALYSIS_WINDOW_SEC = 600
 
 
@@ -74,9 +108,15 @@ class MAIntegratedDetector:
             self._dashboard_rows: list[dict[str, Any]] = []
             self._detail_rows: list[dict[str, Any]] = []
             self._discard_log: list[dict[str, Any]] = []
-            self._next_detect_id = 1
+            self._next_detect_id = gs_repository.fetch_next_detect_id()
             self._last_ingest_error: str | None = None
             self._latest_novel_advisory: dict[str, Any] | None = None
+            self._persisted_record_fingerprints: set[str] = set()
+            self._persist_comm_session: str = ""
+            # comm_session -> time_key -> merged row fields pending DB insert
+            self._comm_snapshot_state: dict[str, dict[str, dict[str, Any]]] = {}
+            self._comm_session_types_seen: dict[str, set[str]] = {}
+            self._history_persist_lock = threading.RLock()
         except Exception as error:
             logger.error("MA integrated detector initialization failed: %s", error)
             self._action_registry = {}
@@ -98,6 +138,212 @@ class MAIntegratedDetector:
             self._next_detect_id = 1
             self._last_ingest_error = None
             self._latest_novel_advisory = None
+            self._persisted_record_fingerprints = set()
+            self._persist_comm_session = ""
+            self._comm_snapshot_state = {}
+            self._comm_session_types_seen = {}
+            self._history_persist_lock = threading.RLock()
+
+    def _history_match_tolerance_sec(self) -> float:
+        try:
+            return float(
+                self._threshold_config.get("packet_buffer", {}).get(
+                    "RECORD_MATCH_TOLERANCE_SEC",
+                    5,
+                )
+            )
+        except Exception as error:
+            logger.error("history match tolerance lookup failed: %s", error)
+            return 5.0
+
+    def _resolve_staging_key(self, session: str, time_key: str) -> str:
+        """Pick an existing bucket within tolerance, or keep the incoming second key."""
+        try:
+            if not time_key:
+                return time_key
+            state = self._comm_snapshot_state.get(session, {})
+            if not state:
+                return time_key
+            target_epoch = time_key_to_epoch(time_key)
+            if target_epoch is None:
+                return time_key
+            tolerance = self._history_match_tolerance_sec()
+            best_key = time_key
+            best_delta = tolerance + 1.0
+            for existing_key in state:
+                fingerprint = f"{session}:merged:{existing_key}"
+                if fingerprint in self._persisted_record_fingerprints:
+                    continue
+                existing_epoch = time_key_to_epoch(existing_key)
+                if existing_epoch is None:
+                    continue
+                delta = abs(existing_epoch - target_epoch)
+                if delta <= tolerance and delta < best_delta:
+                    best_delta = delta
+                    best_key = existing_key
+            return best_key
+        except Exception as error:
+            logger.error("staging key resolve failed: %s", error)
+            return time_key
+
+    def _coalesce_comm_snapshots(self, comm_session: str) -> None:
+        """Merge nearby pending buckets so TLM/PWR/ADCS from close timestamps share one row."""
+        try:
+            session = str(comm_session or "").strip() or "_default"
+            state = self._comm_snapshot_state.get(session, {})
+            if len(state) < 2:
+                return
+            tolerance = self._history_match_tolerance_sec()
+            keys = sorted(state.keys())
+            merged_into: dict[str, str] = {key: key for key in keys}
+
+            def canonical(key: str) -> str:
+                current = key
+                while merged_into[current] != current:
+                    current = merged_into[current]
+                return current
+
+            for index, key_a in enumerate(keys):
+                epoch_a = time_key_to_epoch(key_a)
+                if epoch_a is None:
+                    continue
+                for key_b in keys[index + 1 :]:
+                    epoch_b = time_key_to_epoch(key_b)
+                    if epoch_b is None:
+                        continue
+                    if abs(epoch_b - epoch_a) > tolerance:
+                        continue
+                    root_a = canonical(key_a)
+                    root_b = canonical(key_b)
+                    if root_a == root_b:
+                        continue
+                    epoch_root_a = time_key_to_epoch(root_a)
+                    epoch_root_b = time_key_to_epoch(root_b)
+                    if epoch_root_a is None or epoch_root_b is None:
+                        continue
+                    if epoch_root_a <= epoch_root_b:
+                        target, source = root_a, root_b
+                    else:
+                        target, source = root_b, root_a
+                    target_bucket = state.setdefault(target, {})
+                    for field, value in state.get(source, {}).items():
+                        if value is not None:
+                            target_bucket[field] = value
+                    state.pop(source, None)
+                    merged_into[source] = target
+            self._comm_snapshot_state[session] = state
+        except Exception as error:
+            logger.error("comm snapshot coalesce failed: %s", error)
+
+    def _stage_history_record(self, comm_session: str, normalized: dict[str, Any]) -> None:
+        """Merge one partial onboard row into the pending snapshot for its comm session."""
+        try:
+            session = str(comm_session or "").strip() or "_default"
+            time_key = time_key_from_value(normalized.get("UPDATED_AT"))
+            if not time_key:
+                return
+            staging_key = self._resolve_staging_key(session, time_key)
+            fingerprint = f"{session}:merged:{staging_key}"
+            if fingerprint in self._persisted_record_fingerprints:
+                return
+            bucket = self._comm_snapshot_state.setdefault(session, {}).setdefault(staging_key, {})
+            for field, value in normalized.items():
+                if value is not None:
+                    bucket[field] = value
+        except Exception as error:
+            logger.error("history record staging failed: %s", error)
+
+    @staticmethod
+    def _snapshot_is_complete(row: dict[str, Any]) -> bool:
+        """True when TLM, PWR, and ADCS fields are all present for one timestamp."""
+        try:
+            has_tlm = row.get("MISSION_MODE") is not None or row.get("SVB_X") is not None
+            has_pwr = row.get("SW_0_VOLTAGE") is not None
+            has_adcs = row.get("IMU_WBN_X") is not None
+            return bool(has_tlm and has_pwr and has_adcs)
+        except Exception as error:
+            logger.error("snapshot completeness check failed: %s", error)
+            return False
+
+    def _flush_comm_snapshots(
+        self,
+        comm_session: str,
+        *,
+        complete_only: bool = False,
+    ) -> tuple[int, int]:
+        """Insert merged gs_tlm_history rows for one comm session."""
+        inserted = 0
+        skipped = 0
+        try:
+            if self._is_replay_mode:
+                return inserted, skipped
+
+            session = str(comm_session or "").strip() or "_default"
+            state = self._comm_snapshot_state.get(session, {})
+            for time_key in sorted(list(state.keys())):
+                row = dict(state[time_key])
+                if complete_only and not self._snapshot_is_complete(row):
+                    continue
+                fingerprint = f"{session}:merged:{time_key}"
+                if fingerprint in self._persisted_record_fingerprints:
+                    skipped += 1
+                    state.pop(time_key, None)
+                    continue
+                row["UPDATED_AT"] = time_key.replace("T", " ")
+                row["HISTORY_ONLY"] = True
+                row["PACKET_TYPE"] = row.get("PACKET_TYPE") or row.get("packet_type")
+                if comm_session:
+                    row["_comm_session"] = comm_session
+                if self._insert_gs_tables(row):
+                    self._persisted_record_fingerprints.add(fingerprint)
+                    state.pop(time_key, None)
+                    inserted += 1
+                else:
+                    logger.error(
+                        "history row insert failed comm=%s time=%s",
+                        comm_session or "no-session",
+                        time_key,
+                    )
+            return inserted, skipped
+        except Exception as error:
+            logger.error("comm snapshot flush failed: %s", error)
+            return inserted, skipped
+
+    def _try_flush_ready_snapshots(self, comm_session: str) -> tuple[int, int]:
+        """Persist snapshots that already contain TLM+PWR+ADCS for the same second."""
+        try:
+            return self._flush_comm_snapshots(comm_session, complete_only=True)
+        except Exception as error:
+            logger.error("ready snapshot flush failed: %s", error)
+            return 0, 0
+
+    def flush_comm_session_history(self, comm_session: str) -> tuple[int, int]:
+        """Flush every pending snapshot when an uplink communication window ends."""
+        inserted = 0
+        skipped = 0
+        try:
+            with self._history_persist_lock:
+                session = str(comm_session or "").strip() or "_default"
+                inserted, skipped = self._flush_comm_snapshots(session, complete_only=True)
+                self._comm_snapshot_state.pop(session, None)
+                self._comm_session_types_seen.pop(session, None)
+            return inserted, skipped
+        except Exception as error:
+            logger.error("comm session history flush failed: %s", error)
+            return inserted, skipped
+
+    def _begin_persist_comm_session(self, comm_session: str) -> None:
+        """Flush the previous uplink session, then start staging for the new one."""
+        try:
+            session = str(comm_session or "").strip()
+            if not session:
+                return
+            if self._persist_comm_session and self._persist_comm_session != session:
+                self.flush_comm_session_history(self._persist_comm_session)
+                self._persisted_record_fingerprints.clear()
+            self._persist_comm_session = session
+        except Exception as error:
+            logger.error("persist comm session reset failed: %s", error)
 
     def get_last_ingest_error(self) -> str | None:
         """Return the most recent telemetry ingest validation error, if any."""
@@ -116,6 +362,209 @@ class MAIntegratedDetector:
         except Exception as error:
             logger.error("get novel advisory failed: %s", error)
             return None
+
+    def merge_buffered_packets(
+        self,
+        packets_by_type: dict[str, dict[str, Any]],
+        buffer_key: str | None = None,
+        match_tolerance_sec: float | None = None,
+        bulk_packets: dict[str, dict[str, Any]] | None = None,
+        event_meta: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Merge up to five packet types into one flattened telemetry dict."""
+        try:
+            merged: dict[str, Any] = {}
+            tolerance = float(
+                match_tolerance_sec
+                if match_tolerance_sec is not None
+                else self._threshold_config.get("packet_buffer", {}).get(
+                    "RECORD_MATCH_TOLERANCE_SEC",
+                    5,
+                )
+            )
+            order = [
+                "SAT_TLM_HISTORY",
+                "SAT_TLM_CURRENT",
+                "SAT_PWR_HISTORY",
+                "SAT_PWR_META",
+                "SAT_EVENT_QUEUE",
+                "SAT_INTEGRITY_HASH",
+                "SAT_ADCS_FILTER",
+            ]
+            seen_types: set[str] = set()
+            for packet_type in order:
+                canonical = normalize_packet_type(packet_type)
+                if canonical in seen_types:
+                    continue
+                packet = packets_by_type.get(packet_type)
+                if packet is None:
+                    for raw_type, raw_packet in packets_by_type.items():
+                        if normalize_packet_type(raw_type) == canonical and isinstance(raw_packet, dict):
+                            packet = raw_packet
+                            break
+                if packet is None and bulk_packets:
+                    bulk_packet = bulk_packets.get(packet_type)
+                    if bulk_packet is None:
+                        for raw_type, raw_bulk in bulk_packets.items():
+                            if normalize_packet_type(raw_type) == canonical and isinstance(raw_bulk, dict):
+                                bulk_packet = raw_bulk
+                                break
+                    if isinstance(bulk_packet, dict):
+                        packet = dict(bulk_packet)
+                if not isinstance(packet, dict):
+                    continue
+                seen_types.add(canonical)
+                payload = dict(packet)
+                payload["packet_type"] = canonical
+                if buffer_key:
+                    payload["_buffer_key"] = buffer_key
+                payload["_match_tolerance_sec"] = tolerance
+                normalized = self._merge_packet_sections(payload)
+                merged.update(normalized)
+            if buffer_key:
+                merged["_buffer_key"] = buffer_key
+            merged["_match_tolerance_sec"] = tolerance
+            self._normalize_filter_fields(merged)
+            integrity_packet = resolve_integrity_packet(packets_by_type, bulk_packets)
+            apply_buffer_event_meta(merged, event_meta)
+            apply_violated_integrity_target(merged, integrity_packet, buffer_key, tolerance)
+            if integrity_packet and int(merged.get("IS_VIOLATED", 0) or 0) != 1:
+                rec = select_integrity_record(integrity_packet, buffer_key=buffer_key, tolerance_sec=tolerance)
+                if rec:
+                    merged.update(flatten_integrity_record(rec))
+            if int(merged.get("IS_VIOLATED", 0) or 0) != 1:
+                adcs_thresholds = self._threshold_config.get("adcs_target_inference", {})
+                adcs_target = infer_adcs_attack_target(merged, adcs_thresholds)
+                if adcs_target:
+                    current = normalize_target_subsystem(merged.get("TARGET_SUBSYSTEM"))
+                    power_derived = {"EPS", "COM", "TCS", "OBC"}
+                    if not current or current in power_derived:
+                        merged["TARGET_SUBSYSTEM"] = adcs_target
+            merged.setdefault("UPDATED_AT", datetime.now(timezone.utc).isoformat())
+            merged.setdefault("DETECTED_AT", merged["UPDATED_AT"])
+            return merged
+        except Exception as error:
+            logger.error("buffered packet merge failed: %s", error)
+            return {}
+
+    def persist_accumulated_packet(self, packet: dict[str, Any]) -> tuple[int, int]:
+        """Stage onboard rows, then flush merged snapshots when TLM+PWR+ADCS align."""
+        inserted = 0
+        skipped = 0
+        try:
+            if self._is_replay_mode:
+                return inserted, skipped
+
+            with self._history_persist_lock:
+                comm_session = str(packet.get("_comm_session", "") or "").strip()
+                session = comm_session or "_default"
+                if comm_session:
+                    self._begin_persist_comm_session(comm_session)
+
+                packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
+                if packet_type in _HISTORY_CORE_TYPES:
+                    self._comm_session_types_seen.setdefault(session, set()).add(packet_type)
+
+                record_count = 0
+                for record in iter_accumulated_records(packet):
+                    record_count += 1
+                    payload = {
+                        "packet_type": packet_type,
+                        "records": [record],
+                        "_active_record": record,
+                    }
+                    normalized = self._merge_packet_sections(payload)
+                    normalized["PACKET_TYPE"] = packet_type
+                    if comm_session:
+                        normalized["_comm_session"] = comm_session
+                    self._stage_history_record(comm_session, normalized)
+                    self._coalesce_comm_snapshots(comm_session)
+                    batch_inserted, batch_skipped = self._try_flush_ready_snapshots(comm_session)
+                    inserted += batch_inserted
+                    skipped += batch_skipped
+
+                if _HISTORY_CORE_TYPES.issubset(self._comm_session_types_seen.get(session, set())):
+                    self._coalesce_comm_snapshots(comm_session)
+                    batch_inserted, batch_skipped = self._try_flush_ready_snapshots(comm_session)
+                    inserted += batch_inserted
+                    skipped += batch_skipped
+
+                pending = len(self._comm_snapshot_state.get(session, {}))
+                logger.info(
+                    "history persist type=%s comm=%s records=%s inserted=%s skipped=%s pending=%s",
+                    packet_type,
+                    comm_session or "no-session",
+                    record_count,
+                    inserted,
+                    skipped,
+                    pending,
+                )
+            return inserted, skipped
+        except Exception as error:
+            logger.error("accumulated packet persist failed: %s", error)
+            return inserted, skipped
+
+    def persist_bulk_telemetry_packet(self, bulk: dict[str, Any]) -> tuple[int, int]:
+        """Merge SAT_BULK_TELEMETRY sections by SNAPSHOT_ID and insert one row per sample."""
+        inserted = 0
+        skipped = 0
+        try:
+            if self._is_replay_mode:
+                return inserted, skipped
+
+            with self._history_persist_lock:
+                comm_session = str(bulk.get("_comm_session", "") or "").strip()
+                session = comm_session or "_default"
+                if comm_session:
+                    self._begin_persist_comm_session(comm_session)
+
+                merged_rows = merge_bulk_telemetry_packet(bulk)
+                attack_rows: list[dict[str, Any]] = []
+                for row in merged_rows:
+                    snapshot_id = row.get("SNAPSHOT_ID")
+                    sample_id = snapshot_id or row.get("SAMPLE_HISTORY_ID", row.get("SAMPLE_INDEX", ""))
+                    if snapshot_id is not None:
+                        fingerprint = f"{session}:snapshot:{snapshot_id}"
+                    else:
+                        fingerprint = f"{session}:bulk:{sample_id}"
+                    if fingerprint in self._persisted_record_fingerprints:
+                        skipped += 1
+                        continue
+                    if comm_session:
+                        row["_comm_session"] = comm_session
+                    if self._insert_gs_tables(row):
+                        self._persisted_record_fingerprints.add(fingerprint)
+                        inserted += 1
+                        if row.get("IS_ANOMALY"):
+                            attack_rows.append(dict(row))
+                    else:
+                        logger.error(
+                            "bulk history row insert failed comm=%s sample=%s",
+                            comm_session or "no-session",
+                            sample_id,
+                        )
+
+                for row in attack_rows:
+                    pipeline_row = dict(row)
+                    pipeline_row["_bulk_persisted"] = True
+                    pipeline_row.setdefault("packet_type", "SAT_BULK_TELEMETRY")
+                    self.receive_telemetry(
+                        json.dumps(pipeline_row, ensure_ascii=False, default=str),
+                        skip_history_insert=True,
+                    )
+
+                logger.info(
+                    "bulk history persist comm=%s samples=%s inserted=%s skipped=%s attacks=%s",
+                    comm_session or "no-session",
+                    len(merged_rows),
+                    inserted,
+                    skipped,
+                    len(attack_rows),
+                )
+            return inserted, skipped
+        except Exception as error:
+            logger.error("bulk telemetry persist failed: %s", error)
+            return inserted, skipped
 
     def build_baseline(self, history: list[dict[str, Any]]) -> None:
         """Build normal-operation baseline statistics from history records."""
@@ -177,6 +626,25 @@ class MAIntegratedDetector:
             logger.error("get history records failed: %s", error)
             return []
 
+    def hydrate_memory_state(
+        self,
+        tlm_history: list[dict[str, Any]] | None = None,
+        dashboard_rows: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Load DB rows into in-memory tables used by the dashboard API."""
+        try:
+            if tlm_history:
+                self._gs_tlm_history.extend(dict(row) for row in tlm_history if isinstance(row, dict))
+            if dashboard_rows:
+                self._dashboard_rows.extend(dict(row) for row in dashboard_rows if isinstance(row, dict))
+            if self._dashboard_rows:
+                max_detect_id = max(
+                    int(row.get("DETECT_ID", 0) or 0) for row in self._dashboard_rows
+                )
+                self._next_detect_id = max(self._next_detect_id, max_detect_id + 1)
+        except Exception as error:
+            logger.error("memory state hydration failed: %s", error)
+
     def get_discard_records(self) -> list[dict[str, Any]]:
         """Return discarded detection reports."""
         try:
@@ -209,7 +677,13 @@ class MAIntegratedDetector:
             logger.error("get threshold config failed: %s", error)
             return {}
 
-    def receive_telemetry(self, json_token: str) -> str | None:
+    def receive_telemetry(
+        self,
+        json_token: str,
+        skip_history_insert: bool = False,
+        *,
+        reprocess: bool = False,
+    ) -> str | None:
         """Parse satellite JSON and execute the MA detection pipeline for attack-like events."""
         try:
             self._last_ingest_error = None
@@ -238,6 +712,14 @@ class MAIntegratedDetector:
         try:
             packet = self._normalize_packet(packet)
             if self._is_replay_mode:
+                try:
+                    self._gs_tlm_history.append(dict(packet))
+                except Exception as error:
+                    logger.error("replay history append failed: %s", error)
+                if not packet.get("IS_ANOMALY", False):
+                    if should_append_baseline(packet):
+                        self._baseline_manager.append_normal_record(packet)
+                    return None
                 validation_error = self._validate_attack_packet(packet)
                 if validation_error:
                     self._last_ingest_error = validation_error
@@ -247,9 +729,16 @@ class MAIntegratedDetector:
                 self._run_pipeline()
                 return None
 
-            self._insert_gs_tables(packet)
+            should_persist_history = (
+                not reprocess
+                and not packet.get("_bulk_persisted", False)
+                and ((not skip_history_insert) or bool(packet.get("IS_ANOMALY", False)))
+            )
+            if should_persist_history:
+                self._insert_gs_tables(packet)
             if not packet.get("IS_ANOMALY", False):
-                self._baseline_manager.append_normal_record(packet)
+                if should_append_baseline(packet):
+                    self._baseline_manager.append_normal_record(packet)
                 self._notify_ui_normal(packet)
                 return None
 
@@ -259,6 +748,7 @@ class MAIntegratedDetector:
                 logger.error(validation_error)
                 return validation_error
 
+            logger.info("IS_ANOMALY: True")
             self._telemetry_window.append(packet)
             self._trim_window()
             self._run_pipeline()
@@ -302,11 +792,18 @@ class MAIntegratedDetector:
                     continue
 
                 rule_score = self._evidence_rules.evaluate(rule_id, typed_window, rule_def)
+                latest = typed_window[-1] if typed_window else {}
+                integrity_floor = float(
+                    self._threshold_config.get("integrity_rules", {}).get("IS_VIOLATED_SCORE_FLOOR", 0.65)
+                )
+                if int(latest.get("IS_VIOLATED", 0) or 0) == 1 and rule_id in ("E-03", "E-X3", "E-05"):
+                    rule_score = max(float(rule_score), integrity_floor)
+                if rule_id in _RULE_SCORE_LOG_IDS:
+                    logger.info("Rule %s score: %.2f", rule_id, rule_score)
                 score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
                 if rule_score <= 0.0 or rule_score < score_threshold:
                     continue
 
-                latest = typed_window[-1] if typed_window else {}
                 timestamp = self._timestamp_to_epoch(latest.get("UPDATED_AT", time.time()))
 
                 for action_id, base_score in rule_def.get("contributes_to", {}).items():
@@ -318,7 +815,7 @@ class MAIntegratedDetector:
                     action_weight = float(action_def.get("weight", 1.0))
                     weighted_base = float(base_score) + 0.3 * phase
                     contribution = weighted_base * rule_score * action_weight
-                    max_possible = (1.0 + 0.3 * phase) * action_weight
+                    max_possible = weighted_base * action_weight
 
                     accumulator = accumulators[action_id]
                     accumulator.accumulated_score += contribution
@@ -536,14 +1033,26 @@ class MAIntegratedDetector:
                 else:
                     discarded_entries.append(entry)
 
+            for entry in discarded_entries:
+                self._db_insert_discard_log(entry)
+
             results.extend(self._flush_pending_pool())
-            if not results:
-                results.extend(discarded_entries)
 
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
             results = self._finalize_reports_for_action_mapping(results, data, latest)
             target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
             results = sort_reports_by_target(results, target, self._rule_registry)
+            results = self._prefer_integrity_action_reports(results, latest)
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("grade") in ("CONFIRMED", "SUSPECTED"):
+                    logger.info(
+                        "MA 코드 생성: %s (grade=%s, confidence=%.2f)",
+                        entry.get("ma_code"),
+                        entry.get("grade"),
+                        float(entry.get("confidence_score", 0.0) or 0.0),
+                    )
             return json.dumps(results, ensure_ascii=False, default=str)
         except (TypeError, ValueError, KeyError) as error:
             logger.error("MA code generation failed: %s", error)
@@ -583,12 +1092,12 @@ class MAIntegratedDetector:
                     )
                     if report.get("is_new_pattern"):
                         self._replay_buffer.append({"target": "DB_UPDATE_FLAG", "data": {"ma_code": report["ma_code"]}})
+                    if grade in ("CONFIRMED", "SUSPECTED"):
+                        self._memory_insert_dashboard(report)
                     continue
 
                 if grade in ("CONFIRMED", "SUSPECTED"):
                     self._db_insert_dashboard(report)
-                    if report.get("is_new_pattern"):
-                        self._db_set_new_pattern_flag(report)
                 else:
                     self._db_insert_discard_log(report)
         except Exception as error:
@@ -649,8 +1158,21 @@ class MAIntegratedDetector:
         try:
             evaluation = self._threshold_config.get("evaluation", {})
             window_seconds = int(evaluation.get("series_seconds", self._window_size_sec))
+            max_points = int(evaluation.get("series_max_points", window_seconds))
+            if is_db_available():
+                if reference_time:
+                    history = gs_repository.query_history_window(
+                        reference_time,
+                        window_seconds,
+                        limit=max_points,
+                    )
+                else:
+                    history = gs_repository.load_recent_tlm_history(max_points)
+            else:
+                history = []
+            history = merge_history_snapshots(history)
             history = sorted(
-                self._gs_tlm_history,
+                history,
                 key=lambda row: self._timestamp_to_epoch(row.get("UPDATED_AT", 0)),
             )
             if not history:
@@ -664,7 +1186,6 @@ class MAIntegratedDetector:
                 for row in history
                 if cutoff <= self._timestamp_to_epoch(row.get("UPDATED_AT", 0)) <= anchor_epoch
             ]
-            max_points = int(evaluation.get("series_max_points", window_seconds))
             if len(series) > max_points:
                 series = series[-max_points:]
             return series
@@ -682,8 +1203,16 @@ class MAIntegratedDetector:
             series = self.get_snapshot_series(reference_time)
             if not series:
                 return None, None, []
-            index = snapshot_index if snapshot_index is not None else len(series) - 1
-            index = max(0, min(int(index), len(series) - 1))
+            if snapshot_index is not None:
+                index = max(0, min(int(snapshot_index), len(series) - 1))
+            else:
+                detect_key = time_key_from_value(reference_time)
+                index = len(series) - 1
+                if detect_key:
+                    for frame_index, row in enumerate(series):
+                        if time_key_from_value(row.get("UPDATED_AT")) == detect_key:
+                            index = frame_index
+                            break
             current = series[index]
             previous = series[index - 1] if index > 0 else None
             return previous, current, series
@@ -769,8 +1298,29 @@ class MAIntegratedDetector:
             else:
                 self._latest_novel_advisory = None
             self.insert_dashboard_db(report_json)
+            self._broadcast_ma_reports(reports if isinstance(reports, list) else [])
         except Exception as error:
             logger.error("pipeline execution failed: %s", error)
+
+    def _broadcast_ma_reports(self, reports: list[dict[str, Any]]) -> None:
+        try:
+            from api.websocket_manager import ws_manager
+
+            for report in reports:
+                if not isinstance(report, dict):
+                    continue
+                if report.get("grade") not in ("CONFIRMED", "SUSPECTED"):
+                    continue
+                ws_manager.broadcast_sync(
+                    {
+                        "type": "MA_CODE_GENERATED",
+                        "ma_code": report.get("ma_code"),
+                        "grade": report.get("grade"),
+                        "confidence": report.get("confidence_score"),
+                    }
+                )
+        except Exception as error:
+            logger.error("ma report websocket broadcast failed: %s", error)
 
     def _normalize_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -786,18 +1336,24 @@ class MAIntegratedDetector:
     def _merge_packet_sections(self, packet: dict[str, Any]) -> dict[str, Any]:
         try:
             normalized: dict[str, Any] = {}
-            packet_type = str(packet.get("packet_type", "")).strip()
+            packet_type = normalize_packet_type(str(packet.get("packet_type", "")).strip())
 
-            if packet_type == "SAT_TLM_CURRENT":
-                data = packet.get("data", packet)
-                if isinstance(data, dict):
-                    normalized.update(data)
-                normalized["packet_type"] = packet_type
+            if packet_type in ("SAT_TLM_HISTORY", "SAT_TLM_CURRENT"):
+                normalized["packet_type"] = "SAT_TLM_HISTORY"
+                if packet_type == "SAT_TLM_CURRENT":
+                    data = packet.get("data", packet)
+                    if isinstance(data, dict):
+                        normalized.update(scrub_record(data))
+                else:
+                    record = select_active_record(packet)
+                    if record:
+                        normalized.update(record)
 
-            elif packet_type == "SAT_PWR_META":
-                normalized["packet_type"] = packet_type
-                normalized["UPDATED_AT"] = packet.get("UPDATED_AT", "")
-                channels = packet.get("channels", [])
+            elif packet_type in ("SAT_PWR_HISTORY", "SAT_PWR_META"):
+                normalized["packet_type"] = "SAT_PWR_HISTORY"
+                record = select_active_record(packet)
+                normalized["UPDATED_AT"] = record.get("UPDATED_AT", packet.get("UPDATED_AT", ""))
+                channels = record.get("channels", packet.get("channels", []))
                 has_anomaly = False
                 anomaly_sw_ids: list[int] = []
                 if isinstance(channels, list):
@@ -822,7 +1378,7 @@ class MAIntegratedDetector:
             elif packet_type == "SAT_EVENT_QUEUE":
                 event = packet.get("event", packet)
                 if isinstance(event, dict):
-                    normalized.update(event)
+                    normalized.update(scrub_record(event))
                 normalized["packet_type"] = packet_type
 
                 combined_crc = normalized.get("CH1_CH2_FAULT_CRC", 0)
@@ -840,41 +1396,53 @@ class MAIntegratedDetector:
                 normalized["FALSE_POSITIVE_EXCEPTION"] = normalized.get("EXCEPTION_CODE", "")
 
                 if not normalized.get("TARGET_SUBSYSTEM"):
+                    file_target = infer_subsystem_from_file_path(normalized.get("FILE_PATH"))
+                    if file_target:
+                        normalized["TARGET_SUBSYSTEM"] = file_target
+                if not normalized.get("TARGET_SUBSYSTEM"):
                     sw_id = normalized.get("SW_ID")
                     if sw_id is not None:
                         normalized["TARGET_SUBSYSTEM"] = infer_target_from_sw_ids([sw_id])
 
             elif packet_type == "SAT_INTEGRITY_HASH":
                 normalized["packet_type"] = packet_type
-                records = packet.get("records", [packet])
-                if not isinstance(records, list):
-                    records = [packet]
-                for rec in records:
-                    if not isinstance(rec, dict):
-                        continue
-                    normalized["IS_VIOLATED"] = rec.get("IS_VIOLATED", 0)
-                    normalized["EXPECTED_HASH"] = rec.get("EXPECTED_HASH")
-                    normalized["EXPECTED_CRC"] = rec.get("EXPECTED_HASH")
-                    normalized["OBC_P_HASH"] = rec.get("EXPECTED_HASH")
-                    normalized["LAST_VERIFIED_AT"] = rec.get("LAST_VERIFIED_AT")
-                    normalized["UPDATED_AT"] = rec.get("UPDATED_AT", "")
-                    break
+                buffer_key = packet.get("_buffer_key")
+                tolerance = float(
+                    packet.get(
+                        "_match_tolerance_sec",
+                        self._threshold_config.get("packet_buffer", {}).get(
+                            "RECORD_MATCH_TOLERANCE_SEC",
+                            5,
+                        ),
+                    )
+                )
+                rec = select_integrity_record(
+                    packet,
+                    buffer_key=str(buffer_key) if buffer_key else None,
+                    tolerance_sec=tolerance,
+                )
+                if rec:
+                    normalized.update(flatten_integrity_record(rec))
 
             elif packet_type == "SAT_ADCS_FILTER":
-                normalized.update(packet)
                 normalized["packet_type"] = packet_type
-                if "RESETSPERFORMED" in packet:
-                    normalized["PROCESSOR_RESET_COUNT"] = packet["RESETSPERFORMED"]
+                record = select_active_record(packet)
+                if record:
+                    normalized.update(record)
+                if "RESETSPERFORMED" in normalized:
+                    normalized["PROCESSOR_RESET_COUNT"] = normalized["RESETSPERFORMED"]
                 normalized.setdefault("IMU_WBN_VARIANCE", 0.0)
 
             else:
-                normalized.update(packet)
+                normalized.update(scrub_record(packet))
                 section_keys = [
                     "data",
                     "event",
                     "telemetry",
                     "tlm",
+                    "SAT_TLM_HISTORY",
                     "SAT_TLM_CURRENT",
+                    "SAT_PWR_HISTORY",
                     "SAT_PWR_META",
                     "SAT_EVENT_QUEUE",
                     "SAT_INTEGRITY_HASH",
@@ -883,8 +1451,14 @@ class MAIntegratedDetector:
                 for key in section_keys:
                     section = packet.get(key)
                     if isinstance(section, dict):
-                        normalized.update(section)
+                        normalized.update(scrub_record(section))
 
+            for field in ("DETECTED_AT", "TIMESTAMP", "UPDATED_AT"):
+                value = normalized.get(field) or packet.get(field)
+                if value:
+                    normalized.setdefault("UPDATED_AT", value)
+                    normalized.setdefault("DETECTED_AT", value)
+                    break
             normalized.setdefault(
                 "UPDATED_AT",
                 packet.get("UPDATED_AT")
@@ -908,6 +1482,12 @@ class MAIntegratedDetector:
                 return None
 
             target = normalize_target_subsystem(packet.get("TARGET_SUBSYSTEM"))
+
+            if not target:
+                file_target = infer_subsystem_from_file_path(packet.get("FILE_PATH"))
+                if file_target:
+                    packet["TARGET_SUBSYSTEM"] = file_target
+                    return None
 
             if not target:
                 sw_id_list = packet.get("SW_ID_LIST", [])
@@ -1083,7 +1663,9 @@ class MAIntegratedDetector:
                     return "CONFIRMED"
                 return "CONFIRMED" if single_sufficient else "SUSPECTED"
             if confidence >= suspected_threshold:
-                return "SUSPECTED" if corroboration_count >= 2 else "PENDING"
+                if corroboration_count >= 2 or single_sufficient:
+                    return "SUSPECTED"
+                return "PENDING"
             return "DISCARDED"
         except Exception as error:
             logger.error("grade classification failed: %s", error)
@@ -1161,6 +1743,140 @@ class MAIntegratedDetector:
             logger.error("unregistered action lookup failed: %s", error)
             return []
 
+    def _prefer_integrity_action_reports(
+        self,
+        reports: list[dict[str, Any]],
+        latest: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Prefer CS/OBC integrity actions when IS_VIOLATED=1."""
+        try:
+            if int(latest.get("IS_VIOLATED", 0) or 0) != 1:
+                return reports
+            preferred_ids = ("A008", "A003")
+            preferred = [report for report in reports if report.get("action_id") in preferred_ids]
+            if not preferred:
+                return reports
+            others = [report for report in reports if report.get("action_id") not in preferred_ids]
+            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            preferred = sort_reports_by_target(preferred, target, self._rule_registry)
+            return preferred + others
+        except Exception as error:
+            logger.error("integrity report preference failed: %s", error)
+            return reports
+
+    def _promote_best_action_report(
+        self,
+        rule_data: dict[str, Any],
+        latest: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Promote the highest-scoring mapped action when grading discarded all candidates."""
+        try:
+            confidence_config = self._threshold_config.get("confidence", {})
+            suspected_threshold = float(confidence_config.get("SUSPECTED_THRESHOLD", 40.0))
+            sequence_adjustment = float(rule_data.get("sequence_adjustment", 0.0))
+            best_entry: dict[str, Any] | None = None
+            best_confidence = -1.0
+
+            for action_id, accumulator in rule_data.get("accumulators", {}).items():
+                if action_id not in self._action_registry:
+                    continue
+                accumulated_score = float(accumulator.get("accumulated_score", 0.0))
+                max_possible_score = float(accumulator.get("max_possible_score", 0.0))
+                if accumulated_score <= 0.0 or max_possible_score <= 0.0:
+                    continue
+
+                action_def = self._action_registry[action_id]
+                module = str(action_def.get("module", "UNKNOWN"))
+                phase = int(action_def.get("phase", 0))
+                action_name = str(action_def.get("name", "UNKNOWN"))
+                triggered_rules = list(accumulator.get("triggered_rules", []))
+                raw_confidence = accumulated_score / max_possible_score * 100.0
+                confidence = round(max(0.0, min(raw_confidence + sequence_adjustment, 100.0)), 2)
+                if confidence < suspected_threshold * 0.5:
+                    continue
+
+                corroboration_count = int(
+                    rule_data.get("corroboration", {}).get(f"{module}::{action_id}", 0)
+                )
+                single_sufficient = any(
+                    self._rule_registry.get(rule_id, {}).get("single_sufficient", False)
+                    for rule_id in triggered_rules
+                )
+                grade = self._classify_grade(
+                    max(confidence, suspected_threshold),
+                    corroboration_count,
+                    single_sufficient,
+                    float(confidence_config.get("CONFIRMED_THRESHOLD", 70.0)),
+                    suspected_threshold,
+                    int(self._threshold_config.get("corroboration", {}).get("CONFIRMED_MIN", 2)),
+                )
+                if grade not in ("CONFIRMED", "SUSPECTED"):
+                    grade = "SUSPECTED"
+                    confidence = max(confidence, suspected_threshold)
+
+                if confidence <= best_confidence:
+                    continue
+                best_confidence = confidence
+                best_entry = {
+                    "ma_code": f"{module}_{action_name}_P{phase}",
+                    "action_id": action_id,
+                    "action_name": action_name,
+                    "module": module,
+                    "scenario_phase": phase,
+                    "confidence_score": confidence,
+                    "grade": grade,
+                    "corroboration_count": corroboration_count,
+                    "evidence_keys": {
+                        rule_id: self._rule_registry.get(rule_id, {}).get("name", "")
+                        for rule_id in triggered_rules
+                    },
+                    "is_new_pattern": False,
+                    "action_mapping_status": "mapped",
+                    "triggered_rules": triggered_rules,
+                    "unregistered_action_ids": self._unregistered_action_ids_from_rule_ids(triggered_rules),
+                    "triggered_rule_results": [
+                        item for item in rule_data.get("rule_results", []) if item.get("triggered")
+                    ],
+                }
+
+            if best_entry is None:
+                return None
+            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            preferred_codes = {
+                "CS_INTEGRITY_CHECK_BYPASS_P3",
+                "OBC+CF_SEU_DISGUISED_INTRUSION_P1",
+                "ADCS_ATTITUDE_CONTROL_TAMPERING_P3",
+            }
+            if best_entry.get("ma_code") not in preferred_codes and target:
+                for action_id, accumulator in rule_data.get("accumulators", {}).items():
+                    action_def = self._action_registry.get(action_id)
+                    if action_def is None:
+                        continue
+                    module = str(action_def.get("module", ""))
+                    if target not in expand_module_tokens(module) and target not in module:
+                        continue
+                    triggered_rules = list(accumulator.get("triggered_rules", []))
+                    if not triggered_rules:
+                        continue
+                    phase = int(action_def.get("phase", 0))
+                    action_name = str(action_def.get("name", "UNKNOWN"))
+                    candidate_code = f"{module}_{action_name}_P{phase}"
+                    if candidate_code in preferred_codes or target in expand_module_tokens(module):
+                        best_entry = {
+                            **best_entry,
+                            "ma_code": candidate_code,
+                            "action_id": action_id,
+                            "action_name": action_name,
+                            "module": module,
+                            "scenario_phase": phase,
+                            "triggered_rules": triggered_rules,
+                        }
+                        break
+            return best_entry
+        except Exception as error:
+            logger.error("best action promotion failed: %s", error)
+            return None
+
     def _build_undefined_action_report(
         self,
         latest: dict[str, Any],
@@ -1231,7 +1947,15 @@ class MAIntegratedDetector:
                 for report in mapped:
                     report["action_mapping_status"] = "mapped"
                     report["is_new_pattern"] = False
+                target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+                mapped = sort_reports_by_target(mapped, target, self._rule_registry)
+                mapped = self._prefer_integrity_action_reports(mapped, latest)
                 return mapped
+
+            promoted = self._promote_best_action_report(rule_data, latest)
+            if promoted is not None:
+                filtered = self._prefer_integrity_action_reports([promoted], latest)
+                return filtered[:1]
 
             return [self._build_undefined_action_report(latest, rule_data)]
         except Exception as error:
@@ -1241,48 +1965,61 @@ class MAIntegratedDetector:
     @staticmethod
     def _timestamp_to_epoch(value: Any) -> float:
         try:
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                normalized = value.replace("Z", "+00:00")
-                return datetime.fromisoformat(normalized).timestamp()
-            return time.time()
-        except (TypeError, ValueError) as error:
-            logger.error("timestamp conversion failed: %s", error)
+            epoch = timestamp_to_epoch(value)
+            if epoch is not None:
+                return epoch
             return time.time()
         except Exception as error:
-            logger.error("unexpected timestamp conversion failure: %s", error)
+            logger.error("timestamp conversion failed: %s", error)
             return time.time()
 
-    def _insert_gs_tables(self, packet: dict[str, Any]) -> None:
+    def _insert_gs_tables(self, packet: dict[str, Any]) -> bool:
         try:
-            self._gs_tlm_history.append(dict(packet))
+            if self._is_replay_mode:
+                return False
+            if not is_db_available():
+                logger.error("GS table insert skipped; database unavailable")
+                return False
+            prepared = gs_repository.prepare_packet_for_db(packet)
+            self._gs_tlm_history.append(dict(prepared))
+            history_id = gs_repository.insert_tlm_history(prepared)
+            if history_id is None:
+                logger.error("GS table insert returned no HISTORY_ID")
+                return False
+            gs_repository.insert_pwr_meta_rows(prepared, history_id)
             power_columns = {
                 key: value
-                for key, value in packet.items()
+                for key, value in prepared.items()
                 if key.startswith("SW_") or key.startswith("BUS_") or key == "BATT_VOLTAGE"
             }
             if power_columns:
-                power_columns["UPDATED_AT"] = packet.get("UPDATED_AT")
+                power_columns["UPDATED_AT"] = prepared.get("UPDATED_AT")
                 self._gs_pwr_meta.append(power_columns)
+            return True
         except Exception as error:
             logger.error("GS table insert failed: %s", error)
+            return False
 
     def _notify_ui_normal(self, packet: dict[str, Any]) -> None:
         try:
             logger.info("normal telemetry received at %s", packet.get("UPDATED_AT"))
+            from api.websocket_manager import ws_manager
+
+            ws_manager.broadcast_sync(
+                {
+                    "type": "STATUS_NORMAL",
+                    "timestamp": packet.get("UPDATED_AT"),
+                }
+            )
         except Exception as error:
             logger.error("normal UI notification failed: %s", error)
 
-    def _db_insert_dashboard(self, report: dict[str, Any]) -> None:
+    def _memory_insert_dashboard(self, report: dict[str, Any]) -> None:
+        """Append one dashboard row to in-memory tables without DB writes (replay preview)."""
         try:
-            detect_id = self._next_detect_id
-            self._next_detect_id += 1
             latest = self._telemetry_window[-1] if self._telemetry_window else {}
             target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
             row = {
-                "DETECT_ID": detect_id,
-                "DASHBOARD_ID": detect_id,
                 "DETECT_TIME": latest.get("UPDATED_AT", datetime.now(timezone.utc).isoformat()),
                 "MODULE": report.get("module"),
                 "ACTION": report.get("action_name"),
@@ -1307,7 +2044,12 @@ class MAIntegratedDetector:
                 "SW_ID_LIST": latest.get("SW_ID_LIST", []),
                 "SATELLITE_DETECTED_AT": latest.get("DETECTED_AT"),
             }
+            detect_id = self._next_detect_id
+            self._next_detect_id += 1
+            row["DETECT_ID"] = detect_id
+            row["DASHBOARD_ID"] = detect_id
             self._dashboard_rows.append(row)
+
             detail = dict(latest)
             detail["DASHBOARD_ID"] = detect_id
             detail["DETECT_ID"] = detect_id
@@ -1317,26 +2059,106 @@ class MAIntegratedDetector:
             detail["UNREGISTERED_ACTION_IDS"] = list(report.get("unregistered_action_ids", []))
             self._detail_rows.append(detail)
         except Exception as error:
+            logger.error("memory dashboard insert failed: %s", error)
+
+    def _db_insert_dashboard(self, report: dict[str, Any]) -> None:
+        try:
+            latest = self._telemetry_window[-1] if self._telemetry_window else {}
+            target = normalize_target_subsystem(latest.get("TARGET_SUBSYSTEM"))
+            row = {
+                "DETECT_TIME": latest.get("UPDATED_AT", datetime.now(timezone.utc).isoformat()),
+                "MODULE": report.get("module"),
+                "ACTION": report.get("action_name"),
+                "SCENARIO_PHASE": report.get("scenario_phase"),
+                "MA_CODE": report.get("ma_code"),
+                "CONFIDENCE_SCORE": report.get("confidence_score"),
+                "GRADE": report.get("grade"),
+                "CORROBORATION_COUNT": report.get("corroboration_count"),
+                "EVIDENCE_KEYS": report.get("evidence_keys", {}),
+                "IS_NEW_PATTERN": report.get("is_new_pattern", False),
+                "ACTION_MAPPING_STATUS": report.get("action_mapping_status", "mapped"),
+                "TRIGGERED_RULE_IDS": list(report.get("triggered_rules", [])),
+                "UNREGISTERED_ACTION_IDS": list(report.get("unregistered_action_ids", [])),
+                "TRIGGERED_RULE_RESULTS": list(report.get("triggered_rule_results", [])),
+                "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
+                "SATELLITE_TARGET_SUBSYSTEM": target,
+                "FALSE_POSITIVE_RESULT": latest.get("FALSE_POSITIVE_RESULT"),
+                "FALSE_POSITIVE_WEIGHT": latest.get("FALSE_POSITIVE_WEIGHT"),
+                "FALSE_POSITIVE_EXCEPTION": latest.get("FALSE_POSITIVE_EXCEPTION"),
+                "TARGET_SUBSYSTEM": latest.get("TARGET_SUBSYSTEM"),
+                "EVENT_ID": latest.get("EVENT_ID"),
+                "SW_ID_LIST": latest.get("SW_ID_LIST", []),
+                "SATELLITE_DETECTED_AT": latest.get("DETECTED_AT"),
+            }
+            detect_id = gs_repository.insert_dashboard_row(row)
+            if detect_id is None:
+                detect_id = self._next_detect_id
+                self._next_detect_id += 1
+            else:
+                self._next_detect_id = max(self._next_detect_id, detect_id + 1)
+            row["DETECT_ID"] = detect_id
+            row["DASHBOARD_ID"] = detect_id
+            self._dashboard_rows.append(row)
+
+            detail = dict(latest)
+            detail["DASHBOARD_ID"] = detect_id
+            detail["DETECT_ID"] = detect_id
+            detail["MA_CODE"] = report.get("ma_code")
+            detail["ACTION_MAPPING_STATUS"] = report.get("action_mapping_status", "mapped")
+            detail["TRIGGERED_RULE_RESULTS"] = list(report.get("triggered_rule_results", []))
+            detail["UNREGISTERED_ACTION_IDS"] = list(report.get("unregistered_action_ids", []))
+            detail_row = {
+                "DASHBOARD_ID": detect_id,
+                "DETECT_ID": detect_id,
+                "MA_CODE": report.get("ma_code"),
+                "ACTION_MAPPING_STATUS": report.get("action_mapping_status", "mapped"),
+                "IMU_WBN_X": latest.get("IMU_WBN_X"),
+                "IMU_WBN_Y": latest.get("IMU_WBN_Y"),
+                "IMU_WBN_Z": latest.get("IMU_WBN_Z"),
+                "QERR_0": latest.get("QERR_0"),
+                "QERR_1": latest.get("QERR_1"),
+                "QERR_2": latest.get("QERR_2"),
+                "QERR_3": latest.get("QERR_3"),
+                "MOMENTUM_NMS_0": latest.get("MOMENTUM_NMS_0"),
+                "MOMENTUM_NMS_1": latest.get("MOMENTUM_NMS_1"),
+                "MOMENTUM_NMS_2": latest.get("MOMENTUM_NMS_2"),
+                "RAW_MAG_X": latest.get("RAW_MAG_X"),
+                "RAW_MAG_Y": latest.get("RAW_MAG_Y"),
+                "RAW_MAG_Z": latest.get("RAW_MAG_Z"),
+                "TRIGGERED_RULE_RESULTS": list(report.get("triggered_rule_results", [])),
+                "UNREGISTERED_ACTION_IDS": list(report.get("unregistered_action_ids", [])),
+            }
+            gs_repository.insert_detail_row(detail_row, detail)
+            self._detail_rows.append(detail)
+            if report.get("is_new_pattern"):
+                self._db_set_new_pattern_flag(report, detect_id)
+        except Exception as error:
             logger.error("dashboard row insert failed: %s", error)
 
     def _db_insert_discard_log(self, report: dict[str, Any]) -> None:
         try:
-            self._discard_log.append({"logged_at": datetime.now(timezone.utc).isoformat(), "report": dict(report)})
+            entry = {"logged_at": datetime.now(timezone.utc).isoformat(), "report": dict(report)}
+            self._discard_log.append(entry)
+            if self._is_replay_mode:
+                self._replay_buffer.append({"target": "DISCARD_LOG", "data": dict(report)})
+                return
+            gs_repository.insert_discard_log(report)
         except Exception as error:
             logger.error("discard log insert failed: %s", error)
 
-    def _db_set_new_pattern_flag(self, report: dict[str, Any]) -> None:
+    def _db_set_new_pattern_flag(self, report: dict[str, Any], detect_id: int | None = None) -> None:
         try:
-            self._known_patterns.add(str(report.get("ma_code", "")))
+            ma_code = str(report.get("ma_code", ""))
+            self._known_patterns.add(ma_code)
+            if detect_id is not None:
+                gs_repository.update_new_pattern_flag(int(detect_id), ma_code)
         except Exception as error:
             logger.error("new pattern flag update failed: %s", error)
 
     def _db_query_dashboard(self, detect_id: int) -> dict[str, Any]:
         try:
-            for row in self._dashboard_rows:
-                if int(row.get("DETECT_ID", -1)) == detect_id:
-                    return dict(row)
-            return {}
+            row = gs_repository.query_dashboard(int(detect_id))
+            return dict(row) if row else {}
         except (TypeError, ValueError) as error:
             logger.error("dashboard query failed: %s", error)
             return {}
@@ -1346,7 +2168,7 @@ class MAIntegratedDetector:
 
     def _db_query_detail(self, dashboard_id: int) -> list[dict[str, Any]]:
         try:
-            return [dict(row) for row in self._detail_rows if int(row.get("DASHBOARD_ID", -1)) == dashboard_id]
+            return gs_repository.query_detail_rows(int(dashboard_id))
         except (TypeError, ValueError) as error:
             logger.error("detail query failed: %s", error)
             return []
@@ -1356,14 +2178,9 @@ class MAIntegratedDetector:
 
     def _db_query_history(self, detect_time: str) -> list[dict[str, Any]]:
         try:
-            if not detect_time:
-                return list(self._gs_tlm_history[-10:])
-            target = self._timestamp_to_epoch(detect_time)
-            return [
-                dict(row)
-                for row in self._gs_tlm_history
-                if abs(self._timestamp_to_epoch(row.get("UPDATED_AT", target)) - target) <= self._window_size_sec
-            ]
+            if detect_time:
+                return gs_repository.query_detection_history_rows(detect_time)
+            return gs_repository.load_recent_tlm_history(10)
         except Exception as error:
             logger.error("history query failed: %s", error)
             return []

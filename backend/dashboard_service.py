@@ -1,22 +1,54 @@
-﻿"""Service layer that adapts MA detector memory tables for the dashboard API."""
+"""Service layer that builds dashboard API responses from MySQL."""
 
 from __future__ import annotations
 
 import json
-from copy import deepcopy
-from datetime import datetime, timezone
-from pathlib import Path
+import logging
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from ma_detector import MAIntegratedDetector
 from ma_detector.core.evidence_rules import EvidenceRules
+from ma_detector.core.packet_protocol import detection_snapshots_from_history
 from ma_detector.core.rule_activation import compute_step_change_percent, merge_default_activations
 from ma_detector.core.target_context import (
     CORE_SUBSYSTEMS,
     normalize_target_subsystem,
     report_matches_target,
 )
+from ma_detector.db import gs_repository
+from ma_detector.db.database import require_db
 from ma_detector.registry.registry_manager import RegistryManager
+
+logger = logging.getLogger(__name__)
+
+# Rows inserted within this wall-clock gap belong to one satellite uplink window.
+COMM_SESSION_GAP_SEC = 30
+DETECTION_MATCH_TOLERANCE_SEC = 5
+MAX_COMMUNICATIONS = 200
+TLM_HISTORY_CLUSTER_LIMIT = 5000
+
+_SKIP_SNAPSHOT_KEYS = frozenset(
+    {
+        "HISTORY_ID",
+        "DETAIL_ID",
+        "DASHBOARD_ID",
+        "DETECT_ID",
+        "CREATED_AT",
+        "SNAPSHOT",
+        "PAYLOAD",
+        "RAW_PAYLOAD",
+    }
+)
+
+RULE_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "DEVICE_ERR_RW0": ("DEVICE_ENABLED_RW0",),
+    "DEVICE_ERR_RW1": ("DEVICE_ENABLED_RW1",),
+    "DEVICE_ERR_RW2": ("DEVICE_ENABLED_RW2",),
+    "EXPECTED_CRC": ("EXPECTED_HASH",),
+    "OBC_P_HASH": ("ACTUAL_HASH", "OBC_P_HASH"),
+}
 
 MODULE_ALIASES = {
     "CF": ["OBC"],
@@ -30,18 +62,80 @@ MODULE_ALIASES = {
     "TBL": ["OBC"],
     "TO": ["COM"],
 }
-# Primary seed/replay dataset for dashboard boot and tests (see tests/ and create_detector_with_seed).
-DATASET_PATH = Path(__file__).resolve().parent / "test_data" / "realistic_satellite_dataset.json"
+_REPLAY_ROW_SKIP_KEYS = frozenset({"HISTORY_ID", "PAYLOAD", "RAW_PAYLOAD"})
 
 
-def create_detector_with_seed() -> MAIntegratedDetector:
-    """Create a detector instance with representative ground-station data."""
+def _json_safe_value(value: Any) -> Any:
+    """Convert DB-loaded values into JSON-serializable forms for replay."""
+    try:
+        if isinstance(value, datetime):
+            return value.isoformat(sep=" ", timespec="seconds")
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, dict):
+            return {str(key): _json_safe_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_json_safe_value(item) for item in value]
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", errors="replace")
+        return value
+    except Exception as error:
+        logger.error("json safe conversion failed: %s", error)
+        return value
+
+
+def _normalize_replay_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """Strip DB-only columns and normalize values before replay ingestion."""
+    try:
+        cleaned = {
+            key: value
+            for key, value in packet.items()
+            if key not in _REPLAY_ROW_SKIP_KEYS
+        }
+        safe = _json_safe_value(cleaned)
+        return safe if isinstance(safe, dict) else cleaned
+    except Exception as error:
+        logger.error("replay packet normalization failed: %s", error)
+        return packet
+
+
+def _dump_replay_packet(packet: dict[str, Any]) -> str:
+    """Serialize one replay packet for receive_telemetry()."""
+    try:
+        return json.dumps(_normalize_replay_packet(packet), ensure_ascii=False)
+    except Exception as error:
+        logger.error("replay packet serialization failed: %s", error)
+        return json.dumps(_json_safe_value(packet), ensure_ascii=False, default=str)
+
+
+def create_detector() -> MAIntegratedDetector:
+    """Create a detector with baseline and pipeline state loaded from MySQL."""
+    require_db()
     detector = MAIntegratedDetector()
-    detector.build_baseline(_baseline_history())
-
-    for packet in _seed_packets():
-        detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
+    history = gs_repository.load_baseline_history()
+    if not history:
+        logger.warning("GS_TLM_HISTORY has no normal rows; baseline empty until telemetry arrives")
+    detector.build_baseline(history)
+    _hydrate_detector_from_db(detector)
     return detector
+
+
+def _hydrate_detector_from_db(detector: MAIntegratedDetector) -> None:
+    """Load recent telemetry and dashboard rows from MySQL into the detector pipeline cache."""
+    try:
+        tlm_rows = gs_repository.load_recent_tlm_history(600)
+        dashboard_rows = gs_repository.query_recent_dashboards(100)
+        if tlm_rows or dashboard_rows:
+            detector.hydrate_memory_state(tlm_rows, dashboard_rows)
+            logger.info(
+                "hydrated detector pipeline cache from DB: tlm=%s dashboard=%s",
+                len(tlm_rows),
+                len(dashboard_rows),
+            )
+    except Exception as error:
+        logger.error("detector DB hydration failed: %s", error)
 
 
 class DashboardService:
@@ -64,19 +158,26 @@ class DashboardService:
         """Return the full dashboard model consumed by the Next.js UI."""
         return self._get_dashboard_state_for_detector(self.detector)
 
-    def _get_dashboard_state_for_detector(self, detector: MAIntegratedDetector) -> dict[str, Any]:
-        """Return the dashboard model for a specific detector instance."""
-        dashboard_rows = detector.get_dashboard_records()
-        history_rows = detector.get_history_records()
+    def _get_dashboard_state_for_detector(
+        self,
+        detector: MAIntegratedDetector,
+        *,
+        preview_detector: MAIntegratedDetector | None = None,
+    ) -> dict[str, Any]:
+        """Return the dashboard model; production reads MySQL, preview uses in-memory replay output."""
+        if preview_detector is not None:
+            dashboard_rows = preview_detector.get_dashboard_records()
+            history_rows = preview_detector.get_history_records()
+        else:
+            require_db()
+            dashboard_rows = gs_repository.query_recent_dashboards(100)
+            history_rows = gs_repository.load_recent_tlm_history(TLM_HISTORY_CLUSTER_LIMIT)
         detections = [self._to_detection(row) for row in dashboard_rows]
         detections = self._sort_detections_for_display(detections)
         communications = self._build_communications(history_rows, detections)
-        latest_time = communications[-1]["communicated_at"] if communications else None
-        latest_detections = [
-            detection
-            for detection in detections
-            if latest_time is not None and detection["detect_time"] == latest_time
-        ]
+        latest_comm = communications[-1] if communications else None
+        latest_detections = list(latest_comm.get("detections", [])) if latest_comm else []
+        latest_time = latest_comm.get("communicated_at") if latest_comm else None
         latest_target = ""
         if latest_detections:
             latest_target = str(latest_detections[0].get("satellite_filter", {}).get("target_subsystem") or "")
@@ -89,7 +190,7 @@ class DashboardService:
             "communications": communications,
             "latest_communication": {
                 "communicated_at": latest_time,
-                "status": "ANOMALY" if latest_detections else "NORMAL",
+                "status": latest_comm.get("status", "NORMAL") if latest_comm else "NORMAL",
                 "anomaly_count": len(latest_detections),
                 "detections": latest_detections,
                 "satellite_target_subsystem": latest_target or None,
@@ -102,7 +203,8 @@ class DashboardService:
         }
 
     def get_detection_detail(self, detect_id: int, snapshot_index: int | None = None) -> dict[str, Any]:
-        """Return UI-ready detail for one dashboard detection at a snapshot frame."""
+        """Return UI-ready detail for one dashboard detection at its detect_time snapshot."""
+        _ = snapshot_index
         payload = json.loads(self.detector.get_ui_data(detect_id))
         if "error" in payload:
             return payload
@@ -110,21 +212,21 @@ class DashboardService:
         detail_history = payload.get("detail", {}).get("history", [])
         detection = self._dashboard_detection_by_id(detect_id)
         detect_time = str(detection.get("detect_time") or "")
-        previous_snapshot, current_snapshot, series = self.detector.get_snapshot_frame(
-            detect_time,
-            snapshot_index,
-        )
-        snapshot = current_snapshot or (detail_history[0] if detail_history else {})
-        frame_index = snapshot_index
-        if frame_index is None:
-            frame_index = len(series) - 1 if series else 0
-        evaluation = self.detector.get_threshold_config().get("evaluation", {})
+        history_rows = gs_repository.query_detection_history_rows(detect_time)
+        if not history_rows:
+            history_rows = list(detail_history)
+        previous_snapshot, current_snapshot = detection_snapshots_from_history(history_rows, detect_time)
+        if current_snapshot is None and detail_history:
+            previous_snapshot, current_snapshot = detection_snapshots_from_history(
+                detail_history,
+                detect_time,
+            )
+        snapshot = dict(current_snapshot or {})
+        previous_snapshot = dict(previous_snapshot) if previous_snapshot else None
         payload["snapshot_frame"] = {
-            "mode": "snapshot_series",
-            "index": frame_index,
-            "total": len(series),
-            "window_seconds": int(evaluation.get("series_seconds", self.detector._window_size_sec)),
-            "interval_seconds": int(evaluation.get("series_interval_sec", 1)),
+            "mode": "detection_snapshot",
+            "index": 0,
+            "total": 1 if current_snapshot else 0,
             "previous_at": (previous_snapshot or {}).get("UPDATED_AT"),
             "current_at": snapshot.get("UPDATED_AT"),
         }
@@ -213,14 +315,25 @@ class DashboardService:
         return {"ok": ok, "category": category, "key": key, "value": value}
 
     def run_replay(self, packets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """Run replay mode for supplied packets or stored raw telemetry history."""
-        replay_packets = packets if packets else self._replay_source_packets()
-        self.detector.set_replay_mode(True)
-        for packet in replay_packets:
-            self.detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
-        buffer = self.detector.get_replay_buffer()
-        self.detector.set_replay_mode(False)
-        return {"ok": True, "result_count": len(buffer), "results": buffer}
+        """Re-run MA detection on stored anomaly telemetry and persist results to MySQL."""
+        require_db()
+        if packets is not None:
+            return {"ok": False, "error": "custom replay packets are disabled; use stored DB telemetry"}
+        gs_repository.clear_ma_results()
+        reprocessed = 0
+        for row in gs_repository.load_anomaly_history():
+            error = self.detector.receive_telemetry(
+                _dump_replay_packet(row),
+                reprocess=True,
+            )
+            if error is None:
+                reprocessed += 1
+        _hydrate_detector_from_db(self.detector)
+        return {
+            "ok": True,
+            "reprocessed": reprocessed,
+            "dashboard": self.get_dashboard_state(),
+        }
 
     def run_replay_preview(
         self,
@@ -229,10 +342,20 @@ class DashboardService:
         packets: list[dict[str, Any]] | None = None,
         actions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run a replay with temporary rules and thresholds without changing saved config."""
-        detector = self._create_detector_with_config(rules, thresholds, packets, actions)
+        """Run a replay with temporary rules and thresholds without changing saved config or MySQL."""
+        if packets is not None:
+            return {"ok": False, "error": "custom replay packets are disabled; use stored DB telemetry"}
+        preview_detector = self._reprocess_detector_from_db(
+            rules,
+            thresholds,
+            actions,
+            preview=True,
+        )
         current_dashboard = self.get_dashboard_state()
-        preview_dashboard = self._get_dashboard_state_for_detector(detector)
+        preview_dashboard = self._get_dashboard_state_for_detector(
+            self.detector,
+            preview_detector=preview_detector,
+        )
         return {
             "ok": True,
             "temporary": True,
@@ -248,7 +371,7 @@ class DashboardService:
         thresholds: dict[str, Any],
         actions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Persist replay settings and rebuild detector state from scratch."""
+        """Persist replay settings, clear MA tables, and reprocess stored anomaly telemetry."""
         rules_ok = self.registry_manager.replace_rules(rules)
         thresholds_ok = self.registry_manager.replace_thresholds(thresholds)
         actions_ok = True
@@ -257,7 +380,12 @@ class DashboardService:
         if not (rules_ok and thresholds_ok and actions_ok):
             return {"ok": False, "error": "config persistence failed"}
 
-        self.detector = self._create_detector_with_config(rules, thresholds, None, actions)
+        self.detector = self._reprocess_detector_from_db(
+            rules,
+            thresholds,
+            actions,
+            preview=False,
+        )
         return {"ok": True, "dashboard": self.get_dashboard_state()}
 
     def persist_rules(self, rules: dict[str, Any]) -> dict[str, Any]:
@@ -283,20 +411,24 @@ class DashboardService:
 
     def _dashboard_detection_by_id(self, detect_id: int) -> dict[str, Any]:
         try:
-            for row in self.detector.get_dashboard_records():
-                if int(row.get("DETECT_ID", -1)) == detect_id:
-                    return self._to_detection(row)
+            require_db()
+            row = gs_repository.query_dashboard(int(detect_id))
+            if row:
+                return self._to_detection(row)
             return {}
         except (TypeError, ValueError):
             return {}
 
-    def _create_detector_with_config(
+    def _reprocess_detector_from_db(
         self,
         rules: dict[str, Any],
         thresholds: dict[str, Any],
-        packets: list[dict[str, Any]] | None,
-        actions: dict[str, Any] | None = None,
+        actions: dict[str, Any] | None,
+        *,
+        preview: bool,
     ) -> MAIntegratedDetector:
+        """Rebuild detector config and re-run MA on stored IS_ANOMALY=1 rows."""
+        require_db()
         detector = MAIntegratedDetector()
         detector._action_registry = (
             actions if actions is not None else self.detector.get_action_registry()
@@ -305,15 +437,25 @@ class DashboardService:
         merge_default_activations(detector._rule_registry)
         detector._threshold_config = thresholds
         detector._evidence_rules = EvidenceRules(detector._baseline_manager, thresholds)
-        detector.build_baseline(_baseline_history())
-        for packet in packets if packets is not None else self._replay_source_packets():
-            detector.receive_telemetry(json.dumps(packet, ensure_ascii=False))
-        return detector
+        baseline = gs_repository.load_baseline_history()
+        detector.build_baseline(baseline)
 
-    def _replay_source_packets(self) -> list[dict[str, Any]]:
-        """Use all stored received telemetry rows as replay source."""
-        history = self.detector.get_history_records()
-        return [deepcopy(row) for row in history] if history else _seed_packets()
+        if not preview:
+            gs_repository.clear_ma_results()
+
+        detector.set_replay_mode(preview)
+        try:
+            for row in gs_repository.load_anomaly_history():
+                detector.receive_telemetry(
+                    _dump_replay_packet(row),
+                    reprocess=True,
+                )
+        finally:
+            detector.set_replay_mode(False)
+
+        if not preview:
+            _hydrate_detector_from_db(detector)
+        return detector
 
     @staticmethod
     def _build_replay_comparison(
@@ -426,34 +568,219 @@ class DashboardService:
         except Exception:
             return detections
 
+    @staticmethod
+    def _format_communicated_at(value: Any) -> str:
+        try:
+            if value is None:
+                return ""
+            text = str(value).strip()
+            if not text:
+                return ""
+            normalized = text.replace("Z", "+00:00")
+            if "T" not in normalized and " " in normalized:
+                normalized = normalized.replace(" ", "T", 1)
+            if "+" in normalized:
+                normalized = normalized.split("+", 1)[0]
+            if "." in normalized:
+                normalized = normalized.split(".", 1)[0]
+            return normalized.replace("T", " ")
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _parse_datetime_value(value: Any) -> datetime | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=None) if value.tzinfo else value
+            if isinstance(value, date):
+                return datetime.combine(value, datetime.min.time())
+            text = str(value).strip()
+            if not text:
+                return None
+            normalized = text.replace("Z", "+00:00")
+            if "T" not in normalized and " " in normalized:
+                normalized = normalized.replace(" ", "T", 1)
+            parsed = datetime.fromisoformat(normalized)
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+        except Exception:
+            return None
+
+    @staticmethod
+    def _communication_time_key(value: str) -> str:
+        try:
+            return value.replace("T", " ").strip()
+        except Exception:
+            return str(value)
+
+    def _cluster_history_sessions(
+        self,
+        history_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Group onboard history rows that arrived in the same uplink burst."""
+        try:
+            dated_rows: list[tuple[datetime, dict[str, Any]]] = []
+            for row in history_rows:
+                created_at = self._parse_datetime_value(row.get("CREATED_AT"))
+                if created_at is None:
+                    fallback = self._parse_datetime_value(row.get("UPDATED_AT") or row.get("DETECTED_AT"))
+                    if fallback is None:
+                        continue
+                    created_at = fallback
+                dated_rows.append((created_at, row))
+
+            if not dated_rows:
+                return []
+
+            dated_rows.sort(key=lambda item: item[0])
+            sessions: list[dict[str, Any]] = []
+            current_created = dated_rows[0][0]
+            current_rows = [dated_rows[0][1]]
+            last_created = current_created
+
+            for created_at, row in dated_rows[1:]:
+                if (created_at - last_created).total_seconds() > COMM_SESSION_GAP_SEC:
+                    sessions.append(
+                        {
+                            "created_start": current_created,
+                            "created_end": last_created,
+                            "rows": current_rows,
+                        }
+                    )
+                    current_created = created_at
+                    current_rows = [row]
+                else:
+                    current_rows.append(row)
+                last_created = created_at
+
+            sessions.append(
+                {
+                    "created_start": current_created,
+                    "created_end": last_created,
+                    "rows": current_rows,
+                }
+            )
+
+            for session in sessions:
+                onboard_times = [
+                    self._parse_datetime_value(item.get("UPDATED_AT") or item.get("DETECTED_AT"))
+                    for item in session["rows"]
+                ]
+                valid_onboard = [value for value in onboard_times if value is not None]
+                session["received_at"] = self._format_communicated_at(session["created_end"])
+                session["communicated_at"] = session["received_at"]
+                session["onboard_snapshot_at"] = (
+                    self._format_communicated_at(max(valid_onboard)) if valid_onboard else session["received_at"]
+                )
+                session["onboard_start"] = min(valid_onboard) if valid_onboard else session["created_start"]
+                session["onboard_end"] = max(valid_onboard) if valid_onboard else session["created_end"]
+                session["sample_count"] = len(session["rows"])
+                session["has_anomaly_rows"] = any(int(item.get("IS_ANOMALY", 0) or 0) == 1 for item in session["rows"])
+            return sessions
+        except Exception as error:
+            logger.error("history session clustering failed: %s", error)
+            return []
+
+    def _session_anomaly_event_times(self, session: dict[str, Any]) -> list[datetime]:
+        try:
+            event_times: list[datetime] = []
+            for row in session.get("rows", []):
+                if int(row.get("IS_ANOMALY", 0) or 0) != 1:
+                    continue
+                parsed = self._parse_datetime_value(row.get("UPDATED_AT") or row.get("DETECTED_AT"))
+                if parsed is not None:
+                    event_times.append(parsed)
+            return event_times
+        except Exception as error:
+            logger.error("session anomaly event lookup failed: %s", error)
+            return []
+
+    def _assign_detection_to_session(
+        self,
+        detection: dict[str, Any],
+        sessions: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        try:
+            detect_time = self._parse_datetime_value(detection.get("detect_time"))
+            if detect_time is None or not sessions:
+                return None
+
+            tolerance = DETECTION_MATCH_TOLERANCE_SEC
+            best_session: dict[str, Any] | None = None
+            best_delta = float("inf")
+            for session in sessions:
+                if not session.get("has_anomaly_rows"):
+                    continue
+                for event_time in self._session_anomaly_event_times(session):
+                    delta = abs((detect_time - event_time).total_seconds())
+                    if delta <= tolerance and delta < best_delta:
+                        best_delta = delta
+                        best_session = session
+            return best_session
+        except Exception as error:
+            logger.error("detection session assignment failed: %s", error)
+            return None
+
     def _build_communications(
         self,
         history_rows: list[dict[str, Any]],
         detections: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        communication_map: dict[str, dict[str, Any]] = {}
-        for row in history_rows:
-            communicated_at = str(row.get("UPDATED_AT") or row.get("DETECTED_AT") or "")
-            if not communicated_at:
-                continue
-            communication_map[communicated_at] = {
-                "communicated_at": communicated_at,
-                "status": "NORMAL",
-                "detections": [],
+        sessions = self._cluster_history_sessions(history_rows)
+        if not sessions:
+            communication_map: dict[str, dict[str, Any]] = {}
+            for row in history_rows:
+                communicated_at = self._format_communicated_at(
+                    row.get("UPDATED_AT") or row.get("DETECTED_AT")
+                )
+                if not communicated_at:
+                    continue
+                key = self._communication_time_key(communicated_at)
+                communication_map[key] = {
+                    "communicated_at": communicated_at,
+                    "status": "NORMAL",
+                    "detections": [],
+                    "sample_count": 1,
+                }
+        else:
+            communication_map = {
+                self._communication_time_key(str(session["communicated_at"])): {
+                    "communicated_at": session["communicated_at"],
+                    "received_at": session.get("received_at", session["communicated_at"]),
+                    "onboard_snapshot_at": session.get("onboard_snapshot_at"),
+                    "status": "NORMAL",
+                    "detections": [],
+                    "sample_count": int(session.get("sample_count", 0) or 0),
+                }
+                for session in sessions
             }
 
         for detection in detections:
-            detect_time = str(detection.get("detect_time") or "")
+            detect_time = self._format_communicated_at(detection.get("detect_time"))
             if not detect_time:
                 continue
+            session = self._assign_detection_to_session(detection, sessions) if sessions else None
+            if session is None:
+                continue
+            key = self._communication_time_key(str(session["communicated_at"]))
             entry = communication_map.setdefault(
-                detect_time,
-                {"communicated_at": detect_time, "status": "NORMAL", "detections": []},
+                key,
+                {
+                    "communicated_at": session["communicated_at"],
+                    "received_at": session.get("received_at", session["communicated_at"]),
+                    "onboard_snapshot_at": session.get("onboard_snapshot_at"),
+                    "status": "NORMAL",
+                    "detections": [],
+                    "sample_count": int(session.get("sample_count", 0) or 0),
+                },
             )
             entry["status"] = "ANOMALY"
             entry["detections"].append(detection)
 
-        communications = sorted(communication_map.values(), key=lambda item: item["communicated_at"])[-5:]
+        communications = sorted(communication_map.values(), key=lambda item: item["communicated_at"])
+        if len(communications) > MAX_COMMUNICATIONS:
+            communications = communications[-MAX_COMMUNICATIONS:]
         for communication in communications:
             communication["detections"] = sorted(
                 communication["detections"],
@@ -518,12 +845,7 @@ class DashboardService:
             rule = rules.get(rule_id, {})
             columns = rule.get("columns", [])
             column_values = {
-                column: {
-                    "observed": snapshot.get(column),
-                    "normal": self._normal_reference(column, snapshot, previous_snapshot),
-                    "abnormal_percent": self._metric_percent(column, snapshot, previous_snapshot),
-                    "previous_observed": (previous_snapshot or {}).get(column),
-                }
+                column: self._build_column_detail(column, snapshot, previous_snapshot)
                 for column in columns
             }
             contributes = rule.get("contributes_to", {})
@@ -563,6 +885,23 @@ class DashboardService:
             )
         return details
 
+    def _build_column_detail(
+        self,
+        column: str,
+        snapshot: dict[str, Any],
+        previous_snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        observed = self._snapshot_column_value(snapshot, column)
+        previous_observed = (
+            self._snapshot_column_value(previous_snapshot, column) if previous_snapshot else None
+        )
+        return {
+            "observed": observed,
+            "normal": self._normal_reference(column, snapshot, previous_snapshot),
+            "abnormal_percent": self._metric_percent(column, snapshot, previous_snapshot),
+            "previous_observed": previous_observed,
+        }
+
     @staticmethod
     def _module_to_subsystems(module: str) -> list[str]:
         raw_modules = [part.strip() for part in module.replace(",", "+").split("+")]
@@ -591,22 +930,52 @@ class DashboardService:
         return incoming if order.get(incoming, 0) > order.get(current, 0) else current
 
     @staticmethod
+    def _merge_snapshot_layers(*layers: dict[str, Any] | None) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        try:
+            for layer in layers:
+                if not isinstance(layer, dict):
+                    continue
+                for key, value in layer.items():
+                    if key in _SKIP_SNAPSHOT_KEYS or str(key).startswith("_"):
+                        continue
+                    if value is not None:
+                        merged[key] = value
+            return merged
+        except Exception as error:
+            logger.error("snapshot layer merge failed: %s", error)
+            return merged
+
+    @staticmethod
+    def _snapshot_column_value(snapshot: dict[str, Any], column: str) -> Any:
+        try:
+            if not isinstance(snapshot, dict):
+                return None
+            value = snapshot.get(column)
+            if value is not None:
+                return value
+            for alias in RULE_COLUMN_ALIASES.get(column, ()):
+                alias_value = snapshot.get(alias)
+                if alias_value is not None:
+                    return alias_value
+            return None
+        except Exception as error:
+            logger.error("snapshot column lookup failed: %s", error)
+            return None
+
+    @staticmethod
     def _normal_reference(
         column: str,
         snapshot: dict[str, Any],
         previous_snapshot: dict[str, Any] | None = None,
     ) -> Any:
-        if previous_snapshot is not None and column in previous_snapshot:
-            return previous_snapshot.get(column)
+        if previous_snapshot is not None:
+            previous_value = DashboardService._snapshot_column_value(previous_snapshot, column)
+            if previous_value is not None:
+                return previous_value
         if column in {"OBC_P_HASH", "EXPECTED_CRC"}:
-            return snapshot.get("EXPECTED_CRC", "expected hash")
-        if column.startswith("CH") and "CRC" in column:
-            return 0
-        if "ERR" in column or "FAULT" in column or "REJECTED" in column:
-            return 0
-        if "UTILCPUAVG" == column:
-            return "<= 80.0"
-        return "baseline mean"
+            return DashboardService._snapshot_column_value(snapshot, "EXPECTED_CRC")
+        return None
 
     @staticmethod
     def _metric_percent(
@@ -614,190 +983,39 @@ class DashboardService:
         snapshot: dict[str, Any],
         previous_snapshot: dict[str, Any] | None = None,
     ) -> float | None:
-        if previous_snapshot is not None:
-            step_value = compute_step_change_percent(column, snapshot, previous_snapshot)
-            if step_value is not None:
-                return step_value
-        return DashboardService._abnormal_percent(column, snapshot)
+        if previous_snapshot is None:
+            return DashboardService._hash_mismatch_flag(column, snapshot)
+        resolved_snapshot = DashboardService._resolve_snapshot_column(snapshot, column)
+        resolved_previous = DashboardService._resolve_snapshot_column(previous_snapshot, column)
+        current_value = DashboardService._snapshot_column_value(resolved_snapshot, column)
+        previous_value = DashboardService._snapshot_column_value(resolved_previous, column)
+        if current_value is None or previous_value is None:
+            return DashboardService._hash_mismatch_flag(column, snapshot)
+        if not isinstance(current_value, (int, float)) or not isinstance(previous_value, (int, float)):
+            return DashboardService._hash_mismatch_flag(column, snapshot)
+        return compute_step_change_percent(column, resolved_snapshot, resolved_previous)
+
+    @staticmethod
+    def _hash_mismatch_flag(column: str, snapshot: dict[str, Any]) -> float | None:
+        if column not in {"OBC_P_HASH", "EXPECTED_CRC"}:
+            return None
+        observed = DashboardService._snapshot_column_value(snapshot, column)
+        expected = DashboardService._snapshot_column_value(snapshot, "EXPECTED_CRC")
+        if observed is None or expected is None:
+            return None
+        if str(observed).strip() == str(expected).strip():
+            return 0.0
+        return None
+
+    @staticmethod
+    def _resolve_snapshot_column(snapshot: dict[str, Any], column: str) -> dict[str, Any]:
+        resolved = dict(snapshot)
+        value = DashboardService._snapshot_column_value(snapshot, column)
+        if value is not None:
+            resolved[column] = value
+        return resolved
 
     @staticmethod
     def _abnormal_percent(column: str, snapshot: dict[str, Any]) -> float | None:
-        value = snapshot.get(column)
-        if not isinstance(value, (int, float)):
-            if value is None:
-                return None
-            observed = str(value).strip()
-            expected = str(DashboardService._normal_reference(column, snapshot)).strip()
-            if observed == expected:
-                return 0.0
-            if column == "OBC_P_HASH":
-                crc = snapshot.get("EXPECTED_CRC")
-                if crc is not None and observed == str(crc).strip():
-                    return 0.0
-            return None
-        if column == "UTILCPUAVG":
-            return round(max(0.0, value - 80.0), 2)
-        if value == 0:
-            return 0.0
-        return round(min(abs(float(value)) * 10.0, 100.0), 2)
-
-
-def _load_realistic_dataset() -> dict[str, Any]:
-    """Load the realistic satellite communication test dataset."""
-    try:
-        with DATASET_PATH.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _baseline_history() -> list[dict[str, Any]]:
-    """Return baseline history rows from dataset, with fallback records."""
-    dataset = _load_realistic_dataset()
-    baseline = dataset.get("baseline_history", [])
-    if isinstance(baseline, list) and baseline:
-        return [deepcopy(row) for row in baseline if isinstance(row, dict)]
-    normal = _normal_record()
-    return [deepcopy(normal) for _ in range(6)]
-
-
-def _normal_record() -> dict[str, Any]:
-    """Return one representative normal telemetry row."""
-    dataset = _load_realistic_dataset()
-    baseline = dataset.get("baseline_history", [])
-    if isinstance(baseline, list) and baseline and isinstance(baseline[0], dict):
-        return deepcopy(baseline[0])
-    return {
-        "UPDATED_AT": "2026-05-11T06:00:00+00:00",
-        "MISSION_MODE": 2,
-        "ADCS_MODE": 1,
-        "IS_ANOMALY": False,
-        "OBC_P_HASH": "OK",
-        "EXPECTED_CRC": "OK",
-        "APPCSERRCOUNTER": 0,
-        "OSCSERRCOUNTER": 0,
-        "LASTVALCRC": 100,
-        "PROCESSOR_RESET_COUNT": 0,
-        "OBC_S_TICK": 1000,
-        "CH1_FAULT_CRC": 0,
-        "CH2_FAULT_CRC": 0,
-        "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
-        "CHILDQUEUECOUNT": 1,
-        "FILEWRITEERRCOUNTER": 0,
-        "CMDREJECTEDCOUNTER": 0,
-        "PIPEOVERFLOWRRCNT": 0,
-        "COMBINEDPACKETSSENT": 100,
-        "HEAP_FREE": 1000,
-        "MEMINUSE": 200,
-        "EXECOUNTS": 10,
-        "UTILCPUAVG": 20.0,
-        "SKIPPEDSLOTSCOUNT": 0,
-        "ERLOGENTRIES": 0,
-        "DWELL_MASK": 0,
-        "DWELL_ADDR_COUNT": 0,
-        "DWELL_BYTE_COUNT": 0,
-        "ENABLEDROUTES": 1,
-        "FORWARD_ERR_COUNT": 0,
-        "QERR_0": 0.0,
-        "QERR_1": 0.0,
-        "QERR_2": 0.0,
-        "QERR_3": 0.0,
-        "TCMD_X": 0.0,
-        "TCMD_Y": 0.0,
-        "TCMD_Z": 0.0,
-        "MOMENTUM_NMS_0": 0.0,
-        "MOMENTUM_NMS_1": 0.0,
-        "MOMENTUM_NMS_2": 0.0,
-        "DEVICE_ERR_RW0": 0,
-        "DEVICE_ERR_RW1": 0,
-        "DEVICE_ERR_RW2": 0,
-        "BATT_VOLTAGE": 7.4,
-        "BUS_3P3V": 3.3,
-        "BUS_5P0V": 5.0,
-        "BUS_12V": 12.0,
-        "SW_0_CURRENT": 0.2,
-        "SW_1_CURRENT": 0.2,
-        "SW_2_CURRENT": 0.2,
-        "IMU_WBN_VARIANCE": 0.01,
-        "RAW_MAG_VARIANCE": 0.01,
-        "ST_VALID": 1,
-        "IS_SENT": 1,
-    }
-
-
-def _seed_packets() -> list[dict[str, Any]]:
-    """Return representative satellite packets from dataset, with fallback packets."""
-    dataset = _load_realistic_dataset()
-    packets_from_dataset = dataset.get("packets", [])
-    if isinstance(packets_from_dataset, list) and packets_from_dataset:
-        return [deepcopy(packet) for packet in packets_from_dataset if isinstance(packet, dict)]
-
-    normal = _normal_record()
-    packets = []
-    for idx in range(2):
-        packet = deepcopy(normal)
-        packet["UPDATED_AT"] = f"2026-05-11T06:0{idx + 1}:00+00:00"
-        packets.append(
-            {
-                "event_id": idx + 1,
-                "detected_at": packet["UPDATED_AT"],
-                "false_positive_result": "N",
-                "false_positive_weight": 12.0,
-                "false_positive_exception": "",
-                "target_subsystem": "",
-                "sw_id_list": [],
-                "telemetry": packet,
-            }
-        )
-
-    anomaly_one = deepcopy(normal)
-    anomaly_one.update(
-        {
-            "UPDATED_AT": "2026-05-11T06:03:00+00:00",
-            "OBC_P_HASH": "TAMPERED",
-            "APPCSERRCOUNTER": 5,
-            "LASTVALCRC": 101,
-            "CH1_FAULT_CRC": 1,
-            "HEAP_FREE": 300,
-            "UTILCPUAVG": 95.0,
-        }
-    )
-    packets.append(
-        {
-            "event_id": 42,
-            "detected_at": anomaly_one["UPDATED_AT"],
-            "false_positive_result": "Y",
-            "false_positive_weight": 88.5,
-            "false_positive_exception": "",
-            "target_subsystem": "OBC",
-            "sw_id_list": [0, 1],
-            "telemetry": anomaly_one,
-        }
-    )
-
-    anomaly_two = deepcopy(normal)
-    anomaly_two.update(
-        {
-            "UPDATED_AT": "2026-05-11T06:04:00+00:00",
-            "IMU_WBN_VARIANCE": 0.0001,
-            "RAW_MAG_VARIANCE": 0.0001,
-            "BUS_3P3V": 4.1,
-            "BUS_5P0V": 5.9,
-            "FORWARD_ERR_COUNT": 8,
-            "CH1_FAULT_CRC": 0,
-            "CH2_FAULT_CRC": 0,
-        }
-    )
-    packets.append(
-        {
-            "event_id": 43,
-            "detected_at": anomaly_two["UPDATED_AT"],
-            "false_positive_result": "Y",
-            "false_positive_weight": 76.0,
-            "false_positive_exception": "GHOST_TELEMETRY_PATTERN",
-            "target_subsystem": "ADCS",
-            "sw_id_list": [0, 2],
-            "telemetry": anomaly_two,
-        }
-    )
-    return packets
+        """Legacy helper kept for tests; UI uses DB-backed _metric_percent only."""
+        return DashboardService._hash_mismatch_flag(column, snapshot)

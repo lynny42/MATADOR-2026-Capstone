@@ -9,13 +9,27 @@ export async function apiGet(path) {
 }
 
 export async function apiSend(path, method, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    throw new Error(
+      `백엔드(${API_BASE})에 연결할 수 없습니다. uvicorn backend.app:app --reload --port 8000 실행 여부를 확인하세요.`
+    );
+  }
   if (!response.ok) {
-    throw new Error(`${method} ${path} failed: ${response.status}`);
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = payload.detail ? `: ${payload.detail}` : "";
+    } catch (parseError) {
+      detail = "";
+    }
+    throw new Error(`${method} ${path} failed: ${response.status}${detail}`);
   }
   return response.json();
 }

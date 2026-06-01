@@ -1,4 +1,4 @@
-﻿"""Satellite target_subsystem emphasis helpers (UI ordering, not rule filtering)."""
+"""Satellite target_subsystem emphasis helpers (UI ordering, not rule filtering)."""
 
 from __future__ import annotations
 
@@ -76,6 +76,52 @@ def infer_target_from_sw_ids(sw_id_list: Any) -> str:
         return ""
     except Exception as error:
         logger.error("unexpected sw_id target inference failure: %s", error)
+        return ""
+
+
+def infer_adcs_attack_target(
+    snapshot: dict[str, Any],
+    thresholds: dict[str, Any] | None = None,
+) -> str:
+    """Return ADCS when onboard false-positive or ADCS filter signals indicate ADCS attack."""
+    try:
+        section = thresholds or {}
+        exception_codes = section.get("EXCEPTION_CODES", [1, 2, 3, 4])
+        qerr_threshold = float(section.get("QERR_ABS_THRESHOLD", 0.15))
+        tcmd_threshold = float(section.get("TCMD_ABS_THRESHOLD", 0.05))
+        appcs_min = int(section.get("APPCSERRCOUNTER_MIN", 1))
+
+        exception_code = int(snapshot.get("EXCEPTION_CODE", snapshot.get("FALSE_POSITIVE_EXCEPTION", 0)) or 0)
+        if exception_code in exception_codes:
+            return "ADCS"
+
+        adcs_filter = snapshot.get("adcs_filter", snapshot.get("ADCS_FILTER", {}))
+        if not isinstance(adcs_filter, dict):
+            adcs_filter = {}
+
+        qerr_values = [
+            float(adcs_filter.get(f"QERR_{idx}", snapshot.get(f"QERR_{idx}", 0)) or 0)
+            for idx in range(4)
+        ]
+        if max(abs(value) for value in qerr_values) >= qerr_threshold:
+            return "ADCS"
+
+        tcmd_values = [
+            abs(float(adcs_filter.get(axis, snapshot.get(axis, 0)) or 0))
+            for axis in ("TCMD_X", "TCMD_Y", "TCMD_Z")
+        ]
+        if max(tcmd_values) >= tcmd_threshold:
+            return "ADCS"
+
+        if int(snapshot.get("APPCSERRCOUNTER", 0) or 0) >= appcs_min:
+            return "ADCS"
+
+        return ""
+    except (TypeError, ValueError) as error:
+        logger.error("adcs attack target inference failed: %s", error)
+        return ""
+    except Exception as error:
+        logger.error("unexpected adcs attack target inference failure: %s", error)
         return ""
 
 

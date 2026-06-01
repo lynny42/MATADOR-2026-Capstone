@@ -47,6 +47,12 @@ def evaluate_rule_activation(
                 return 0.0
             return float(legacy_evaluator(rule_id, window))
 
+        window_mode = str(activation.get("window_mode", "snapshot_series")).strip()
+        if window_mode == "step" and len(window) >= 2:
+            eval_window = window[-2:]
+        else:
+            eval_window = window
+
         clauses = activation.get("clauses", [])
         if not clauses:
             return 0.0
@@ -57,7 +63,7 @@ def evaluate_rule_activation(
                 continue
             clause_score = _evaluate_clause(
                 clause,
-                window,
+                eval_window,
                 baseline_manager,
                 z_thresholds,
                 absolute_thresholds,

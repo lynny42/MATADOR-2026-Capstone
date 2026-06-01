@@ -1,0 +1,834 @@
+<user_query>
+다음과 같이 위성체에서 지상국으로 JSON이 TCP 통신으로써 내려온다. <aside>
+💡
+
+**[테이블 전송 순서]**
+
+1. `SAT_EVENT_QUEUE`: 이벤트별 송신 (이벤트당 패킷 1개)
+2. `SAT_INTEGRITY_HASH`: records 배열로 한번에 송신 (패킷 1개)
+3. `SAT_ADCS_FILTER`: records 배열로 한번에 송신 (패킷 1개)
+4. `SAT_TLM_HISTORY`: records 배열로 한번에 송신 (패킷 1개)
+5. `SAT_PWR_HISTORY`: records 배열로 한번에 송신 (패킷 1개)
+</aside>
+
+---
+
+# 정상만 존재하는 경우
+
+### 패킷 1: `SAT_ADCS_FILTER`
+
+```jsx
+{
+  "packet_type": "SAT_ADCS_FILTER",
+  "records": [
+    {
+      "CHENNEL1": 1,
+      "TIMESTAMP": "2026-05-30T12:00:00+00:00",
+      "CMDCOUNTER": 10200,
+      "QBN_0": 0.98,
+      "QBN_1": 0.02,
+      "QBN_2": 0.05,
+      "QBN_3": 0.01,
+      "ST_QBN_0": 0.97,
+      "ST_QBN_1": 0.03,
+      "ST_QBN_2": 0.04,
+      "ST_QBN_3": 0.02,
+      "Q_VALID": 1,
+      "THERR_X": 0.5,
+      "THERR_Y": 0.4,
+      "THERR_Z": 0.3,
+      "CMD_WBN_X": 0.0,
+      "CMD_WBN_Y": 0.0,
+      "CMD_WBN_Z": 0.0,
+      "BDOT_X": null,
+      "BDOT_Y": null,
+      "BDOT_Z": null,
+      "H_MGMTON": 0,
+      "SUN_VALID": 1,
+      "DEVICE_ENABLED_RW0": 1,
+      "DEVICE_ENABLED_RW1": 1,
+      "DEVICE_ENABLED_RW2": 0,
+      "IMU_WBN_X": 0.001,
+      "IMU_WBN_Y": -0.002,
+      "IMU_WBN_Z": 0.0,
+      "IMU_ACC_X": 0.01,
+      "IMU_ACC_Y": -0.01,
+      "IMU_ACC_Z": 0.0,
+      "QERR_0": 0.99,
+      "QERR_1": 0.01,
+      "QERR_2": 0.01,
+      "QERR_3": 0.01,
+      "TCMD_X": 0.02,
+      "TCMD_Y": -0.01,
+      "TCMD_Z": 0.01,
+      "MCMD_X": 0.0,
+      "MCMD_Y": 0.0,
+      "MCMD_Z": 0.0,
+      "WERR_X": 0.01,
+      "WERR_Y": -0.01,
+      "WERR_Z": 0.0,
+      "MOMENTUM_NMS_0": 0.12,
+      "MOMENTUM_NMS_1": -0.08,
+      "MOMENTUM_NMS_2": 0.05,
+      "ST_VALID": 1,
+      "COMBINEDPACKETSSENT": 450000,
+      "ERLOGENTRIES": 10,
+      "SKIPPEDSLOTSCOUNT": 0,
+      "LASTVALCRC": "c4e1a2b3",
+      "ENABLEDROUTES": 7,
+      "FORWARD_ERR_COUNT": 0,
+      "APPCSERRCOUNTER": 0,
+      "OSCSERRCOUNTER": 0,
+      "SYSLOGENTRIES": 85,
+      "RESETSPERFORMED": 0,
+      "EXECOUNTS": 1.0
+    }
+  ]
+}
+```
+
+### 패킷 2: `SAT_TLM_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_TLM_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 1001,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T11:59:59+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184300,
+      "HEAP_FREE": 518400,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.11,
+      "SVB_Y": -0.84,
+      "SVB_Z": 0.52,
+      "WBN_X": 0.0012,
+      "WBN_Y": -0.0018,
+      "WBN_Z": 0.0003,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    },
+    {
+      "HISTORY_ID": 1002,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:00:00+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184320,
+      "HEAP_FREE": 517920,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.12,
+      "SVB_Y": -0.85,
+      "SVB_Z": 0.51,
+      "WBN_X": 0.0010,
+      "WBN_Y": -0.0020,
+      "WBN_Z": 0.0,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    }
+  ]
+}
+```
+
+### 패킷 3: `SAT_PWR_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_PWR_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 501,
+      "UPDATED_AT": "2026-05-30T11:59:59+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 3.27, "PREV_VOLTAGE": 3.26, "CURRENT_A": 0.41, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.30, "PREV_VOLTAGE": 3.29, "CURRENT_A": 0.37, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.01, "PREV_VOLTAGE": 5.00, "CURRENT_A": 0.54, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.28, "PREV_VOLTAGE": 3.27, "CURRENT_A": 0.39, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    },
+    {
+      "HISTORY_ID": 502,
+      "UPDATED_AT": "2026-05-30T12:00:00+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 3.28, "PREV_VOLTAGE": 3.27, "CURRENT_A": 0.42, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.31, "PREV_VOLTAGE": 3.30, "CURRENT_A": 0.38, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.02, "PREV_VOLTAGE": 5.01, "CURRENT_A": 0.55, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+# 오탐만 존재하는 경우
+
+(발생 이벤트: 오탐 2개)
+
+### 패킷 1, 2: `SAT_EVENT_QUEUE`
+
+```jsx
+{
+  "packet_type": "SAT_EVENT_QUEUE",
+  "event": {
+    "EVENT_ID": 201,
+    "DETECTED_AT": "2026-05-30T12:00:05+00:00",
+    "PIPEOVERFLOWRRCNT": 0,
+    "CHILDQUEUECOUNT": 184325,
+    "FILEWRITEERRCOUNTER": 0,
+    "CMDREJECTEDCOUNTER": 0,
+    "CH1_CH2_FAULT_CRC": 0,
+    "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
+    "PROCESSOR_RESET_COUNT": 0,
+    "IS_SENT": 0,
+    "TIMESTAMP": "2026-05-30T12:00:05+00:00",
+    "PRIORITY": 0,
+    "EVENT_TYPE": "SEU_DETECTED",
+    "SW_ID": 0,
+    "WEIGHT": 28,
+    "EXCEPTION_CODE": 0,
+    "MODULE_SCORES": "{\"physical\":0.22,\"statistical\":0.35,\"system\":0.18}",
+    "CHENNEL1": 1
+  }
+}
+```
+
+```jsx
+{
+  "packet_type": "SAT_EVENT_QUEUE",
+  "event": {
+    "EVENT_ID": 202,
+    "DETECTED_AT": "2026-05-30T12:00:12+00:00",
+    "PIPEOVERFLOWRRCNT": 0,
+    "CHILDQUEUECOUNT": 184333,
+    "FILEWRITEERRCOUNTER": 0,
+    "CMDREJECTEDCOUNTER": 0,
+    "CH1_CH2_FAULT_CRC": 0,
+    "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
+    "PROCESSOR_RESET_COUNT": 0,
+    "IS_SENT": 0,
+    "TIMESTAMP": "2026-05-30T12:00:12+00:00",
+    "PRIORITY": 0,
+    "EVENT_TYPE": "SEU_DETECTED",
+    "SW_ID": 2,
+    "WEIGHT": 31,
+    "EXCEPTION_CODE": 0,
+    "MODULE_SCORES": "{\"physical\":0.25,\"statistical\":0.38,\"system\":0.21}",
+    "CHENNEL1": 2
+  }
+}
+```
+
+### 패킷 3: `SAT_ADCS_FILTER`
+
+```jsx
+{
+  "packet_type": "SAT_ADCS_FILTER",
+  "records": [
+    {
+      "CHENNEL1": 1,
+      "TIMESTAMP": "2026-05-30T12:00:05+00:00",
+      "CMDCOUNTER": 10240,
+      "QBN_0": 0.98,
+      "QBN_1": 0.02,
+      "QBN_2": 0.05,
+      "QBN_3": 0.01,
+      "ST_QBN_0": 0.97,
+      "ST_QBN_1": 0.03,
+      "ST_QBN_2": 0.04,
+      "ST_QBN_3": 0.02,
+      "Q_VALID": 1,
+      "THERR_X": 0.8,
+      "THERR_Y": 0.6,
+      "THERR_Z": 0.4,
+      "SUN_VALID": 1,
+      "DEVICE_ENABLED_RW0": 1,
+      "DEVICE_ENABLED_RW1": 1,
+      "DEVICE_ENABLED_RW2": 0,
+      "IMU_WBN_X": 0.002,
+      "IMU_WBN_Y": -0.003,
+      "IMU_WBN_Z": 0.0005,
+      "QERR_0": 0.99,
+      "QERR_1": 0.01,
+      "QERR_2": 0.02,
+      "QERR_3": 0.01,
+      "TCMD_X": 0.02,
+      "TCMD_Y": -0.01,
+      "TCMD_Z": 0.01,
+      "WERR_X": 0.01,
+      "WERR_Y": -0.01,
+      "WERR_Z": 0.0,
+      "MOMENTUM_NMS_0": 0.12,
+      "MOMENTUM_NMS_1": -0.08,
+      "MOMENTUM_NMS_2": 0.05,
+      "ST_VALID": 1,
+      "COMBINEDPACKETSSENT": 450120,
+      "ERLOGENTRIES": 12,
+      "SKIPPEDSLOTSCOUNT": 0,
+      "LASTVALCRC": "c4e1a2b3",
+      "ENABLEDROUTES": 7,
+      "FORWARD_ERR_COUNT": 0,
+      "APPCSERRCOUNTER": 0,
+      "OSCSERRCOUNTER": 0,
+      "SYSLOGENTRIES": 88,
+      "RESETSPERFORMED": 0,
+      "EXECOUNTS": 1.0
+    },
+    {
+      "CHENNEL1": 2,
+      "TIMESTAMP": "2026-05-30T12:00:12+00:00",
+      "CMDCOUNTER": 10248,
+      "QBN_0": 0.97,
+      "QBN_1": 0.03,
+      "QBN_2": 0.06,
+      "QBN_3": 0.02,
+      "ST_QBN_0": 0.96,
+      "ST_QBN_1": 0.04,
+      "ST_QBN_2": 0.05,
+      "ST_QBN_3": 0.02,
+      "Q_VALID": 1,
+      "THERR_X": 1.2,
+      "THERR_Y": 0.9,
+      "THERR_Z": 0.5,
+      "SUN_VALID": 1,
+      "DEVICE_ENABLED_RW0": 1,
+      "DEVICE_ENABLED_RW1": 1,
+      "DEVICE_ENABLED_RW2": 0,
+      "IMU_WBN_X": 0.0015,
+      "IMU_WBN_Y": -0.0025,
+      "IMU_WBN_Z": 0.0003,
+      "QERR_0": 0.98,
+      "QERR_1": 0.02,
+      "QERR_2": 0.03,
+      "QERR_3": 0.01,
+      "TCMD_X": 0.03,
+      "TCMD_Y": -0.02,
+      "TCMD_Z": 0.01,
+      "WERR_X": 0.02,
+      "WERR_Y": -0.01,
+      "WERR_Z": 0.0,
+      "MOMENTUM_NMS_0": 0.11,
+      "MOMENTUM_NMS_1": -0.07,
+      "MOMENTUM_NMS_2": 0.04,
+      "ST_VALID": 1,
+      "COMBINEDPACKETSSENT": 450128,
+      "ERLOGENTRIES": 12,
+      "SKIPPEDSLOTSCOUNT": 0,
+      "LASTVALCRC": "c4e1a2b3",
+      "ENABLEDROUTES": 7,
+      "FORWARD_ERR_COUNT": 0,
+      "APPCSERRCOUNTER": 0,
+      "OSCSERRCOUNTER": 0,
+      "SYSLOGENTRIES": 89,
+      "RESETSPERFORMED": 0,
+      "EXECOUNTS": 1.0
+    }
+  ]
+}
+```
+
+### 패킷 4: `SAT_TLM_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_TLM_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 1003,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:00:04+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184325,
+      "HEAP_FREE": 516800,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.13,
+      "SVB_Y": -0.83,
+      "SVB_Z": 0.50,
+      "WBN_X": 0.0025,
+      "WBN_Y": -0.0030,
+      "WBN_Z": 0.0005,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    },
+    {
+      "HISTORY_ID": 1004,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:00:12+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184333,
+      "HEAP_FREE": 516200,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.14,
+      "SVB_Y": -0.82,
+      "SVB_Z": 0.49,
+      "WBN_X": 0.0018,
+      "WBN_Y": -0.0025,
+      "WBN_Z": 0.0002,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    }
+  ]
+}
+```
+
+### 패킷 5: `SAT_PWR_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_PWR_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 503,
+      "UPDATED_AT": "2026-05-30T12:00:05+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 3.15, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.48, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.13, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 3, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.30, "PREV_VOLTAGE": 3.31, "CURRENT_A": 0.38, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.02, "PREV_VOLTAGE": 5.01, "CURRENT_A": 0.55, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    },
+    {
+      "HISTORY_ID": 504,
+      "UPDATED_AT": "2026-05-30T12:00:12+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 3.18, "PREV_VOLTAGE": 3.15, "CURRENT_A": 0.45, "PREV_DELTA_V": -0.13, "CURR_DELTA_V": 0.03, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.30, "PREV_VOLTAGE": 3.30, "CURRENT_A": 0.38, "PREV_DELTA_V": 0.0, "CURR_DELTA_V": 0.0, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 4.38, "PREV_VOLTAGE": 5.02, "CURRENT_A": 0.62, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.64, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 3, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.29, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.0, "CURR_DELTA_V": 0.0, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+# 해시 무결성이 훼손된 경우
+
+(발생 이벤트: 해시 무결성 훼손) 
+
+### 패킷 1: `SAT_EVENT_QUEUE`
+
+```jsx
+{
+  "packet_type": "SAT_EVENT_QUEUE",
+  "event": {
+    "EVENT_ID": 401,
+    "DETECTED_AT": "2026-05-30T12:05:00+00:00",
+    "PIPEOVERFLOWRRCNT": 0,
+    "CHILDQUEUECOUNT": 184380,
+    "FILEWRITEERRCOUNTER": 0,
+    "CMDREJECTEDCOUNTER": 0,
+    "CH1_CH2_FAULT_CRC": 0,
+    "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
+    "PROCESSOR_RESET_COUNT": 0,
+    "IS_SENT": 0,
+    "TIMESTAMP": "2026-05-30T12:05:00+00:00",
+    "PRIORITY": 1,
+    "EVENT_TYPE": "INTEGRITY_hash_mismatch",
+    "SW_ID": 0,
+    "WEIGHT": 100,
+    "EXCEPTION_CODE": 1,
+    "MODULE_SCORES": "",
+    "CHENNEL1": 0
+  }
+}
+```
+
+### 패킷 2: `SAT_INTEGRITY_HASH`
+
+```jsx
+{
+  "packet_type": "SAT_INTEGRITY_HASH",
+  "records": [
+    {
+      "FILE_ID": 1,
+      "FILE_PATH": "/cf/apps/to_lab.so",
+      "EXPECTED_HASH": "a3f2c891d4e5b6078190ab12cd34ef56",
+      "LAST_VERIFIED_AT": "2026-05-30T12:05:00+00:00",
+      "UPDATED_AT": "2026-05-30T12:05:00+00:00",
+      "IS_VIOLATED": 0
+    },
+    {
+      "FILE_ID": 2,
+      "FILE_PATH": "/cf/apps/adcs.so",
+      "EXPECTED_HASH": "7b1e9043c2d8a5f60123456789abcdef0",
+      "LAST_VERIFIED_AT": "2026-05-30T12:05:00+00:00",
+      "UPDATED_AT": "2026-05-30T12:05:00+00:00",
+      "IS_VIOLATED": 1
+    }
+  ]
+}
+```
+
+### 패킷 3: `SAT_ADCS_FILTER`
+
+```jsx
+{
+  "packet_type": "SAT_ADCS_FILTER",
+  "records": [
+    {
+      "CHENNEL1": 3,
+      "TIMESTAMP": "2026-05-30T12:05:00+00:00",
+      "CMDCOUNTER": 10260,
+      "QBN_0": 0.98,
+      "QBN_1": 0.02,
+      "QBN_2": 0.05,
+      "QBN_3": 0.01,
+      "ST_QBN_0": 0.97,
+      "ST_QBN_1": 0.03,
+      "ST_QBN_2": 0.04,
+      "ST_QBN_3": 0.02,
+      "Q_VALID": 1,
+      "SUN_VALID": 1,
+      "LASTVALCRC": "d5f2b1a0",
+      "APPCSERRCOUNTER": 0,
+      "OSCSERRCOUNTER": 0,
+      "RESETSPERFORMED": 0,
+      "COMBINEDPACKETSSENT": 450180,
+      "ERLOGENTRIES": 12,
+      "SKIPPEDSLOTSCOUNT": 0,
+      "SYSLOGENTRIES": 90,
+      "EXECOUNTS": 1.0
+    }
+  ]
+}
+```
+
+### 패킷 4: `SAT_TLM_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_TLM_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 1005,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:04:58+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184370,
+      "HEAP_FREE": 500000,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.12,
+      "SVB_Y": -0.84,
+      "SVB_Z": 0.51,
+      "WBN_X": 0.002,
+      "WBN_Y": -0.003,
+      "WBN_Z": 0.0,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    }
+  ]
+}
+```
+
+### 패킷 5: `SAT_PWR_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_PWR_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 505,
+      "UPDATED_AT": "2026-05-30T12:05:00+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 3.14, "PREV_VOLTAGE": 3.27, "CURRENT_A": 0.50, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.13, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 3, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.30, "PREV_VOLTAGE": 3.31, "CURRENT_A": 0.38, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.02, "PREV_VOLTAGE": 5.01, "CURRENT_A": 0.55, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+# 공격이 존재하는 경우
+
+(발생 이벤트: 공격 1개, 오탐 1개) 
+
+### 패킷 1, 2: `SAT_EVENT_QUEUE`
+
+```jsx
+{
+  "packet_type": "SAT_EVENT_QUEUE",
+  "event": {
+    "EVENT_ID": 301,
+    "DETECTED_AT": "2026-05-30T12:01:00+00:00",
+    "PIPEOVERFLOWRRCNT": 2,
+    "CHILDQUEUECOUNT": 184380,
+    "FILEWRITEERRCOUNTER": 1,
+    "CMDREJECTEDCOUNTER": 3,
+    "CH1_CH2_FAULT_CRC": 1,
+    "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
+    "PROCESSOR_RESET_COUNT": 0,
+    "IS_SENT": 0,
+    "TIMESTAMP": "2026-05-30T12:01:00+00:00",
+    "PRIORITY": 1,
+    "EVENT_TYPE": "ATTACK_CONFIRMED",
+    "SW_ID": 0,
+    "WEIGHT": 76,
+    "EXCEPTION_CODE": 2,
+    "MODULE_SCORES": "{\"physical\":0.81,\"statistical\":0.72,\"system\":0.65}",
+    "CHENNEL1": 3
+  }
+}
+```
+
+```jsx
+{
+  "packet_type": "SAT_EVENT_QUEUE",
+  "event": {
+    "EVENT_ID": 302,
+    "DETECTED_AT": "2026-05-30T12:01:08+00:00",
+    "PIPEOVERFLOWRRCNT": 0,
+    "CHILDQUEUECOUNT": 184405,
+    "FILEWRITEERRCOUNTER": 0,
+    "CMDREJECTEDCOUNTER": 0,
+    "CH1_CH2_FAULT_CRC": 0,
+    "CH1_FAULT_FILE_SIZE_MISMATCH": 0,
+    "PROCESSOR_RESET_COUNT": 0,
+    "IS_SENT": 0,
+    "TIMESTAMP": "2026-05-30T12:01:08+00:00",
+    "PRIORITY": 0,
+    "EVENT_TYPE": "SEU_DETECTED",
+    "SW_ID": 1,
+    "WEIGHT": 29,
+    "EXCEPTION_CODE": 0,
+    "MODULE_SCORES": "{\"physical\":0.24,\"statistical\":0.33,\"system\":0.19}",
+    "CHENNEL1": 4
+  }
+}
+```
+
+### 패킷 3: `SAT_ADCS_FILTER`
+
+```jsx
+{
+  "packet_type": "SAT_ADCS_FILTER",
+  "records": [
+    {
+      "CHENNEL1": 3,
+      "TIMESTAMP": "2026-05-30T12:01:00+00:00",
+      "CMDCOUNTER": 10280,
+      "QBN_0": 0.55,
+      "QBN_1": 0.55,
+      "QBN_2": 0.55,
+      "QBN_3": 0.55,
+      "ST_QBN_0": 1.0,
+      "ST_QBN_1": 0.0,
+      "ST_QBN_2": 0.0,
+      "ST_QBN_3": 0.0,
+      "Q_VALID": 1,
+      "ST_VALID": 1,
+      "THERR_X": 2.5,
+      "THERR_Y": 2.0,
+      "THERR_Z": 1.5,
+      "SUN_VALID": 1,
+      "DEVICE_ENABLED_RW0": 0,
+      "DEVICE_ENABLED_RW1": 0,
+      "DEVICE_ENABLED_RW2": 0,
+      "IMU_WBN_X": 0.0,
+      "IMU_WBN_Y": 0.0,
+      "IMU_WBN_Z": 0.0,
+      "QERR_0": 0.7,
+      "QERR_1": 0.3,
+      "QERR_2": 0.2,
+      "QERR_3": 0.1,
+      "TCMD_X": 0.8,
+      "TCMD_Y": 0.6,
+      "TCMD_Z": 0.4,
+      "MCMD_X": 0.1,
+      "MCMD_Y": 0.1,
+      "MCMD_Z": 0.1,
+      "WERR_X": 0.25,
+      "WERR_Y": 0.20,
+      "WERR_Z": 0.18,
+      "MOMENTUM_NMS_0": 0.01,
+      "MOMENTUM_NMS_1": 0.01,
+      "MOMENTUM_NMS_2": 0.01,
+      "COMBINEDPACKETSSENT": 450200,
+      "ERLOGENTRIES": 14,
+      "SKIPPEDSLOTSCOUNT": 2,
+      "LASTVALCRC": "d5f2b1a0",
+      "APPCSERRCOUNTER": 3,
+      "OSCSERRCOUNTER": 1,
+      "SYSLOGENTRIES": 95,
+      "RESETSPERFORMED": 0,
+      "EXECOUNTS": 1.0
+    },
+    {
+      "CHENNEL1": 4,
+      "TIMESTAMP": "2026-05-30T12:01:08+00:00",
+      "CMDCOUNTER": 10288,
+      "QBN_0": 0.98,
+      "QBN_1": 0.02,
+      "QBN_2": 0.05,
+      "QBN_3": 0.01,
+      "ST_QBN_0": 0.97,
+      "ST_QBN_1": 0.03,
+      "ST_QBN_2": 0.04,
+      "ST_QBN_3": 0.02,
+      "Q_VALID": 1,
+      "ST_VALID": 1,
+      "THERR_X": 0.9,
+      "THERR_Y": 0.7,
+      "THERR_Z": 0.5,
+      "SUN_VALID": 1,
+      "IMU_WBN_X": 0.0018,
+      "IMU_WBN_Y": -0.0026,
+      "IMU_WBN_Z": 0.0004,
+      "QERR_0": 0.99,
+      "QERR_1": 0.01,
+      "QERR_2": 0.02,
+      "QERR_3": 0.01,
+      "TCMD_X": 0.02,
+      "TCMD_Y": -0.01,
+      "TCMD_Z": 0.01,
+      "WERR_X": 0.01,
+      "WERR_Y": -0.01,
+      "WERR_Z": 0.0,
+      "MOMENTUM_NMS_0": 0.12,
+      "MOMENTUM_NMS_1": -0.08,
+      "MOMENTUM_NMS_2": 0.05,
+      "COMBINEDPACKETSSENT": 450208,
+      "ERLOGENTRIES": 14,
+      "SKIPPEDSLOTSCOUNT": 0,
+      "LASTVALCRC": "c4e1a2b3",
+      "APPCSERRCOUNTER": 0,
+      "OSCSERRCOUNTER": 0,
+      "SYSLOGENTRIES": 96,
+      "RESETSPERFORMED": 0,
+      "EXECOUNTS": 1.0
+    }
+  ]
+}
+```
+
+### 패킷 4: `SAT_TLM_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_TLM_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 1005,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:00:58+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184380,
+      "HEAP_FREE": 498000,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 2,
+      "SVB_X": 0.10,
+      "SVB_Y": 0.20,
+      "SVB_Z": 0.90,
+      "WBN_X": 0.05,
+      "WBN_Y": -0.04,
+      "WBN_Z": 0.03,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    },
+    {
+      "HISTORY_ID": 1006,
+      "TLM_ID": 1,
+      "UPDATED_AT": "2026-05-30T12:01:08+00:00",
+      "MISSION_MODE": 2,
+      "OBC_S_TICK": 184405,
+      "HEAP_FREE": 495200,
+      "APPENABLESTATE": 1,
+      "DWELL_MASK": 0,
+      "ADCS_MODE": 1,
+      "SVB_X": 0.12,
+      "SVB_Y": -0.84,
+      "SVB_Z": 0.51,
+      "WBN_X": 0.002,
+      "WBN_Y": -0.003,
+      "WBN_Z": 0.0004,
+      "DT": 0.25,
+      "TORQUER_PERIOD": 8,
+      "SUN_VALID": 1
+    }
+  ]
+}
+```
+
+### 패킷 5: `SAT_PWR_HISTORY`
+
+```jsx
+{
+  "packet_type": "SAT_PWR_HISTORY",
+  "records": [
+    {
+      "HISTORY_ID": 505,
+      "UPDATED_AT": "2026-05-30T12:01:00+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 4.47, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.85, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 1.19, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 3, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.31, "PREV_VOLTAGE": 3.30, "CURRENT_A": 0.38, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.03, "PREV_VOLTAGE": 5.02, "CURRENT_A": 0.56, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.28, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": 0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    },
+    {
+      "HISTORY_ID": 506,
+      "UPDATED_AT": "2026-05-30T12:01:08+00:00",
+      "channels": [
+        {"SW_ID": 0, "VOLTAGE": 4.40, "PREV_VOLTAGE": 4.47, "CURRENT_A": 0.80, "PREV_DELTA_V": 1.19, "CURR_DELTA_V": -0.07, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 1, "VOLTAGE": 3.12, "PREV_VOLTAGE": 3.31, "CURRENT_A": 0.44, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.19, "EXCEED_COUNT": 3, "CONSECUTIVE_EXCEED": 3, "ANOMALY_FLAG": 1, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6},
+        {"SW_ID": 2, "VOLTAGE": 5.02, "PREV_VOLTAGE": 5.03, "CURRENT_A": 0.55, "PREV_DELTA_V": 0.01, "CURR_DELTA_V": -0.01, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 4.5, "V_THRESHOLD_HI": 5.5},
+        {"SW_ID": 3, "VOLTAGE": 3.29, "PREV_VOLTAGE": 3.29, "CURRENT_A": 0.40, "PREV_DELTA_V": 0.0, "CURR_DELTA_V": 0.0, "EXCEED_COUNT": 0, "CONSECUTIVE_EXCEED": 0, "ANOMALY_FLAG": 0, "V_THRESHOLD_LO": 3.0, "V_THRESHOLD_HI": 3.6}
+      ]
+    }
+  ]
+}
+``` 이것을 참조하여 다음고 같은 수정을 진행하라. 커밋은 진행하지 않는다. 수정 1: packet_type 매핑
+  "SAT_TLM_CURRENT" → "SAT_TLM_HISTORY" 추가
+  "SAT_PWR_META"    → "SAT_PWR_HISTORY" 추가
+
+수정 2: SAT_TLM_HISTORY records 배열 처리
+  packet["records"] 순회하여 각 record를
+  개별 스냅샷으로 처리
+
+수정 3: SAT_PWR_HISTORY records 배열 처리
+  packet["records"] 순회
+  각 record["channels"] 평면화
+
+수정 4: SAT_ADCS_FILTER records 배열 처리
+  packet["records"] 순회하여 개별 스냅샷 처리
+
+수정 5: SAT_INTEGRITY_HASH records 전체 순회
+  IS_VIOLATED=1인 record 우선 사용
+  없으면 IS_VIOLATED=0
+
+수정 6: 버퍼링 기준 시각 통일
+  DETECTED_AT, TIMESTAMP, UPDATED_AT 중
+  존재하는 값으로 버킷 키 생성
+
+수정 7: CHILDQUEUECOUNT
+  rule_registry.json에서 E-01의
+  CHILDQUEUECOUNT clause 비활성화
+
+수정 8: CHENNEL1 필드
+  코드에서 사용하지 않으므로 무시 처리
+  (CHANNEL1 참조 코드가 있으면 제거)
+</user_query>

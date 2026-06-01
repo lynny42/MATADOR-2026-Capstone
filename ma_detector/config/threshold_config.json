@@ -34,5 +34,33 @@
   "pending_pool": {
     "TIME_WINDOW_SEC": 300,
     "UNIQUE_MODULE_MIN": 3
+  },
+  "packet_buffer": {
+    "packet_buffer_timeout_sec": 5,
+    "RECORD_MATCH_TOLERANCE_SEC": 5,
+    "accumulated_record_interval_sec": 1
+  },
+  "tcp": {
+    "host": "0.0.0.0",
+    "port": 6000,
+    "sat_host": "192.168.0.7",
+    "sat_port": 6001,
+    "recv_buffer_size": 65535,
+    "max_packet_size": 2097152
+  },
+  "adcs_target_inference": {
+    "EXCEPTION_CODES": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "QERR_ABS_THRESHOLD": 0.15,
+    "TCMD_ABS_THRESHOLD": 0.05,
+    "APPCSERRCOUNTER_MIN": 1
+  },
+  "integrity_rules": {
+    "IS_VIOLATED_SCORE_FLOOR": 0.65,
+    "EX3_VIOLATED_SCORE": 0.85
   }
 }
