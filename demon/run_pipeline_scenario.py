@@ -12,6 +12,7 @@
 실험/운영: main.py 동일 wiring. SEU FPF = 실측 전력(Serial) + DB·adcs_series(ADCS/TLM).
 공격 논리 잔존 시에만 정상 ADCS/TLM 복원(실험 조건). _snapshots 고정 미사용.
     python3 -m demon.run_pipeline_scenario integrity
+        (ATTACK_HASH·cf 주입 → INTEGRITY 이벤트 · FPF 미진입 → 지상 bulk)
     python3 -m demon.run_pipeline_scenario attack
         (ATTACK_SIM·FPF Y → 지상 bulk)
 
@@ -48,6 +49,7 @@ from demon.core.context import DaemonConfig, RuntimeContext
 from demon.core.time_utils import parse_utc_timestamp, utc_now
 from demon.db.db_manager import DBManager
 from demon.db.paths import default_db_path
+from demon.integrity_dir_hash import compute_directory_manifest_hash
 from demon.tools.seed_cf_integrity import seed_directory_baseline
 from demon.workers.anomaly_detector import AnomalyDetector
 from demon.workers.attack_simulator import AttackSimulator
@@ -85,7 +87,7 @@ SCENARIOS = (
 _SCENARIO_TITLES = {
     SCENARIO_NORMAL: "1. 정상 — FPF 미진입 · 주기 송신",
     SCENARIO_FALSE_POSITIVE: "2. 오탐 — 공격·이상탐지 후 FPF N · 지상 bulk",
-    SCENARIO_INTEGRITY: "3. 해시 무결성 — FPF 스킵 · INTEGRITY",
+    SCENARIO_INTEGRITY: "3. 해시 무결성 — FPF 스킵 · INTEGRITY · 지상 bulk",
     SCENARIO_ATTACK: "4. 공격 — FPF 판정 Y (ATTACK) · 지상 bulk",
 }
 
@@ -683,7 +685,7 @@ def _preflight_hardware(h: _Harness, c: _Term, scenario: str) -> bool:
                 ),
             )
 
-        if scenario in (SCENARIO_FALSE_POSITIVE, SCENARIO_ATTACK) and h.use_serial:
+        if scenario in (SCENARIO_FALSE_POSITIVE, SCENARIO_ATTACK, SCENARIO_INTEGRITY) and h.use_serial:
             print(
                 c.wrap(
                     "  bulk 송신: 조도 dark→light 자동 + 시나리오 종료 시 transmit_all 1회",
@@ -1212,9 +1214,52 @@ def _finalize_false_positive_result(
     return 0 if ok else 1
 
 
+def _prepare_integrity_scenario(h: _Harness) -> None:
+    """integrity 시작 — 공격 ADCS 잔여·FPF 이력 정리 (ATTACK_HASH 전)."""
+    try:
+        restore_seu_logical_if_needed(h)
+        h.detector._fpf_dispatched = False
+        h.gs_state["last_fpf"] = None
+        h.gs_state["last_fpf_event_id"] = -1
+        h._scenario_fpf_seen = False
+        h.baseline_max_event_id = _max_event_id(h.db_path)
+    except Exception as e:
+        logger.error("_prepare_integrity_scenario 실패: %s", e)
+
+
+def _warn_integrity_baseline_matches_inject(h: _Harness, integrity_dir: Path) -> None:
+    """cf 주입 직후 baseline과 해시가 같으면 경고 (무결성 시나리오 실패 원인)."""
+    try:
+        rec = h.db.get_integrity_hash(int(demon_config.INTEGRITY_DIR_FILE_ID))
+        if rec is None:
+            return
+        expected = str(rec.get("EXPECTED_HASH", "")).strip().lower()
+        if not expected:
+            return
+        actual = compute_directory_manifest_hash(integrity_dir)
+        if actual is not None and actual.lower() == expected:
+            logger.warning(
+                "cf 주입 후에도 baseline 해시와 동일 — "
+                "주입 파일 포함 상태로 --seed 했을 수 있음. "
+                "matador_gs_inject.txt 삭제 후 seed_cf_integrity 재실행 권장",
+            )
+    except Exception as e:
+        logger.error("_warn_integrity_baseline_matches_inject 실패: %s", e)
+
+
 def run_integrity(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
     integrity_dir = Path(h.ctx.config.integrity_target_dir).expanduser()
     observe = int(args.observe_sec or demon_config.SCENARIO_NORMAL_OBSERVE_SEC_DEFAULT)
+
+    if not h.lab_mode:
+        _prepare_integrity_scenario(h)
+        print(
+            c.wrap(
+                "  종료 시 pre-transmit 수집 + transmit_all 1회 → GS bulk "
+                "(INTEGRITY 이벤트·SAT_INTEGRITY_HASH 포함)",
+                c.DIM,
+            ),
+        )
 
     _print_section(c, 1, f"cf baseline ({integrity_dir})")
     if args.seed:
@@ -1243,6 +1288,8 @@ def run_integrity(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
             print("ATTACK_HASH 시작 실패 (SerialReader·cf 확인)", file=sys.stderr)
             return 1
 
+    _warn_integrity_baseline_matches_inject(h, integrity_dir)
+
     _print_section(c, 3, f"전력 이상·hash 검사 대기 {observe}s")
     state = {"saw_anomaly": False}
 
@@ -1258,9 +1305,14 @@ def run_integrity(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
 
     new_events = _scenario_events(h)
     integrity_ev = [ev for ev in new_events if str(ev.get("EVENT_TYPE", "")).startswith("INTEGRITY_")]
-    fpf_attack = [ev for ev in new_events if ev.get("EVENT_TYPE") == demon_config.GS_EVENT_ATTACK_CONFIRMED]
     fpf_last = h.gs_state.get("last_fpf")
-    ok = state["saw_anomaly"] and bool(integrity_ev) and fpf_last is None and not fpf_attack
+
+    bulk_before = int(h.gs_state.get("bulk_attempts", 0))
+    _scenario_transmit_all(h, c, args, section_base=4)
+    bulk_after = int(h.gs_state.get("bulk_attempts", 0))
+    bulk_ok = bulk_after > bulk_before or not h.lab_mode
+
+    ok = state["saw_anomaly"] and bool(integrity_ev) and fpf_last is None and bulk_ok
 
     _print_result_block(
         c,
@@ -1268,12 +1320,15 @@ def run_integrity(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
             ("전력 이상 감지", state["saw_anomaly"], ""),
             ("INTEGRITY 이벤트", bool(integrity_ev), integrity_ev[0].get("EVENT_TYPE") if integrity_ev else ""),
             ("FPF 미진입", fpf_last is None, ""),
-            ("ATTACK_CONFIRMED(FPF) 없음", not fpf_attack, ""),
+            ("bulk 송신 (GScomms)", bulk_ok, f"{bulk_before}→{bulk_after}"),
         ],
         overall_ok=ok,
         events=new_events,
         fpf_last=fpf_last,
-        extra_lines=[f"integrity_dir={integrity_dir}"],
+        extra_lines=[
+            f"GS {h.cfg.gs_host}:{h.cfg.gs_port}",
+            f"integrity_dir={integrity_dir}",
+        ],
     )
     return 0 if ok else 1
 

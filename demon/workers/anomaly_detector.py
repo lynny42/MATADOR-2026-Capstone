@@ -274,7 +274,14 @@ class AnomalyDetector:
                     return False
 
             if int(rec.get("IS_VIOLATED", 0)) == 1:
+                base_dir = Path(self._ctx.config.integrity_target_dir).expanduser()
                 logger.warning("폴더 hash 검사: 이미 IS_VIOLATED=1 (이전 위반)")
+                if not self._insert_integrity_event(
+                    str(base_dir),
+                    "directory_hash_mismatch",
+                    _EXCEPTION_CODE_HASH_MISMATCH,
+                ):
+                    logger.error("무결성 이벤트 INSERT 실패(IS_VIOLATED=1)")
                 return True
 
             expected = str(rec.get("EXPECTED_HASH", "")).strip().lower()
@@ -339,18 +346,32 @@ class AnomalyDetector:
             if not sw_id_list:
                 return
 
-            if self._attack_mode or self._hash_attack_mode:
-                scenario = "ATTACK_HASH" if self._hash_attack_mode else "ATTACK_SIM"
-                logger.info("%s: 전력 이상 확정 — 폴더 hash 검사", scenario)
+            if self._hash_attack_mode:
+                logger.info("ATTACK_HASH: 전력 이상 확정 — 폴더 hash 검사")
                 if self.verify_hash_on_anomaly():
                     logger.warning(
-                        "%s: hash 불통과 — PRIORITY=1 이벤트, 오탐 필터 스킵 sw_id_list=%s",
-                        scenario,
+                        "ATTACK_HASH: hash 불통과 — INTEGRITY 이벤트, FPF 스킵 sw_id_list=%s",
+                        sw_id_list,
+                    )
+                else:
+                    logger.warning(
+                        "ATTACK_HASH: hash 통과/검사 스킵 — FPF 미진입 "
+                        "(cf 주입·baseline 재등록 확인) sw_id_list=%s",
+                        sw_id_list,
+                    )
+                self._fpf_dispatched = True
+                return
+
+            if self._attack_mode:
+                logger.info("ATTACK_SIM: 전력 이상 확정 — 폴더 hash 검사")
+                if self.verify_hash_on_anomaly():
+                    logger.warning(
+                        "ATTACK_SIM: hash 불통과 — PRIORITY=1 이벤트, 오탐 필터 스킵 sw_id_list=%s",
                         sw_id_list,
                     )
                     self._fpf_dispatched = True
                     return
-                logger.info("%s: hash 통과 — 오탐 필터 진행", scenario)
+                logger.info("ATTACK_SIM: hash 통과 — 오탐 필터 진행")
 
             detected_at = utc_now_iso()
             primary_sw_id = int(sw_id_list[0])
