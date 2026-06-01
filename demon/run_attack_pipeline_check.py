@@ -117,13 +117,15 @@ def _print_pwr_table(c: _Term, rows: list[dict[str, Any]], *, indent: int = 2) -
     if not rows:
         print(f"{pad}(전력 데이터 없음)")
         return
-    print(f"{pad}{'SW':>2}  {'V':>7}  {'EX':>4}  {'ANOM':>4}")
+    consec_thresh = int(demon_config.CONSECUTIVE_THRESHOLD)
+    print(f"{pad}{'SW':>2}  {'V':>7}  {'CON':>4}  {'ANOM':>4}")
     for row in rows:
         sw = int(row["SW_ID"])
         v = float(row["VOLTAGE"])
-        ex = int(row["EXCEED_COUNT"])
+        consec = int(row.get("CONSECUTIVE_EXCEED", 0))
+        con_str = f"{consec}/{consec_thresh}"
         anom = int(row["ANOMALY_FLAG"])
-        line = f"{pad}{sw:>2}  {v:7.3f}  {ex:>4}  {anom:>4}"
+        line = f"{pad}{sw:>2}  {v:7.3f}  {con_str:>4}  {anom:>4}"
         if anom:
             line = c.wrap(line, c.YELLOW)
         print(line)

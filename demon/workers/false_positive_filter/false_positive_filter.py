@@ -67,6 +67,8 @@ class FalsePositiveFilter:
             if confidence_threshold is not None
             else config.CONFIDENCE_THRESHOLD
         )
+        # run_pipeline_scenario attack/false_positive: exc 1~5 비표시, score=1.0 바이패스 없이 가중합만
+        self.seu_experiment_mode = False
 
     # ──────────────────────────────────────────────────────────────────────
     # public
@@ -209,7 +211,10 @@ class FalsePositiveFilter:
         try:
             scores_float = {k: v.score for k, v in module_results.items()}
 
-            if exception_code in config.EXCEPTION_CODES_BYPASS_WEIGHTED_SUM:
+            if (
+                not self.seu_experiment_mode
+                and exception_code in config.EXCEPTION_CODES_BYPASS_WEIGHTED_SUM
+            ):
                 return {
                     "is_attack": "Y",
                     "weighted_score": 1.0,
@@ -275,6 +280,13 @@ class FalsePositiveFilter:
             merged: list[ExceptionCode] = []
             for mr in module_results.values():
                 merged.extend(mr.signals)
+
+            if self.seu_experiment_mode:
+                merged = [
+                    code
+                    for code in merged
+                    if code not in config.EXCEPTION_CODES_SUPPRESS_FOR_DEMO
+                ]
 
             for code in config.EXCEPTION_CODE_RESOLUTION_PRIORITY:
                 if code != ExceptionCode.NORMAL and code in merged:

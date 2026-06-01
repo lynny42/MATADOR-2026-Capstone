@@ -74,9 +74,10 @@ def test_db_manager_api(tmp_db: Path) -> None:
     _ok("event queue lifecycle")
 
     db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
-    if not db.is_sunlight_window():
-        _fail("is_sunlight_window")
-    _ok("upsert_tlm_current + is_sunlight_window")
+    tlm_sun = db.get_tlm_current()
+    if tlm_sun is None or int(tlm_sun.get("SUN_VALID", 0)) != 1:
+        _fail("upsert_tlm_current SUN_VALID")
+    _ok("upsert_tlm_current SUN_VALID")
 
     db.insert_adcs_filter({"QBN_0": 1.0, "SUN_VALID": 1, "_ADCS_HK_CMD_CNT": 10})
     adcs = db.get_adcs_filter(1)

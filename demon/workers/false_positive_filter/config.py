@@ -31,6 +31,15 @@ MODULE_WEIGHTS = {
     "system":      0.2,
 }
 
+# run_pipeline_scenario false_positive (SEU·오탐 실험) 전용 — 종료 후 MODULE_WEIGHTS·seu_experiment_mode 복원
+# attack 시나리오는 MODULE_WEIGHTS 유지 + seu_experiment_mode 만 켬 (exc 1~5·바이패스 비활성)
+# system 가중치를 올려 전력 이상만 있고 ADCS/시스템 반응이 정상인 SEU 케이스에서 N 유도
+FALSE_POSITIVE_SCENARIO_MODULE_WEIGHTS = {
+    "physical":    0.20,
+    "statistical": 0.25,
+    "system":      0.55,
+}
+
 # 최종 Y/N 판정 임계치 (weighted_score >= threshold → "Y")
 CONFIDENCE_THRESHOLD = 0.5
 
@@ -72,6 +81,17 @@ EXCEPTION_CODES_BYPASS_WEIGHTED_SUM = frozenset(
         ExceptionCode.TORQUE_AMPLIFICATION,
         ExceptionCode.WHEEL_DISABLED_BUT_COMMANDED,
         ExceptionCode.MULTI_CHANNEL_4PLUS,
+    }
+)
+
+# run_pipeline_scenario attack / false_positive: GS·터미널에 exc 1~5 미표시, 가중합만으로 Y/N
+EXCEPTION_CODES_SUPPRESS_FOR_DEMO = frozenset(
+    {
+        ExceptionCode.UNIT_QUATERNION_VIOLATION,
+        ExceptionCode.TORQUE_AMPLIFICATION,
+        ExceptionCode.WHEEL_DISABLED_BUT_COMMANDED,
+        ExceptionCode.MULTI_CHANNEL_4PLUS,
+        ExceptionCode.DATA_MISSING,
     }
 )
 

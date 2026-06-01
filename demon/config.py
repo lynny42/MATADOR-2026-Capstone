@@ -65,6 +65,9 @@ GS_CMD_SAT_PORT = GS_PORT + GS_CMD_LISTEN_PORT_OFFSET
 # 지상국 bulk 송신: 조도 L,dark → L,light 엣지 1회 (SUN_VALID 미사용)
 GS_TRANSMIT_ON_LIGHT_EDGE = True
 GS_POLL_INTERVAL_SEC = 1.0
+# run_pipeline_scenario — 지상 bulk 송신 전 관측·누적(초)
+SCENARIO_NORMAL_OBSERVE_SEC_DEFAULT = 15
+SCENARIO_PRE_TRANSMIT_COLLECT_SEC = 10
 # PWR/TLM history 송신 배치 크기 (HISTORY_ID 건수, 패킷 분할)
 GS_HISTORY_BATCH_SIZE = 30
 # 지상국 송신 packet_type (GScomms JSON)
@@ -82,6 +85,8 @@ SNAPSHOT_AT_COL = "SNAPSHOT_AT"
 # bulk 송신: packet_type=SAT_BULK_TELEMETRY, 내부 섹션 키 = GS_PACKET_TYPE_* (EVENT~PWR)
 GS_EVENT_ATTACK_CONFIRMED = "ATTACK_CONFIRMED"
 GS_EVENT_SEU_DETECTED = "SEU_DETECTED"
+# bulk 송신 시 SAT_EVENT_QUEUE 내 FPF 이벤트 요약 stdout 출력 (테스트·시나리오용)
+GS_LOG_FPF_BULK_PREVIEW = True
 
 # ============================================================
 # DB
@@ -174,6 +179,8 @@ ATTACK_SIM_ENABLE_GYRO = True
 ATTACK_SIM_ENABLE_SERVO = True
 ATTACK_SIM_SERVO_REPEATS = 5
 ATTACK_SIM_SERVO_ANGLE = 90
+# run_pipeline_scenario false_positive 공격 선행 단계 전용 (일반 ATTACK_SIM 은 5회 유지)
+FALSE_POSITIVE_ATTACK_SERVO_REPEATS = 1
 # 논리: SAT_ADCS_FILTER / SAT_TLM_CURRENT 에 오탐필터용 이상 스냅샷 주입
 ATTACK_SIM_INJECT_LOGICAL = True
 # cf 무결성 — ATTACK_HASH 전용 (ATTACK_SIM 과 분리)

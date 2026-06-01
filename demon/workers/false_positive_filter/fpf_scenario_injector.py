@@ -228,12 +228,33 @@ def _clear_accumulated_tables(db: Any) -> None:
         logger.error("_clear_accumulated_tables 실패: %s", e)
 
 
-def build_natural_fpf_key_overrides(key_set: dict[str, Any] | None = None) -> dict[str, Any]:
-    """FPF N 판정용 key_set 보강 — _snapshots 로 ADCS/TLM 고정, UDP deque 는 제거.
+def is_attack_adcs_row(row: dict[str, Any] | None) -> bool:
+    """AttackSimulator 논리 주입 스냅샷과 동일/유사한지 (SEU 단계 실측 복원 판단)."""
+    try:
+        if not row or not isinstance(row, dict):
+            return False
+        ref = adcs_attack_payload()
+        q0 = float(row.get("QBN_0", -1.0))
+        tcmd_x = float(row.get("TCMD_X", -1.0))
+        qerr_0 = float(row.get("QERR_0", -1.0))
+        if abs(q0 - float(ref["QBN_0"])) < 1e-4 and abs(tcmd_x - float(ref["TCMD_X"])) < 1e-4:
+            return True
+        if abs(qerr_0 - float(ref["QERR_0"])) < 1e-4 and abs(tcmd_x - float(ref["TCMD_X"])) < 1e-4:
+            return True
+        return False
+    except (TypeError, ValueError) as e:
+        logger.error("is_attack_adcs_row 변환 오류: %s", e)
+        return False
+    except Exception as e:
+        logger.error("is_attack_adcs_row 실패: %s", e)
+        return False
 
-    lab 시나리오(_inject_natural_scenario)와 동일하게 adcs_series 는 비워 두고
-    resolve_adcs() 가 _snapshots 만 쓰게 한다. 동일 프레임 3개를 넣으면
-    check_command_outcome 의 dω/dt=0 이라 physical=1.0 이 된다.
+
+def build_natural_fpf_key_overrides(key_set: dict[str, Any] | None = None) -> dict[str, Any]:
+    """(오프라인·Mock 전용) FPF N 판정용 key_set — _snapshots 로 ADCS/TLM 고정.
+
+    run_pipeline_scenario 실측 SEU 경로에서는 사용하지 않는다.
+    DB·adcs_series 실측 반영 시 build_live_fpf_key_set() 사용.
     """
     try:
         adcs = _base_adcs_natural()
@@ -261,6 +282,19 @@ def inject_natural_adcs_tlm(db: Any) -> bool:
         return bool(ok_tlm and ok_adcs)
     except Exception as e:
         logger.error("inject_natural_adcs_tlm 실패: %s", e)
+        return False
+
+
+def inject_natural_adcs_tlm_bypass(db: Any) -> bool:
+    """inject_natural_adcs_tlm — accumulation freeze 중에도 ADCS/TLM 주입 가능."""
+    try:
+        ctx = getattr(db, "scenario_inject_writes", None)
+        if callable(ctx):
+            with db.scenario_inject_writes():
+                return inject_natural_adcs_tlm(db)
+        return inject_natural_adcs_tlm(db)
+    except Exception as e:
+        logger.error("inject_natural_adcs_tlm_bypass 실패: %s", e)
         return False
 
 

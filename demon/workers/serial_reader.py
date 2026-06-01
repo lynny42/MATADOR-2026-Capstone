@@ -264,8 +264,6 @@ class SerialReader:
                 if light_state is None:
                     return
                 self._last_light = light_state
-                if demon_config.SERIAL_LOG_PARSED:
-                    logger.info("serial light=%s", light_state)
                 return
 
             if not self._looks_like_power_csv(stripped):

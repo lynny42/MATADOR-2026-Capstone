@@ -36,6 +36,107 @@ _DEFAULT_ACK_WAIT_SEC = 3.0
 _WEIGHT_MIN = 1
 _WEIGHT_MAX = 100
 
+_FPF_EVENT_TYPES = frozenset(
+    {
+        demon_config.GS_EVENT_ATTACK_CONFIRMED,
+        demon_config.GS_EVENT_SEU_DETECTED,
+    },
+)
+
+_FPF_EXC_LABEL = {
+    0: "정상",
+    1: "사원수",
+    2: "토크",
+    3: "휠",
+    4: "다채널",
+    5: "누락",
+    6: "모드",
+    7: "경로",
+}
+
+
+def _fpf_decision_from_event_type(event_type: str) -> str:
+    if event_type == demon_config.GS_EVENT_ATTACK_CONFIRMED:
+        return "Y"
+    if event_type == demon_config.GS_EVENT_SEU_DETECTED:
+        return "N"
+    return "?"
+
+
+def _parse_module_scores_field(raw: Any) -> dict[str, float]:
+    try:
+        if isinstance(raw, dict):
+            data = raw
+        elif isinstance(raw, str) and raw.strip():
+            data = json.loads(raw)
+        else:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, float] = {}
+        for key in ("physical", "statistical", "system"):
+            if key in data:
+                out[key] = float(data[key])
+        return out
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        logger.error("MODULE_SCORES 파싱 실패: %s", e)
+        return {}
+
+
+def format_fpf_gs_event(ev: dict[str, Any]) -> str:
+    """지상 bulk JSON SAT_EVENT_QUEUE.events[] 중 FPF 1건 요약."""
+    try:
+        event_type = str(ev.get("EVENT_TYPE", ""))
+        decision = _fpf_decision_from_event_type(event_type)
+        exc = int(ev.get("EXCEPTION_CODE", 0))
+        exc_txt = _FPF_EXC_LABEL.get(exc, "?")
+        ms = _parse_module_scores_field(ev.get("MODULE_SCORES"))
+        base = (
+            f"type={event_type} decision={decision} "
+            f"WEIGHT={ev.get('WEIGHT')} EXCEPTION_CODE={exc}({exc_txt}) "
+            f"SW_ID={ev.get('SW_ID')} CHENNEL1={ev.get('CHENNEL1')} "
+            f"PRIORITY={ev.get('PRIORITY')}"
+        )
+        if ms:
+            base += (
+                f" MODULE_SCORES={{P:{ms.get('physical', 0.0):.3f},"
+                f"S:{ms.get('statistical', 0.0):.3f},"
+                f"Sys:{ms.get('system', 0.0):.3f}}}"
+            )
+        eid = ev.get("EVENT_ID")
+        if eid is not None:
+            return f"  [지상 bulk] SAT_EVENT_QUEUE #{eid} {base}"
+        return f"  [지상 bulk] SAT_EVENT_QUEUE {base}"
+    except Exception as e:
+        logger.error("format_fpf_gs_event 실패: %s", e)
+        return "  [지상 bulk] SAT_EVENT_QUEUE (FPF 요약 실패)"
+
+
+def emit_fpf_bulk_preview(bulk: dict[str, Any] | None) -> None:
+    """bulk 송신 직전 FPF 관련 JSON 필드만 짧게 stdout (config.GS_LOG_FPF_BULK_PREVIEW)."""
+    try:
+        if not bulk or not getattr(demon_config, "GS_LOG_FPF_BULK_PREVIEW", False):
+            return
+        ev_sec = bulk.get(demon_config.GS_PACKET_TYPE_EVENT)
+        if not isinstance(ev_sec, dict):
+            return
+        events = ev_sec.get("events")
+        if not isinstance(events, list):
+            return
+        fpf_rows = [
+            ev for ev in events
+            if isinstance(ev, dict) and str(ev.get("EVENT_TYPE", "")) in _FPF_EVENT_TYPES
+        ]
+        if not fpf_rows:
+            return
+        print("[지상 bulk] FPF → SAT_EVENT_QUEUE.events (송신 JSON 발췌)")
+        for ev in fpf_rows:
+            line = format_fpf_gs_event(ev)
+            print(line)
+            logger.info(line.strip())
+    except Exception as e:
+        logger.error("emit_fpf_bulk_preview 실패: %s", e)
+
 
 def _event_ids_from_pending(pending: list[dict[str, Any]]) -> list[int]:
     """get_pending_events 순서 유지 — 유효 EVENT_ID 만 추출."""
@@ -220,6 +321,7 @@ class GScomms:
                 sections.get("pwr", 0),
                 sections.get("integrity", 0),
             )
+            emit_fpf_bulk_preview(bulk)
 
             def on_ack(_ack: dict[str, Any]) -> None:
                 self._on_bulk_ack(cleanup)
@@ -235,9 +337,6 @@ class GScomms:
             cleanup: dict[str, Any] = {
                 "event_ids": [],
                 "snapshot_ids": [],
-                "tlm_history_ids": [],
-                "pwr_history_ids": [],
-                "delete_adcs": False,
             }
             payload: dict[str, Any] = {
                 "packet_type": demon_config.GS_PACKET_TYPE_BULK,
@@ -283,7 +382,6 @@ class GScomms:
                         normalize_record_timestamps(rec) for rec in adcs_records
                     ],
                 }
-                cleanup["delete_adcs"] = True
                 has_any = True
 
             tlm_records = self._ctx.db.get_tlm_history()
@@ -293,9 +391,6 @@ class GScomms:
                         normalize_record_timestamps(rec) for rec in tlm_records
                     ],
                 }
-                cleanup["tlm_history_ids"] = self._ctx.db.history_ids_from_records(
-                    tlm_records,
-                )
                 has_any = True
 
             pwr_records = self._ctx.db.get_pwr_history()
@@ -305,9 +400,6 @@ class GScomms:
                         normalize_record_timestamps(rec) for rec in pwr_records
                     ],
                 }
-                cleanup["pwr_history_ids"] = self._ctx.db.history_ids_from_records(
-                    pwr_records,
-                )
                 has_any = True
 
             snapshot_ids = sorted(
@@ -335,13 +427,10 @@ class GScomms:
             return None, {
                 "event_ids": [],
                 "snapshot_ids": [],
-                "tlm_history_ids": [],
-                "pwr_history_ids": [],
-                "delete_adcs": False,
             }
 
     def _on_bulk_ack(self, cleanup: dict[str, Any]) -> None:
-        """bulk ACK 수신 후 섹션별 DB 정리."""
+        """bulk ACK 수신 후 이벤트 삭제 및 SNAPSHOT_ID 기준 history 일괄 삭제."""
         try:
             for raw_id in cleanup.get("event_ids") or []:
                 try:
@@ -357,17 +446,10 @@ class GScomms:
                 if not self._ctx.db.delete_snapshots_by_ids(snapshot_ids):
                     logger.warning("delete_snapshots_by_ids 실패 ids=%s", snapshot_ids)
             else:
-                if cleanup.get("delete_adcs"):
-                    if not self._ctx.db.delete_adcs_filter():
-                        logger.warning("delete_adcs_filter 실패")
-
-                tlm_ids = cleanup.get("tlm_history_ids") or []
-                if tlm_ids and not self._ctx.db.delete_tlm_history(tlm_ids):
-                    logger.warning("delete_tlm_history 실패 ids=%s", tlm_ids)
-
-                pwr_ids = cleanup.get("pwr_history_ids") or []
-                if pwr_ids and not self._ctx.db.delete_pwr_history(pwr_ids):
-                    logger.warning("delete_pwr_history 실패 ids=%s", pwr_ids)
+                logger.warning(
+                    "bulk ACK: snapshot_ids 없음 — PWR/TLM/ADCS history 미삭제 "
+                    "(SNAPSHOT_ID 필수, DO flush 확인)",
+                )
 
             logger.info("SAT_BULK_TELEMETRY ACK 처리 완료")
         except Exception as e:

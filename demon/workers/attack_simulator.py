@@ -103,6 +103,7 @@ class AttackSimulator:
         cmd: dict[str, Any] | None = None,
         *,
         inject_logical: bool | None = None,
+        servo_repeats: int | None = None,
     ) -> bool:
         """ATTACK_SIM — 물리(시리얼) + 선택적 논리(DB). cf 파일 주입 없음."""
         try:
@@ -114,7 +115,13 @@ class AttackSimulator:
             self._set_attack_mode(True)
             self._set_hash_attack_mode(False)
 
-            if self._run_physical_attack():
+            repeats = servo_repeats
+            if repeats is None and isinstance(cmd, dict):
+                raw = cmd.get("servo_repeats", cmd.get("SERVO_REPEATS"))
+                if raw is not None:
+                    repeats = int(raw)
+
+            if self._run_physical_attack(servo_repeats=repeats):
                 ok_any = True
 
             do_logical = (
