@@ -13,7 +13,6 @@
  *   (SAT_PWR_META SW_ID 3 은 미갱신 — DB 시드 0 유지)
  *
  * 데몬 UART 명령 (한 줄 JSON — AttackSimulator 가 조합 전송):
- *   {"pwr_bias":"on"|"off"}  — MPU rail 전압 바이어스 (이상 탐지 데모)
  *   {"gyro":"on"|"off"}      — MPU6050 전원
  *   {"num":N,"angle":D}      — 서보 N회, 각도 0~180
  *
@@ -46,11 +45,6 @@
 #define LIGHT_AO_THRESHOLD      700
 #define LIGHT_TAG 'L'
 
-// ATTACK 시뮬: 전력 채널 전압 바이어스 (V)
-#define ATTACK_BIAS_MPU    1.2f
-#define ATTACK_BIAS_RPI    0.0f
-#define ATTACK_BIAS_SERVO  0.0f
-
 // 1 이면 한글 디버그 출력 (demon 은 CSV 줄만 사용)
 #define DEBUG_HUMAN_OUTPUT 0
 
@@ -62,7 +56,6 @@ MPU6050 mpu(Wire);
 Servo servo;
 
 bool gyroActive = false;
-bool pwrBiasActive = false;
 
 char cmdLine[128];
 uint8_t cmdLen = 0;
@@ -91,22 +84,6 @@ float readCurrent_A(INA226_WE &ina) {
     return ina.getCurrent_mA() / 1000.0f;
 }
 
-float applyAttackBias(uint8_t swId, float voltage) {
-    if (!pwrBiasActive) {
-        return voltage;
-    }
-    switch (swId) {
-        case SW_ID_MPU:
-            return voltage + ATTACK_BIAS_MPU;
-        case SW_ID_RPI:
-            return voltage + ATTACK_BIAS_RPI;
-        case SW_ID_SERVO:
-            return voltage + ATTACK_BIAS_SERVO;
-        default:
-            return voltage;
-    }
-}
-
 void printPowerCsv(uint8_t swId, float voltage, float currentA) {
     unsigned long ms = millis();
     Serial.print(swId);
@@ -126,7 +103,6 @@ void emitPowerSample(uint8_t swId, INA226_WE &ina, float fallbackVoltage, float 
         v = fallbackVoltage;
         a = fallbackCurrentA;
     }
-    v = applyAttackBias(swId, v);
     printPowerCsv(swId, v, a);
 }
 
@@ -212,16 +188,6 @@ String extractValue(const String &json, const String &key) {
     return json.substring(idx, end);
 }
 
-void handlePwrBiasCommand(const String &biasVal) {
-    if (biasVal == "on") {
-        pwrBiasActive = true;
-        Serial.println(F("# pwr_bias on"));
-    } else if (biasVal == "off") {
-        pwrBiasActive = false;
-        Serial.println(F("# pwr_bias off"));
-    }
-}
-
 void handleGyroCommand(const String &gyroVal) {
     if (gyroVal == "on") {
         gyroActive = true;
@@ -241,6 +207,9 @@ void handleGyroCommand(const String &gyroVal) {
 }
 
 void startServoMotion(int num, int angle) {
+    if (!servo.attached()) {
+        servo.attach(SERVO_PIN);
+    }
     servoTargetAngle = angle;
     servoRemainingReps = num;
     servo.write(angle);
@@ -259,6 +228,7 @@ void updateServo() {
     } else if (servoState == SERVO_TO_ZERO) {
         servoRemainingReps--;
         if (servoRemainingReps <= 0) {
+            servo.detach();
             servoState = SERVO_IDLE;
             Serial.println(F("# servo done"));
         } else {
@@ -283,10 +253,6 @@ void handleMotorCommand(const String &numVal, const String &angleVal) {
 }
 
 void handleJsonCommand(const String &input) {
-    String biasVal = extractValue(input, "pwr_bias");
-    if (biasVal.length() > 0) {
-        handlePwrBiasCommand(biasVal);
-    }
     String gyroVal = extractValue(input, "gyro");
     if (gyroVal.length() > 0) {
         handleGyroCommand(gyroVal);
@@ -380,14 +346,13 @@ void setup() {
     Wire.write(0x40);
     Wire.endTransmission();
 
-    servo.attach(SERVO_PIN);
-    servo.write(0);
+    // 대기 시 PWM 홀딩 전류·미세진동 방지 — 동작 시 startServoMotion 에서 attach
     // LIGHT_AO: 아날로그 핀은 pinMode 불필요
 
     cmdLen = 0;
     Serial.println(F("# sat_power_monitor ready"));
     Serial.println(F("# power: 0,1,2 = CSV | light: L,light|dark (AO threshold=700)"));
-    Serial.println(F("# CMD: JSON pwr_bias | gyro | num+angle"));
+    Serial.println(F("# CMD: JSON gyro | num+angle"));
 }
 
 void loop() {

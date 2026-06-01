@@ -4,7 +4,7 @@
 
 역할:
   - :6000 listen — 위성 demon 이 텔레메트리를내면 출력 후 ACK
-  - 위성 :6001 로 커맨드 — ATTACK_SIM / ATTACK_HASH / RECOVERY
+  - 위성 :6001 로 커맨드 — ATTACK_SIM / ATTACK_HASH / SEU_SIM / RECOVERY
 
 네트워크:
   - GS (이 PC): 192.168.0.12 — :6000 수신, 위성 :6001 로 커맨드
@@ -15,12 +15,17 @@
     python3 -m demon.tools.gs_test_server
     python3 -m demon.tools.gs_test_server --sat-host 192.168.0.7
     python3 -m demon.tools.gs_test_server --send ATTACK_SIM
+    python3 -m demon.tools.gs_test_server --send SEU_SIM
     python3 -m demon.tools.gs_test_server --send RECOVERY
+    python3 -m demon.tools.gs_test_server --scenario false_positive
 
 대화형 (서버 실행 중 stdin):
-    attack / a       → ATTACK_SIM (모터·전력·ADCS 논리)
-    attack_hash / ah → ATTACK_HASH (전력 이상 + cf 파일 → hash 검사)
-    recovery 또는  r  → RECOVERY
+    attack / a        → ATTACK_SIM (gyro/servo 실부하 + ADCS 논리 → FPF Y)
+    attack_hash / ah  → ATTACK_HASH (실부하 + cf 파일 → hash 검사)
+    seu / s / fpf     → SEU_SIM (gyro/servo 실부하만 → FPF N / SEU_DETECTED)
+    recovery / r      → RECOVERY (AttackSimulator + FpfSimulator 해제)
+
+오탐 시연 권장 순서: attack → (bulk 확인) → recovery → seu → (bulk 확인)
 """
 from __future__ import annotations
 
@@ -32,10 +37,12 @@ import socket
 import struct
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from .. import config as demon_config
+from ..workers.gs_comms import format_fpf_gs_event
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +60,16 @@ _PACKET_BULK = demon_config.GS_PACKET_TYPE_BULK
 
 _CMD_ATTACK = demon_config.GS_CMD_ATTACK_SIM
 _CMD_ATTACK_HASH = demon_config.GS_CMD_ATTACK_HASH
+_CMD_SEU_SIM = demon_config.GS_CMD_SEU_SIM
 _CMD_RECOVERY = demon_config.GS_CMD_RECOVERY
+_GS_CMD_CHOICES = (_CMD_ATTACK, _CMD_ATTACK_HASH, _CMD_SEU_SIM, _CMD_RECOVERY)
+
+_FPF_EVENT_TYPES = frozenset(
+    {
+        demon_config.GS_EVENT_ATTACK_CONFIRMED,
+        demon_config.GS_EVENT_SEU_DETECTED,
+    },
+)
 
 _ADCS_LOG_PATH = Path(__file__).parent.parent.parent / "adcs_filter_log.txt"
 _adcs_log_lock = threading.Lock()
@@ -178,9 +194,13 @@ def send_satellite_command(
         if ok:
             print(f"[GS→위성] {cmd_name} 전송 완료 → {sat_host}:{sat_port}")
             if cmd_name == _CMD_ATTACK:
-                print("  → 모터·전력·ADCS 논리 (ATTACK_SIM)")
+                print("  → ATTACK_SIM: gyro/servo 실부하 + ADCS/TLM 논리 (FPF Y 기대)")
             elif cmd_name == _CMD_ATTACK_HASH:
-                print("  → [1]모터·바이어스 [2]cf파일 [3]전력이상→hash검사 (10~15초 후 dark→light)")
+                print("  → ATTACK_HASH: 실부하 + cf 파일 → 전력 이상 시 hash 검사")
+            elif cmd_name == _CMD_SEU_SIM:
+                print("  → SEU_SIM: gyro/servo 실부하만 (FPF N / SEU_DETECTED 기대)")
+            elif cmd_name == _CMD_RECOVERY:
+                print("  → RECOVERY: 물리·hash·FPF SEU 모드 해제")
             logger.info("위성 커맨드 전송 cmd=%s target=%s:%s", cmd_name, sat_host, sat_port)
         else:
             print(f"[GS→위성] {cmd_name} 전송 실패")
@@ -216,18 +236,25 @@ def _safe_records(pkt: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _print_event(ev: dict[str, Any]) -> None:
-    print("  [이벤트]")
-    print(f"    EVENT_ID      = {ev.get('EVENT_ID')}")
-    print(f"    EVENT_TYPE    = {ev.get('EVENT_TYPE')}")
-    print(f"    PRIORITY      = {ev.get('PRIORITY')}")
-    print(f"    DETECTED_AT   = {ev.get('DETECTED_AT')}")
-    print(f"    SW_ID         = {ev.get('SW_ID')}")
-    print(f"    WEIGHT        = {ev.get('WEIGHT')}")
-    print(f"    CHENNEL1      = {ev.get('CHENNEL1')}")
-    print(f"    EXCEPTION_CODE= {ev.get('EXCEPTION_CODE')}")
-    scores = ev.get("MODULE_SCORES")
-    if scores:
-        print(f"    MODULE_SCORES = {scores}")
+    try:
+        event_type = str(ev.get("EVENT_TYPE", ""))
+        if event_type in _FPF_EVENT_TYPES:
+            print(format_fpf_gs_event(ev).strip())
+            return
+        print("  [이벤트]")
+        print(f"    EVENT_ID      = {ev.get('EVENT_ID')}")
+        print(f"    EVENT_TYPE    = {event_type}")
+        print(f"    PRIORITY      = {ev.get('PRIORITY')}")
+        print(f"    DETECTED_AT   = {ev.get('DETECTED_AT')}")
+        print(f"    SW_ID         = {ev.get('SW_ID')}")
+        print(f"    WEIGHT        = {ev.get('WEIGHT')}")
+        print(f"    CHENNEL1      = {ev.get('CHENNEL1')}")
+        print(f"    EXCEPTION_CODE= {ev.get('EXCEPTION_CODE')}")
+        scores = ev.get("MODULE_SCORES")
+        if scores:
+            print(f"    MODULE_SCORES = {scores}")
+    except Exception as e:
+        logger.error("_print_event 실패: %s", e)
 
 
 def _print_tlm_record(rec: dict[str, Any], idx: int) -> None:
@@ -493,10 +520,17 @@ def _stdin_command_loop(
         "ah": _CMD_ATTACK_HASH,
         "attack_hash": _CMD_ATTACK_HASH,
         "hash": _CMD_ATTACK_HASH,
+        "s": _CMD_SEU_SIM,
+        "seu": _CMD_SEU_SIM,
+        "seu_sim": _CMD_SEU_SIM,
+        "fpf": _CMD_SEU_SIM,
+        "fpf_seu": _CMD_SEU_SIM,
         "r": _CMD_RECOVERY,
         "recovery": _CMD_RECOVERY,
     }
-    print("\n[커맨드] attack(a) | attack_hash(ah/hash) | recovery(r) | quit(q)")
+    print(
+        "\n[커맨드] attack(a) | attack_hash(ah/hash) | seu(s/fpf) | recovery(r) | quit(q)",
+    )
     while not stop_event.is_set():
         try:
             line = sys.stdin.readline()
@@ -512,12 +546,36 @@ def _stdin_command_loop(
             if cmd is None:
                 print(
                     f"  알 수 없는 입력: {line.strip()} "
-                    "(attack / attack_hash / recovery)",
+                    "(attack / attack_hash / seu / recovery)",
                 )
                 continue
             send_satellite_command(cmd, sat_host, sat_port)
         except Exception as e:
             logger.error("_stdin_command_loop 실패: %s", e)
+
+
+def _run_false_positive_scenario(sat_host: str, sat_port: int, step_delay_sec: float) -> bool:
+    """오탐 시연: ATTACK_SIM → RECOVERY → SEU_SIM (각 단계 사이 대기)."""
+    try:
+        steps = [
+            (_CMD_ATTACK, "ATTACK_SIM (FPF Y 기대)"),
+            (_CMD_RECOVERY, "RECOVERY"),
+            (_CMD_SEU_SIM, "SEU_SIM (FPF N 기대)"),
+        ]
+        delay = max(0.0, float(step_delay_sec))
+        print("\n[시나리오] false_positive — 3단계 커맨드 전송")
+        for idx, (cmd, label) in enumerate(steps, start=1):
+            print(f"\n  [{idx}/{len(steps)}] {label}")
+            if not send_satellite_command(cmd, sat_host, sat_port):
+                return False
+            if idx < len(steps) and delay > 0:
+                print(f"  … {delay:.0f}s 대기")
+                time.sleep(delay)
+        print("\n  → 각 단계 후 조도 dark→light 로 bulk 수신 대기")
+        return True
+    except Exception as e:
+        logger.error("_run_false_positive_scenario 실패: %s", e)
+        return False
 
 
 def main() -> int:
@@ -539,8 +597,19 @@ def main() -> int:
     )
     parser.add_argument(
         "--send",
-        choices=[_CMD_ATTACK, _CMD_ATTACK_HASH, _CMD_RECOVERY],
+        choices=list(_GS_CMD_CHOICES),
         help="시작 시 위성에 커맨드 1회 전송 후 서버 대기",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=("false_positive",),
+        help="연속 시나리오 커맨드 전송 (false_positive: attack→recovery→seu)",
+    )
+    parser.add_argument(
+        "--scenario-delay",
+        type=float,
+        default=5.0,
+        help="--scenario 단계 간 대기(초), 기본 5",
     )
     parser.add_argument(
         "--no-interactive",
@@ -555,7 +624,14 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    if args.send:
+    if args.scenario == "false_positive":
+        if not _run_false_positive_scenario(
+            args.sat_host,
+            args.sat_port,
+            args.scenario_delay,
+        ):
+            return 1
+    elif args.send:
         send_satellite_command(args.send, args.sat_host, args.sat_port)
 
     stats: dict[str, int] = {"total": 0}
@@ -582,9 +658,14 @@ def main() -> int:
     print("MATADOR 지상국 테스트 서버")
     print(f"  텔레메트리 수신 : {args.host}:{args.port}")
     print(f"  위성 커맨드 송신 : {args.sat_host}:{args.sat_port}")
-    print(f"  일반 공격       : {_CMD_ATTACK} (attack / a)")
-    print(f"  hash 공격       : {_CMD_ATTACK_HASH} (ah — 전력+파일, attack와 별도)")
-    print("  텔레메트리 수신 : 위성 조도 dark→light 후 bulk 송신")
+    print(f"  1) 공격 시뮬     : {_CMD_ATTACK} (attack / a)")
+    print(f"  2) hash 공격     : {_CMD_ATTACK_HASH} (attack_hash / ah / hash)")
+    print(f"  3) 오탐(SEU) 시뮬: {_CMD_SEU_SIM} (seu / s / fpf)")
+    print(f"  4) 복구          : {_CMD_RECOVERY} (recovery / r)")
+    print("  bulk 수신       : 위성 조도 dark→light 엣지 후 SAT_BULK_TELEMETRY")
+    print("  FPF 이벤트      : ATTACK_CONFIRMED(Y) / SEU_DETECTED(N) 요약 출력")
+    if args.scenario != "false_positive":
+        print("  시나리오        : --scenario false_positive (attack→recovery→seu)")
     print("  Ctrl+C 종료")
     print("=" * 60)
 

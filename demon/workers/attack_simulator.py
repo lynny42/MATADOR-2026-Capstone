@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -30,9 +31,6 @@ class AnomalyDetectorLike(Protocol):
 
 
 class SerialReaderLike(Protocol):
-    def set_pwr_bias(self, enabled: bool) -> bool:
-        ...
-
     def set_gyro_enabled(self, enabled: bool) -> bool:
         ...
 
@@ -45,7 +43,7 @@ class AttackSimulator:
     GScomms.handle_attack_sim / handle_attack_hash / handle_recovery 에서 호출.
 
     start(): ATTACK_SIM — attack_mode + 시리얼(JSON) + ADCS/TLM (물리·논리)
-    start_hash(): ATTACK_HASH — 물리(모터·바이어스) → cf 파일 → 전력 이상 시 hash 검사
+    start_hash(): ATTACK_HASH — 물리(자이로·서보 실부하) → cf 파일 → 전력 이상 시 hash 검사
     stop():  시리얼 해제 + cf 주입 파일 삭제 + attack_mode 복구
     """
 
@@ -75,9 +73,9 @@ class AttackSimulator:
 
     def start_seu_physical(self) -> bool:
         """
-        SEU(오탐) 시연 — pwr_bias 만 ON.
+        SEU(오탐) 시연 — 자이로·서보 실부하로 전력만 상승 (INA226 실측).
 
-        attack_mode / hash / gyro / servo / 논리 DB 주입 없음.
+        attack_mode / hash / 논리 DB 주입 없음.
         """
         try:
             if self._serial_reader is None:
@@ -87,12 +85,16 @@ class AttackSimulator:
             self._set_attack_mode(False)
             self._set_hash_attack_mode(False)
 
-            if not self._serial_reader.set_pwr_bias(True):
-                logger.error("SEU physical: set_pwr_bias(on) 실패")
+            if not self._run_seu_physical_load():
+                logger.error("SEU physical: 실부하(gyro/servo) 실패")
                 return False
 
+            delay = float(getattr(demon_config, "SEU_PHYSICAL_POST_CMD_DELAY_SEC", 3.0))
+            if delay > 0 and not self._ctx.shutdown_event.is_set():
+                time.sleep(delay)
+
             self._physical_active = True
-            logger.info('SEU physical sim: {"pwr_bias":"on"} (attack_mode=False)')
+            logger.info("SEU physical sim: gyro/servo 실부하 (attack_mode=False)")
             return True
         except Exception as e:
             logger.error("AttackSimulator.start_seu_physical 실패: %s", e)
@@ -132,6 +134,8 @@ class AttackSimulator:
             if do_logical:
                 if self._inject_logical_attack():
                     ok_any = True
+            else:
+                logger.info("ATTACK_SIM: ADCS/TLM 논리 주입 OFF (ATTACK_SIM_INJECT_LOGICAL=False)")
 
             if ok_any:
                 self._physical_active = True
@@ -160,7 +164,7 @@ class AttackSimulator:
                 if self._run_physical_attack(servo_repeats=hash_repeats):
                     self._physical_active = True
                     ok_any = True
-                    logger.info("ATTACK_HASH [1/3] 물리 공격(모터·바이어스) 시작")
+                    logger.info("ATTACK_HASH [1/3] 물리 공격(자이로·서보 실부하) 시작")
                 else:
                     logger.error("ATTACK_HASH — 물리 공격 실패")
                     self._set_hash_attack_mode(False)
@@ -230,21 +234,35 @@ class AttackSimulator:
         except Exception as e:
             logger.error("_set_hash_attack_mode 실패: %s", e)
 
+    def _run_seu_physical_load(self) -> bool:
+        """SEU — MPU 자이로 전원·서보 실부하만 (전압 CSV bias 없음)."""
+        try:
+            if self._serial_reader is None:
+                return False
+            ok_any = False
+            if self._config_bool("SEU_PHYSICAL_ENABLE_GYRO", True):
+                if self._serial_reader.set_gyro_enabled(True):
+                    logger.info('SEU UART {"gyro":"on"}')
+                    ok_any = True
+            if self._config_bool("SEU_PHYSICAL_ENABLE_SERVO", True):
+                repeats = int(getattr(demon_config, "SEU_PHYSICAL_SERVO_REPEATS", 1))
+                angle = int(getattr(demon_config, "SEU_PHYSICAL_SERVO_ANGLE", 90))
+                if self._serial_reader.run_servo_motion(repeats, angle):
+                    logger.info('SEU UART {"num":%s,"angle":%s}', repeats, angle)
+                    ok_any = True
+            return ok_any
+        except Exception as e:
+            logger.error("_run_seu_physical_load 실패: %s", e)
+            return False
+
     def _run_physical_attack(self, servo_repeats: int | None = None) -> bool:
-        """앱 → 아두이노: pwr_bias on, gyro on, (선택) servo."""
+        """앱 → 아두이노: gyro on, (선택) servo 실부하."""
         try:
             if self._serial_reader is None:
                 logger.error("SerialReader 미주입 — 물리 공격 스킵")
                 return False
 
             ok_any = False
-
-            if self._config_bool("ATTACK_SIM_PWR_BIAS", True):
-                if self._serial_reader.set_pwr_bias(True):
-                    logger.info('UART {"pwr_bias":"on"}')
-                    ok_any = True
-                else:
-                    logger.error("set_pwr_bias(on) 실패")
 
             if self._config_bool("ATTACK_SIM_ENABLE_GYRO", True):
                 if self._serial_reader.set_gyro_enabled(True):
@@ -277,13 +295,6 @@ class AttackSimulator:
                 if self._serial_reader.set_gyro_enabled(False):
                     logger.info('UART {"gyro":"off"}')
                     ok_any = True
-
-            if self._config_bool("ATTACK_SIM_PWR_BIAS", True):
-                if self._serial_reader.set_pwr_bias(False):
-                    logger.info('UART {"pwr_bias":"off"}')
-                    ok_any = True
-                else:
-                    logger.error("set_pwr_bias(off) 실패")
 
             return ok_any
         except Exception as e:

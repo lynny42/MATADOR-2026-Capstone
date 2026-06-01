@@ -24,8 +24,7 @@ class SerialReader:
     """
     아두이노 UART 전력·조도 수집 및 제어.
 
-    - 전력 시뮬: set_pwr_bias (JSON {"pwr_bias":"on"|"off"})
-    - 모터·자이로: run_servo_motion / set_gyro_enabled (JSON)
+    - 실부하: set_gyro_enabled / run_servo_motion (JSON)
     - 조도: get_light_state (L,light|dark 수신만, 송신 제어 없음)
     """
 
@@ -84,19 +83,6 @@ class SerialReader:
         except Exception as e:
             logger.error("is_light_bright 실패: %s", e)
             return None
-
-    def set_pwr_bias(self, enabled: bool) -> bool:
-        """MPU rail 전압 바이어스 — {"pwr_bias":"on"|"off"}."""
-        try:
-            state = (
-                demon_config.UART_JSON_PWR_BIAS_ON
-                if enabled
-                else demon_config.UART_JSON_PWR_BIAS_OFF
-            )
-            return self._send_json_command({"pwr_bias": state})
-        except Exception as e:
-            logger.error("set_pwr_bias 실패: %s", e)
-            return False
 
     def set_gyro_enabled(self, enabled: bool) -> bool:
         """

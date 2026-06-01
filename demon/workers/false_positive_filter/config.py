@@ -50,6 +50,8 @@ GS_INSERT_EVENT_INCLUDE_MODULE_SCORES = True
 
 # 실험 시 모듈별 점수·Y/N 상세 로그
 LOG_EXPERIMENT_DETAIL = True
+# 데몬 운용 시 판정 요약(공격 확정 / SEU) — LOG_EXPERIMENT_DETAIL 과 무관하게 항상 출력
+FPF_LOG_VERDICT_ALWAYS = True
 
 # key_set 내 DB 스냅샷 주입 (실험·AnomalyDetector 직전 프레임 전달)
 KEY_SNAPSHOTS = "_snapshots"

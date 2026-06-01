@@ -49,7 +49,32 @@ class AnomalyDetector:
         self._fpf_dispatched = False
         self._adcs_series: deque[dict[str, Any]] = deque(maxlen=5)
         self._tlm_series: deque[dict[str, Any]] = deque(maxlen=5)
-        self._warmup_ticks_remaining = 2
+        self._warmup_ticks_remaining = int(
+            getattr(demon_config, "ANOMALY_DETECTOR_WARMUP_TICKS", 8),
+        )
+        self._consecutive_normal: dict[int, int] = {}
+        self._prev_anomaly_flag: dict[int, int] = {}
+
+    def reset_power_anomaly_episode(self) -> bool:
+        """RECOVERY 등 — 전력 이상 누적·래치·FPF 에피소드 초기화."""
+        try:
+            self._clear_anomaly_latch_state()
+            self._prev_anomaly_flag.clear()
+            self.reset_fpf_episode()
+            if not self._ctx.db.reset_pwr_anomaly_state():
+                logger.warning("reset_power_anomaly_episode: reset_pwr_anomaly_state 실패")
+                return False
+            logger.info("전력 이상 상태 초기화 (RECOVERY)")
+            return True
+        except Exception as e:
+            logger.error("reset_power_anomaly_episode 실패: %s", e)
+            return False
+
+    def _clear_anomaly_latch_state(self) -> None:
+        try:
+            self._consecutive_normal.clear()
+        except Exception as e:
+            logger.error("_clear_anomaly_latch_state 실패: %s", e)
 
     def set_false_positive_filter(self, fpf: FalsePositiveFilterLike) -> None:
         """FalsePositiveFilter 인스턴스 주입 (런타임 wiring)."""
@@ -81,11 +106,19 @@ class AnomalyDetector:
         except Exception as e:
             logger.error("set_hash_attack_mode 실패: %s", e)
 
+    def reset_fpf_episode(self) -> None:
+        """SEU_SIM 등 — 다음 전력 이상에서 FPF 재진입 허용."""
+        try:
+            self._fpf_dispatched = False
+        except Exception as e:
+            logger.error("reset_fpf_episode 실패: %s", e)
+
     def run(self) -> None:
         """anomaly_detector_thread — 1초 주기 탐지 루프."""
         logger.info("AnomalyDetector started")
         if not self._ctx.db.reset_pwr_anomaly_state():
             logger.warning("reset_pwr_anomaly_state 실패 — 이전 세션 이상 상태가 남아있을 수 있음")
+        self._clear_anomaly_latch_state()
         try:
             interval = float(self._ctx.config.collect_interval_sec)
             while not self._ctx.shutdown_event.is_set():
@@ -104,6 +137,8 @@ class AnomalyDetector:
         try:
             if self._warmup_ticks_remaining > 0:
                 self._warmup_ticks_remaining -= 1
+                return
+            if not self._has_valid_power_baseline():
                 return
 
             self._refresh_series_buffers()
@@ -134,11 +169,86 @@ class AnomalyDetector:
         except Exception as e:
             logger.error("_refresh_series_buffers 실패: %s", e)
 
+    def _has_valid_power_baseline(self) -> bool:
+        """SW0~2 전력 채널에 유효 전압이 쌓였는지."""
+        try:
+            min_valid = float(getattr(demon_config, "PWR_VOLTAGE_MIN_VALID", 0.5))
+            for sw_id in range(int(demon_config.PWR_SW_ID_COUNT)):
+                meta = self._ctx.db.get_pwr_meta(sw_id)
+                if meta is None:
+                    return False
+                if float(meta.get("VOLTAGE", 0.0)) < min_valid:
+                    return False
+            return True
+        except (TypeError, ValueError) as e:
+            logger.error("_has_valid_power_baseline 변환 오류: %s", e)
+            return False
+        except Exception as e:
+            logger.error("_has_valid_power_baseline 실패: %s", e)
+            return False
+
+    def _log_anomaly_flag_change(
+        self,
+        sw_id: int,
+        anomaly_flag: int,
+        *,
+        voltage: float,
+        lo: float,
+        hi: float,
+        exceeded: bool,
+        consecutive: int,
+        curr_delta_v: float,
+    ) -> None:
+        try:
+            if not getattr(demon_config, "ANOMALY_LOG_STATE_CHANGE", True):
+                return
+            prev = self._prev_anomaly_flag.get(sw_id, 0)
+            if prev == anomaly_flag:
+                return
+            self._prev_anomaly_flag[sw_id] = anomaly_flag
+            if anomaly_flag == 1:
+                logger.info(
+                    "전력 이상 ON  SW_%s V=%.3f (정상 %.3f~%.3f) exceeded=%s "
+                    "consec=%s |ΔV|=%.3f",
+                    sw_id,
+                    voltage,
+                    lo,
+                    hi,
+                    exceeded,
+                    consecutive,
+                    abs(curr_delta_v),
+                )
+            else:
+                logger.info(
+                    "전력 이상 OFF SW_%s V=%.3f (정상 %.3f~%.3f)",
+                    sw_id,
+                    voltage,
+                    lo,
+                    hi,
+                )
+        except Exception as e:
+            logger.error("_log_anomaly_flag_change 실패: %s", e)
+
+    def _pwr_sample_valid(self, pwr_meta: dict[str, Any]) -> bool:
+        """시리얼 미수신·DB 시드(0V) 구간 — 탐지 스킵."""
+        try:
+            voltage = float(pwr_meta.get("VOLTAGE", 0.0))
+            min_valid = float(getattr(demon_config, "PWR_VOLTAGE_MIN_VALID", 0.5))
+            return voltage >= min_valid
+        except (TypeError, ValueError) as e:
+            logger.error("_pwr_sample_valid 변환 오류: %s", e)
+            return False
+        except Exception as e:
+            logger.error("_pwr_sample_valid 실패: %s", e)
+            return False
+
     def _process_channel(self, sw_id: int) -> None:
         """채널 1개: compute_delta → check_threshold → update_exceed_meta → DB."""
         try:
             meta = self._ctx.db.get_pwr_meta(sw_id)
             if not meta:
+                return
+            if not self._pwr_sample_valid(meta):
                 return
             self.compute_delta(meta)
             exceeded = self.check_threshold(meta, sw_id)
@@ -186,26 +296,65 @@ class AnomalyDetector:
         """
         EXCEED_COUNT / CONSECUTIVE_EXCEED / ANOMALY_FLAG 산출.
 
-        ANOMALY_FLAG=1: EXCEED_COUNT >= exceed_count_threshold 이고 |CURR_DELTA_V| > 임계.
+        ANOMALY_FLAG=1: CONSECUTIVE_EXCEED >= CONSECUTIVE_THRESHOLD (+ ΔV/스파이크).
+        해제: 정상 복귀 후 ANOMALY_CLEAR_CONSECUTIVE_TICKS 연속 정상 틱.
         """
         try:
             sw_id = int(pwr_meta["SW_ID"])
             exceed_count = int(pwr_meta.get("EXCEED_COUNT", 0))
             consecutive = int(pwr_meta.get("CONSECUTIVE_EXCEED", 0))
             curr_delta_v = float(pwr_meta.get("CURR_DELTA_V", 0.0))
+            clear_ticks = int(
+                getattr(demon_config, "ANOMALY_CLEAR_CONSECUTIVE_TICKS", 3),
+            )
 
             if exceeded:
+                self._consecutive_normal[sw_id] = 0
                 exceed_count += 1
                 consecutive += 1
             else:
-                consecutive = 0
+                norm = self._consecutive_normal.get(sw_id, 0) + 1
+                self._consecutive_normal[sw_id] = norm
+                if norm >= clear_ticks:
+                    consecutive = 0
+                    exceed_count = 0
 
             delta_thresh = self._anomaly_delta_threshold()
-            count_thresh = int(self._ctx.config.exceed_count_threshold)
-            # 연속 초과 횟수 기준, delta는 첫 tick(consecutive==1)만 확인
-            delta_ok = abs(curr_delta_v) > delta_thresh or consecutive > 1
-            anomaly_flag = 1 if consecutive >= count_thresh and delta_ok else 0
+            spike_thresh = float(
+                getattr(demon_config, "ANOMALY_SPIKE_DELTA_V_THRESHOLD", 0.12),
+            )
+            count_thresh = int(self._ctx.config.consecutive_threshold)
+            spike_min = int(
+                getattr(demon_config, "ANOMALY_SPIKE_MIN_CONSECUTIVE_TICKS", 2),
+            )
 
+            if exceeded:
+                spike_set = (
+                    consecutive >= spike_min
+                    and abs(curr_delta_v) >= spike_thresh
+                )
+                sustained_set = consecutive >= count_thresh and (
+                    abs(curr_delta_v) > delta_thresh or consecutive > 1
+                )
+                if spike_set or sustained_set:
+                    consecutive = max(consecutive, count_thresh)
+                    anomaly_flag = 1
+                else:
+                    anomaly_flag = 0
+            else:
+                anomaly_flag = 0
+
+            lo, hi = self._effective_thresholds(sw_id)
+            self._log_anomaly_flag_change(
+                sw_id,
+                int(anomaly_flag),
+                voltage=float(pwr_meta.get("VOLTAGE", 0.0)),
+                lo=lo,
+                hi=hi,
+                exceeded=exceeded,
+                consecutive=consecutive,
+                curr_delta_v=curr_delta_v,
+            )
             return {
                 "sw_id": sw_id,
                 "exceed_count": exceed_count,
@@ -401,13 +550,14 @@ class AnomalyDetector:
                 self._fpf_dispatched = True
                 return
 
-            self._false_positive_filter.on_anomaly_detected(key_set)
-            self._fpf_dispatched = True
             logger.info(
-                "전력 이상 → 오탐필터 전달 sw_id_list=%s channel1=%s",
+                "전력 이상 확정 → 오탐 필터링 진입 sw_id_list=%s primary_sw_id=%s channel1=%s",
                 sw_id_list,
+                primary_sw_id,
                 channel1,
             )
+            self._false_positive_filter.on_anomaly_detected(key_set)
+            self._fpf_dispatched = True
         except Exception as e:
             logger.error("_handle_power_anomaly_first 실패: %s", e)
 

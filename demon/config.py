@@ -20,8 +20,6 @@ SERIAL_REOPEN_BACKOFF_SEC = 5.0
 SERIAL_PWR_SW_ID_MAX = 2
 SERIAL_LIGHT_TAG = "L"
 # 아두이노 JSON — AttackSimulator 가 개별 전송 (ATTACK/RECOVERY 문자열 미사용)
-UART_JSON_PWR_BIAS_ON = "on"
-UART_JSON_PWR_BIAS_OFF = "off"
 UART_JSON_GYRO_ON = "on"
 UART_JSON_GYRO_OFF = "off"
 SERVO_ANGLE_MIN = 0
@@ -45,13 +43,14 @@ GS_MAX_PACKET_BYTES = 2_000_000
 # ============================================================
 # 지상국 TCP (송수신)
 # ============================================================
-GS_HOST = "192.168.0.29"
+GS_HOST = "192.168.0.12"
 GS_PORT = 6000
 GS_SEND_RETRY_MAX = 3
 GS_SEND_RETRY_BASE_SEC = 1.0
 # 지상국 → 위성 커맨드 이름 (GScomms.dispatch_command)
 GS_CMD_ATTACK_SIM = "ATTACK_SIM"
 GS_CMD_ATTACK_HASH = "ATTACK_HASH"
+GS_CMD_SEU_SIM = "SEU_SIM"
 GS_CMD_RECOVERY = "RECOVERY"
 GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 GS_CMD_UPDATE_HASH = "UPDATE_HASH"
@@ -140,14 +139,15 @@ GENERIC_MAG_DEVICE_DATA_BYTES = 12
 COLLECT_INTERVAL_SEC = 1.0
 
 # ============================================================
-# 전력 초기 임계치 (SW_ID 0~3) — 아두이노 INA226 실측 기준 (2026-05)
-#   SW_0 MPU rail:  대기 ~3.27V, ATTACK ~4.47V
-#   SW_1 RPi rail:  대기 ~4.82V (구 3.0~3.6V 는 3.3V 논리전압 가정으로 부적합)
-#   SW_2 Servo:     대기 ~4.81V, 서보 부하 시 ~3.85V
-#   SW_3:           조도 전용 — 전력 CSV 미갱신, 시드용
+# 전력 초기 임계치 (SW_ID 0~3) — 아두이노 INA226 실측 (2026-06)
+#   SW_0 MPU:   대기 ~3.22V — SEU 자이로 on 시 HI 이탈
+#   SW_1 OBC(RPi): 대기 ~4.74V — 밴드 넓게(오탐 억제)
+#   SW_2 Servo: 대기 ~4.74V, 부하 ~3.69V (idle detach 후 미세진동 감소)
+#   SW_3:       조도 전용 — 시드용
+# init_db 시 SAT_PWR_META.V_THRESHOLD_* 동기화 (_sync_sat_pwr_meta_thresholds)
 # ============================================================
-V_THRESHOLD_LO = [3.10, 4.60, 3.50, 3.0]
-V_THRESHOLD_HI = [3.45, 5.00, 5.00, 3.6]
+V_THRESHOLD_LO = [3.08, 4.05, 3.85, 3.0]
+V_THRESHOLD_HI = [3.38, 5.20, 5.10, 3.6]
 
 # ============================================================
 # 물리적 범위 필터 (parse_serial_line 1차 필터)
@@ -165,24 +165,39 @@ INTEGRITY_DIR_FILE_PATH = "."
 # ============================================================
 # 이상탐지 기준
 # ============================================================
-EXCEED_COUNT_THRESHOLD = 3
+ANOMALY_DETECTOR_WARMUP_TICKS = 8
+ANOMALY_DETECTOR_THREAD_START_DELAY_SEC = 3.0
+PWR_VOLTAGE_MIN_VALID = 0.5
+# CONSECUTIVE_EXCEED — 연속 임계 이탈 N틱 시 ANOMALY_FLAG 래치
 CONSECUTIVE_THRESHOLD = 3
-ANOMALY_DELTA_V_THRESHOLD = 0.1
+# EXCEED_COUNT — FPF 통계 모듈 참조(래치 판정에는 미사용)
+EXCEED_COUNT_THRESHOLD = 3
+ANOMALY_CLEAR_CONSECUTIVE_TICKS = 3
+ANOMALY_DELTA_V_THRESHOLD = 0.05
+ANOMALY_SPIKE_DELTA_V_THRESHOLD = 0.12
+ANOMALY_SPIKE_MIN_CONSECUTIVE_TICKS = 2
+ANOMALY_LOG_STATE_CHANGE = True
 ATTACK_MODE_THRESHOLD_SHRINK_RATIO = 0.1
 
 # ============================================================
 # 공격 시뮬레이터 (지상국 ATTACK_SIM → AttackSimulator)
 # ============================================================
-# 물리: SerialReader JSON — pwr_bias / gyro / servo (아두이노는 명령만 수행)
-ATTACK_SIM_PWR_BIAS = True
+# 물리: SerialReader JSON — gyro / servo 실부하 (INA226 실측)
 ATTACK_SIM_ENABLE_GYRO = True
 ATTACK_SIM_ENABLE_SERVO = True
 ATTACK_SIM_SERVO_REPEATS = 5
 ATTACK_SIM_SERVO_ANGLE = 90
 # run_pipeline_scenario false_positive 공격 선행 단계 전용 (일반 ATTACK_SIM 은 5회 유지)
 FALSE_POSITIVE_ATTACK_SERVO_REPEATS = 1
-# 논리: SAT_ADCS_FILTER / SAT_TLM_CURRENT 에 오탐필터용 이상 스냅샷 주입
-ATTACK_SIM_INJECT_LOGICAL = True
+# SEU(오탐) 물리 단계 — INA226 실측만 (논리 주입 없음)
+SEU_PHYSICAL_ENABLE_GYRO = True
+SEU_PHYSICAL_ENABLE_SERVO = True
+SEU_PHYSICAL_SERVO_REPEATS = 4
+SEU_PHYSICAL_SERVO_ANGLE = 90
+# UART 서보·자이로 명령 후 INA226 반영·서보 동작 완료 대기(초)
+SEU_PHYSICAL_POST_CMD_DELAY_SEC = 3.0
+# 논리: SAT_ADCS_FILTER / SAT_TLM_CURRENT 공격 스냅샷 주입 (False=물리·전력만)
+ATTACK_SIM_INJECT_LOGICAL = False
 # cf 무결성 — ATTACK_HASH 전용 (ATTACK_SIM 과 분리)
 ATTACK_HASH_SERVO_REPEATS = 5
 ATTACK_HASH_CF_FILENAME = "matador_gs_inject.txt"

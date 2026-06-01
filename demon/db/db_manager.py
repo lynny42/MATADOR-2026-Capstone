@@ -765,7 +765,15 @@ class DBManager:
                 else:
                     prev_v = float(row["VOLTAGE"])
                     prev_dv = float(row["CURR_DELTA_V"])
-                    curr_dv = voltage - prev_v
+                    min_valid = float(
+                        getattr(demon_config, "PWR_VOLTAGE_MIN_VALID", 0.5),
+                    )
+                    if prev_v < min_valid:
+                        prev_v = voltage
+                        prev_dv = 0.0
+                        curr_dv = 0.0
+                    else:
+                        curr_dv = voltage - prev_v
                     self._conn.execute(
                         """
                         UPDATE SAT_PWR_META SET

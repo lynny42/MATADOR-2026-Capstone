@@ -25,6 +25,7 @@ _OPTIONAL_EVENT_COLS: tuple[str, ...] = (
 # config.GS_CMD_* 미정의 시 fallback (일반적으로 config 사용)
 _DEFAULT_GS_CMD_ATTACK_SIM = "ATTACK_SIM"
 _DEFAULT_GS_CMD_ATTACK_HASH = "ATTACK_HASH"
+_DEFAULT_GS_CMD_SEU_SIM = "SEU_SIM"
 _DEFAULT_GS_CMD_RECOVERY = "RECOVERY"
 _DEFAULT_GS_CMD_UPDATE_THRESHOLD = "UPDATE_THRESHOLD"
 _DEFAULT_GS_CMD_UPDATE_HASH = "UPDATE_HASH"
@@ -161,9 +162,6 @@ class AnomalyDetectorLike(Protocol):
 
 
 class SerialReaderLike(Protocol):
-    def set_pwr_bias(self, enabled: bool) -> bool:
-        ...
-
     def set_gyro_enabled(self, enabled: bool) -> bool:
         ...
 
@@ -179,6 +177,7 @@ class GScomms:
         self._anomaly_detector: AnomalyDetectorLike | None = None
         self._serial_reader: SerialReaderLike | None = None
         self._attack_simulator: object | None = None
+        self._fpf_simulator: object | None = None
         self._listen_sock: socket.socket | None = None
         self._recv_thread: threading.Thread | None = None
         self._prev_light_state: str | None = None
@@ -196,11 +195,18 @@ class GScomms:
             logger.error("set_serial_reader 실패: %s", e)
 
     def set_attack_simulator(self, simulator: object) -> None:
-        """AttackSimulator — ATTACK_SIM / RECOVERY 위임."""
+        """AttackSimulator — ATTACK_SIM / ATTACK_HASH / RECOVERY 위임."""
         try:
             self._attack_simulator = simulator
         except Exception as e:
             logger.error("set_attack_simulator 실패: %s", e)
+
+    def set_fpf_simulator(self, simulator: object) -> None:
+        """FpfSimulator — SEU_SIM(오탐 FPF 시연) 위임."""
+        try:
+            self._fpf_simulator = simulator
+        except Exception as e:
+            logger.error("set_fpf_simulator 실패: %s", e)
 
     def run(self) -> None:
         """gs_comms_thread — 수신 스레드 기동 + 조도 엣지 bulk 송신 루프."""
@@ -283,15 +289,24 @@ class GScomms:
                 logger.error("insert_event DB 실패 is_attack=%s", is_attack)
                 return -1
 
-            logger.info(
-                "오탐필터 이벤트 INSERT event_id=%s type=%s weight=%s sw_id=%s chennel1=%s "
-                "(조도 dark→light 시 송신)",
-                event_id,
-                event_type,
-                weight,
-                sw_id,
-                chennel1,
-            )
+            if is_attack == "Y":
+                logger.info(
+                    ">>> [지상국 대기] 공격 확정 이벤트 등록 event_id=%s type=%s "
+                    "weight=%s sw_id=%s (조도 dark→light 시 bulk 송신)",
+                    event_id,
+                    event_type,
+                    weight,
+                    sw_id,
+                )
+            else:
+                logger.info(
+                    ">>> [지상국 대기] SEU(오탐) 이벤트 등록 event_id=%s type=%s "
+                    "weight=%s sw_id=%s (조도 dark→light 시 bulk 송신)",
+                    event_id,
+                    event_type,
+                    weight,
+                    sw_id,
+                )
             return event_id
         except (ValueError, TypeError) as e:
             logger.error("insert_event 입력 오류: %s", e)
@@ -534,6 +549,10 @@ class GScomms:
                 "GS_CMD_ATTACK_HASH",
                 _DEFAULT_GS_CMD_ATTACK_HASH,
             ).upper()
+            seu_sim = self._config_str(
+                "GS_CMD_SEU_SIM",
+                _DEFAULT_GS_CMD_SEU_SIM,
+            ).upper()
             recovery = self._config_str("GS_CMD_RECOVERY", _DEFAULT_GS_CMD_RECOVERY).upper()
             update_thr = self._config_str(
                 "GS_CMD_UPDATE_THRESHOLD",
@@ -552,6 +571,9 @@ class GScomms:
                 return
             if name == attack_hash:
                 self.handle_attack_hash(cmd)
+                return
+            if name == seu_sim:
+                self.handle_seu_sim(cmd)
                 return
             if name == recovery:
                 self.handle_recovery(cmd)
@@ -589,14 +611,35 @@ class GScomms:
         except Exception as e:
             logger.error("handle_attack_hash 실패: %s", e)
 
+    def handle_seu_sim(self, cmd: dict[str, Any] | None = None) -> None:
+        try:
+            fpf_sim = self._fpf_simulator
+            if fpf_sim is not None and hasattr(fpf_sim, "start_seu"):
+                if not bool(fpf_sim.start_seu(cmd)):
+                    logger.error("FpfSimulator.start_seu 실패")
+                return
+            logger.error("FpfSimulator 미주입 — SEU_SIM 스킵")
+        except Exception as e:
+            logger.error("handle_seu_sim 실패: %s", e)
+
     def handle_recovery(self, cmd: dict[str, Any] | None = None) -> None:
         try:
+            fpf_sim = self._fpf_simulator
+            if fpf_sim is not None and hasattr(fpf_sim, "stop"):
+                if not bool(fpf_sim.stop()):
+                    logger.warning("FpfSimulator.stop 실패")
             sim = self._attack_simulator
             if sim is not None and hasattr(sim, "stop"):
                 if not bool(sim.stop(cmd)):
                     logger.error("AttackSimulator.stop 실패")
             else:
                 self._handle_recovery_legacy()
+            if self._anomaly_detector is not None and hasattr(
+                self._anomaly_detector,
+                "reset_power_anomaly_episode",
+            ):
+                if not bool(self._anomaly_detector.reset_power_anomaly_episode()):
+                    logger.warning("RECOVERY: 전력 이상 상태 초기화 실패")
             if not self._ctx.db.reset_integrity_violations():
                 logger.warning("reset_integrity_violations 실패")
             else:
@@ -610,14 +653,19 @@ class GScomms:
             if self._anomaly_detector is not None:
                 self._anomaly_detector.set_attack_mode(True)
             if self._serial_reader is not None:
-                self._serial_reader.set_pwr_bias(True)
+                if demon_config.ATTACK_SIM_ENABLE_GYRO:
+                    self._serial_reader.set_gyro_enabled(True)
+                if demon_config.ATTACK_SIM_ENABLE_SERVO:
+                    self._serial_reader.run_servo_motion(
+                        int(demon_config.ATTACK_SIM_SERVO_REPEATS),
+                        int(demon_config.ATTACK_SIM_SERVO_ANGLE),
+                    )
         except Exception as e:
             logger.error("_handle_attack_sim_legacy 실패: %s", e)
 
     def _handle_recovery_legacy(self) -> None:
         try:
             if self._serial_reader is not None:
-                self._serial_reader.set_pwr_bias(False)
                 self._serial_reader.set_gyro_enabled(False)
             if self._anomaly_detector is not None:
                 self._anomaly_detector.set_attack_mode(False)

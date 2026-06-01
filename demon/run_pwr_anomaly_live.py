@@ -9,7 +9,7 @@
 
 옵션:
     --seconds N   수집·탐지 시간(초, 기본 20)
-    --attack      중간에 AttackSimulator.start() (JSON pwr_bias/gyro/servo)
+    --attack      중간에 AttackSimulator.start() (gyro/servo 실부하 + ADCS 논리 주입)
     --port PATH   시리얼 포트 (기본 config.SERIAL_PORT)
 """
 from __future__ import annotations

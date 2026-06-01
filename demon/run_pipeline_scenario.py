@@ -125,9 +125,6 @@ class _Term:
 
 
 class _MockSerial:
-    def set_pwr_bias(self, enabled: bool) -> bool:
-        return True
-
     def set_gyro_enabled(self, enabled: bool) -> bool:
         return True
 
@@ -939,7 +936,7 @@ def _scenario_transmit_all(
 
 
 def _prepare_clean_baseline(h: _Harness) -> None:
-    """직전 시나리오 잔여(물리 bias·공격 ADCS·전력 ANOM) 정리 — normal 등 FPF 미진입 기대 시."""
+    """직전 시나리오 잔여(공격 ADCS·전력 ANOM) 정리 — normal 등 FPF 미진입 기대 시."""
     try:
         _scenario_recovery(h)
         restore_seu_logical_if_needed(h)
@@ -1067,7 +1064,7 @@ def run_false_positive(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
                     print("fpf_natural 시나리오 주입 실패", file=sys.stderr)
                     exit_code = 1
                 elif h.use_serial and not h.attack_sim.start_seu_physical():
-                    print("SEU physical 시작 실패 (SerialReader·pwr_bias 확인)", file=sys.stderr)
+                    print("SEU physical 시작 실패 (SerialReader·gyro/servo 확인)", file=sys.stderr)
                     exit_code = 1
                 else:
                     h.install_fpf_natural_patch()
@@ -1127,10 +1124,10 @@ def run_false_positive(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
                     exit_code = 1
                 else:
                     _print_section(c, 4, "RECOVERY — 오탐(SEU) 단계만 진행")
-                    _print_section(c, 5, "SEU physical — 실측 pwr_bias + 논리(ADCS/TLM) 정상")
+                    _print_section(c, 5, "SEU physical — 자이로·서보 실부하 + 논리(ADCS/TLM) 정상")
                     print(
                         c.wrap(
-                            "  attack_mode OFF · gyro/servo OFF · FPF=실측 전력+DB/adcs_series "
+                            "  attack_mode OFF · FPF=INA226 실측 전력+DB/adcs_series "
                             "(공격 논리 잔존 시에만 ADCS 복원)",
                             c.DIM,
                         ),
@@ -1138,7 +1135,7 @@ def run_false_positive(h: _Harness, c: _Term, args: argparse.Namespace) -> int:
                     h.install_fpf_natural_patch()
                     restore_seu_logical_if_needed(h)
                     if not h.attack_sim.start_seu_physical():
-                        print("SEU physical 시작 실패 (SerialReader·pwr_bias 확인)", file=sys.stderr)
+                        print("SEU physical 시작 실패 (SerialReader·gyro/servo 확인)", file=sys.stderr)
                         exit_code = 1
                     else:
 

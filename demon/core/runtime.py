@@ -4,9 +4,11 @@ import logging
 import signal
 import sqlite3
 import threading
+import time
 
+from .. import config as demon_config
 from ..db.db_manager import DBManager
-from ..workers import AnomalyDetector, AttackSimulator, GScomms, SerialReader, UDPReceiver
+from ..workers import AnomalyDetector, AttackSimulator, FpfSimulator, GScomms, SerialReader, UDPReceiver
 from ..workers.false_positive_filter import (
     FalsePositiveFilter,
     PhysicalConsistencyModule,
@@ -95,19 +97,41 @@ class MatadorDaemon:
             anomaly_detector.set_false_positive_filter(false_positive_filter)
             anomaly_detector.set_gs_comms(gs_comms)
 
-            worker_specs: list[tuple[str, object]] = [
+            fpf_simulator = FpfSimulator(ctx)
+            fpf_simulator.set_attack_simulator(attack_simulator)
+            fpf_simulator.set_false_positive_filter(false_positive_filter)
+            fpf_simulator.set_anomaly_detector(anomaly_detector)
+            gs_comms.set_fpf_simulator(fpf_simulator)
+
+            early_workers: list[tuple[str, object]] = [
                 ("SerialReader", serial_reader),
                 ("UDPReceiver", udp_receiver),
-                ("AnomalyDetector", anomaly_detector),
                 ("GScomms", gs_comms),
             ]
-
-            self._threads = [
-                threading.Thread(target=w.run, name=name, daemon=False)
-                for name, w in worker_specs
+            late_workers: list[tuple[str, object]] = [
+                ("AnomalyDetector", anomaly_detector),
             ]
 
-            for t in self._threads:
+            self._threads = []
+            for name, worker in early_workers:
+                t = threading.Thread(target=worker.run, name=name, daemon=False)
+                self._threads.append(t)
+                t.start()
+
+            start_delay = float(
+                getattr(demon_config, "ANOMALY_DETECTOR_THREAD_START_DELAY_SEC", 3.0),
+            )
+            if start_delay > 0 and not self._shutdown.is_set():
+                logger.info(
+                    "AnomalyDetector 기동 대기 %.1fs (전력 CSV 안정화)",
+                    start_delay,
+                )
+                if self._shutdown.wait(timeout=start_delay):
+                    pass
+
+            for name, worker in late_workers:
+                t = threading.Thread(target=worker.run, name=name, daemon=False)
+                self._threads.append(t)
                 t.start()
         except RuntimeError as e:
             logger.error("스레드 생성·시작 실패(RuntimeError): %s", e)

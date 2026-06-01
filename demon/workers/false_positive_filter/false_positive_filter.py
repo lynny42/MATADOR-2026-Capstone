@@ -25,6 +25,56 @@ from .module_result import ModuleResult
 
 logger = logging.getLogger(config.LOGGER_NAME)
 
+_FPF_EXC_LABEL = {
+    0: "정상",
+    1: "사원수",
+    2: "토크",
+    3: "휠",
+    4: "다채널",
+    5: "누락",
+    6: "모드",
+    7: "경로",
+}
+
+
+def _log_fpf_verdict(result: dict[str, Any]) -> None:
+    """오탐 필터 최종 판정 — 공격 확정(Y) / SEU(N) 요약 로그."""
+    try:
+        if not getattr(config, "FPF_LOG_VERDICT_ALWAYS", True):
+            return
+        is_attack = str(result.get("is_attack", "N")).upper()
+        score = float(result.get("weighted_score", 0.0))
+        weight_int = config.weighted_score_to_gs_int(score)
+        exc = int(result.get("exception_code", 0))
+        exc_txt = _FPF_EXC_LABEL.get(exc, "?")
+        ms = result.get("module_scores") or {}
+        key_set = result.get("key_set") or {}
+        sw_id = key_set.get("sw_id", "?")
+        sw_list = key_set.get("sw_id_list", [])
+
+        if is_attack == "Y":
+            headline = ">>> [오탐 필터링] 공격 확정 (ATTACK_CONFIRMED)"
+        else:
+            headline = ">>> [오탐 필터링] 자연현상/SEU (SEU_DETECTED)"
+
+        logger.info(
+            "%s | score=%.3f weight=%d exc=%d(%s) | "
+            "physical=%.3f statistical=%.3f system=%.3f | "
+            "sw_id=%s sw_id_list=%s",
+            headline,
+            score,
+            weight_int,
+            exc,
+            exc_txt,
+            float(ms.get("physical", 0.0)),
+            float(ms.get("statistical", 0.0)),
+            float(ms.get("system", 0.0)),
+            sw_id,
+            sw_list,
+        )
+    except Exception as e:
+        logger.error("_log_fpf_verdict 실패: %s", e)
+
 
 class FalsePositiveFilter:
     """오탐 필터링 메인 컨트롤러.
@@ -83,7 +133,16 @@ class FalsePositiveFilter:
                      상세: false_positive_filter/README.md
         """
         try:
+            sw_id = key_set.get("sw_id", "?")
+            sw_list = key_set.get("sw_id_list", [])
+            logger.info(
+                ">>> [오탐 필터링] 분석 시작 (전력 이상 수신) sw_id=%s sw_id_list=%s channel1=%s",
+                sw_id,
+                sw_list,
+                key_set.get("channel1", key_set.get("CHENNEL1", "?")),
+            )
             result = self.run_false_positive_filter(key_set)
+            _log_fpf_verdict(result)
             self.send_to_gscomms(result)
         except Exception as e:
             logger.error(f"on_anomaly_detected 실패: {e}")
@@ -130,9 +189,9 @@ class FalsePositiveFilter:
             "detected_at":    key_set.get("detected_at"),
         }
 
-        weight_int = config.weighted_score_to_gs_int(result["weighted_score"])
-        if config.LOG_EXPERIMENT_DETAIL:
+        if config.LOG_EXPERIMENT_DETAIL and not getattr(config, "FPF_LOG_VERDICT_ALWAYS", True):
             ms = result.get("module_scores", {})
+            weight_int = config.weighted_score_to_gs_int(result["weighted_score"])
             logger.info(
                 "오탐 필터링 | Y/N=%s | score=%.3f | weight=%d | exc=%d | "
                 "physical=%.3f statistical=%.3f system=%.3f",
@@ -143,12 +202,6 @@ class FalsePositiveFilter:
                 ms.get("physical", 0.0),
                 ms.get("statistical", 0.0),
                 ms.get("system", 0.0),
-            )
-        else:
-            logger.info(
-                f"오탐 필터링 결과: is_attack={result['is_attack']}, "
-                f"weighted_score={result['weighted_score']:.3f}, "
-                f"exception_code={result['exception_code']}"
             )
         return result
 
