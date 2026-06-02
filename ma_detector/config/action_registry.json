@@ -1,9 +1,9 @@
-﻿{
+{
   "A001": {
     "name": "MALICIOUS_PAYLOAD_INJECT",
     "module": "CF",
     "phase": 1,
-    "weight": 1.0,
+    "weight": 1,
     "description": "펌웨어 업데이트 채널을 통한 악성 페이로드 삽입"
   },
   "A002": {
@@ -24,7 +24,7 @@
     "name": "MEMORY_PROTECTION_BYPASS",
     "module": "OBC",
     "phase": 1,
-    "weight": 2.0,
+    "weight": 2,
     "description": "MPU 메모리 보호 우회"
   },
   "A005": {
@@ -66,7 +66,7 @@
     "name": "LOGIC_TAMPER_WITH_CONCEALMENT",
     "module": "CS+ADCS+ES",
     "phase": 3,
-    "weight": 2.0,
+    "weight": 2,
     "description": "핵심 로직 변조 후 흔적 은폐"
   },
   "A011": {
@@ -80,7 +80,7 @@
     "name": "EVENT_LOG_MANIPULATION",
     "module": "DS+TBL",
     "phase": 3,
-    "weight": 2.0,
+    "weight": 2,
     "description": "이벤트 로그 삭제 및 위조"
   },
   "A013": {

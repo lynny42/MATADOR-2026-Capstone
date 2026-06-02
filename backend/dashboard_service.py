@@ -1,4 +1,4 @@
-﻿"""Service layer that builds dashboard API responses from MySQL."""
+"""Service layer that builds dashboard API responses from MySQL."""
 
 from __future__ import annotations
 
@@ -448,11 +448,18 @@ class DashboardService:
 
         detector.set_replay_mode(preview)
         try:
-            for packet in gs_repository.load_attack_replay_packets():
-                detector.receive_telemetry(
+            replay_packets = gs_repository.load_attack_replay_packets()
+            if not replay_packets:
+                logger.error(
+                    "replay reprocess skipped: no attack packets (check gs_event_queue + gs_tlm_history)"
+                )
+            for packet in replay_packets:
+                error = detector.receive_telemetry(
                     _dump_replay_packet(packet),
                     reprocess=True,
                 )
+                if error:
+                    logger.error("replay receive_telemetry failed: %s", error)
         finally:
             detector.set_replay_mode(False)
 

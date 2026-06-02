@@ -1,4 +1,4 @@
-﻿"""MySQL read/write helpers for ground-station tables."""
+"""MySQL read/write helpers for ground-station tables."""
 
 from __future__ import annotations
 
@@ -39,7 +39,9 @@ _JSON_COLUMNS = frozenset(
     }
 )
 
-_AUTO_COLUMNS = frozenset({"HISTORY_ID", "PWR_META_ID", "DETAIL_ID", "LOG_ID", "CREATED_AT"})
+# HISTORY_ID is not global-auto: gs_tlm_history uses AUTO_INCREMENT (omitted from INSERT row),
+# but gs_pwr_meta must store the parent HISTORY_ID FK explicitly.
+_AUTO_COLUMNS = frozenset({"PWR_META_ID", "DETAIL_ID", "LOG_ID", "CREATED_AT"})
 
 # Bulk-wide archive keys: keep on merge rows for MA ingest, omit from gs_tlm_history INSERT.
 _TLM_BULK_ONLY_COLUMNS = frozenset({"WIRE_PAYLOAD", "SOURCE_RECORDS"})
@@ -197,6 +199,29 @@ def _merge_stored_payloads(row: dict[str, Any]) -> dict[str, Any]:
         return dict(row)
 
 
+def sanitize_rule_engine_fields(packet: dict[str, Any]) -> dict[str, Any]:
+    """Normalize wire quirks before evidence rules (negative counters, RW err alias)."""
+    try:
+        combined = packet.get("COMBINEDPACKETSSENT")
+        if isinstance(combined, (int, float)) and float(combined) < 0:
+            packet["COMBINEDPACKETSSENT"] = None
+
+        for wheel_index in range(3):
+            enabled_key = f"DEVICE_ENABLED_RW{wheel_index}"
+            err_key = f"DEVICE_ERR_RW{wheel_index}"
+            enabled = packet.get(enabled_key)
+            if enabled is not None:
+                try:
+                    packet[err_key] = 1 if int(enabled) == 0 else 0
+                except (TypeError, ValueError) as error:
+                    logger.error("DEVICE_ERR_RW alias failed for %s: %s", enabled_key, error)
+
+        return packet
+    except Exception as error:
+        logger.error("rule engine field sanitize failed: %s", error)
+        return packet
+
+
 def enrich_packet_from_db(row: dict[str, Any]) -> dict[str, Any]:
     """Add rule-engine aliases when loading rows from DB."""
     try:
@@ -215,13 +240,8 @@ def enrich_packet_from_db(row: dict[str, Any]) -> dict[str, Any]:
         if expected_hash is not None:
             packet.setdefault("EXPECTED_CRC", expected_hash)
 
-        for wheel_index in range(3):
-            err_key = f"DEVICE_ERR_RW{wheel_index}"
-            enabled_key = f"DEVICE_ENABLED_RW{wheel_index}"
-            if packet.get(err_key) is None and packet.get(enabled_key) is not None:
-                packet[err_key] = packet[enabled_key]
-
         sync_legacy_tlm_columns(packet)
+        sanitize_rule_engine_fields(packet)
 
         return packet
     except Exception as error:
@@ -428,8 +448,15 @@ def load_attack_replay_packets(limit: int = 5000) -> list[dict[str, Any]]:
                     window = query_history_window(str(detect_time), window_size_sec=30, limit=20)
                     history_row, _delta = find_nearest_history_for_event(event_ref, window)
             if history_row is None:
+                logger.warning(
+                    "attack replay skipped: no tlm match event_id=%s detected_at=%s",
+                    event_row.get("EVENT_ID"),
+                    event_row.get("DETECTED_AT"),
+                )
                 continue
             packets.append(build_ma_reference_packet(history_row, event_row))
+        if not packets:
+            logger.warning("attack replay packets empty (events=%s)", len(query_attack_events(limit)))
         return packets
     except Exception as error:
         logger.error("attack replay packet load failed: %s", error)
@@ -816,9 +843,33 @@ def load_baseline_history(limit: int = 500) -> list[dict[str, Any]]:
             cursor.close()
         results = [enrich_packet_from_db(dict(row)) for row in rows]
         results.reverse()
-        return results
+        if results:
+            return results
+        return _load_pre_attack_baseline_fallback(limit)
     except Exception as error:
         logger.error("baseline history load failed: %s", error)
+        return []
+
+
+def _load_pre_attack_baseline_fallback(limit: int) -> list[dict[str, Any]]:
+    """When every TLM row is near an attack event, use earliest snapshots as baseline (comm-3 demo)."""
+    try:
+        from ma_detector.core.bulk_history_merge import select_pre_attack_baseline_rows
+        from ma_detector.core.ma_onboard_view import _event_source_dict
+
+        tlm_rows = load_recent_tlm_history(limit)
+        if not tlm_rows:
+            return []
+        event_payloads = [
+            _event_source_dict(enrich_event_queue_row(dict(row)))
+            for row in query_attack_events(limit)
+        ]
+        baseline = select_pre_attack_baseline_rows(tlm_rows, event_payloads)
+        if baseline:
+            logger.info("baseline fallback: %s pre-attack tlm row(s)", len(baseline))
+        return baseline
+    except Exception as error:
+        logger.error("pre-attack baseline fallback failed: %s", error)
         return []
 
 

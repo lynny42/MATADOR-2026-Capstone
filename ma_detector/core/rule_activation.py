@@ -1,4 +1,4 @@
-﻿"""JSON-driven rule activation evaluation for MA integrated detection."""
+"""JSON-driven rule activation evaluation for MA integrated detection."""
 
 from __future__ import annotations
 
@@ -317,9 +317,8 @@ def _legacy_activation_presets() -> dict[str, dict[str, Any]]:
         "E-08": {
             "window_mode": series_mode,
             "clauses": [
-                {"op": "step_delta", "column": "COMBINEDPACKETSSENT", "direction": "increase", "weight": 0.45},
-                {"op": "step_delta", "column": "ENABLEDROUTES", "direction": "increase", "weight": 0.30},
-                {"op": "step_delta", "column": "FORWARD_ERR_COUNT", "direction": "increase", "weight": 0.25},
+                {"op": "step_delta", "column": "ENABLEDROUTES", "direction": "increase", "weight": 0.55},
+                {"op": "step_delta", "column": "FORWARD_ERR_COUNT", "direction": "increase", "weight": 0.45},
             ],
         },
         "E-09": {

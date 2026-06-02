@@ -64,6 +64,11 @@ class EvidenceRules:
     ) -> float:
         """Evaluate one rule by ID and clamp the result to the 0.0 to 1.0 range."""
         try:
+            from ma_detector.db.gs_repository import sanitize_rule_engine_fields
+
+            for snapshot in window:
+                sanitize_rule_engine_fields(snapshot)
+
             activation = (rule_def or {}).get("activation")
             if activation:
                 return self._clamp(
@@ -273,9 +278,8 @@ class EvidenceRules:
     def _e08(self, window: list[dict[str, Any]]) -> float:
         try:
             return (
-                self._z_max(window, "COMBINEDPACKETSSENT", "increase") * 0.45
-                + self._z_max(window, "ENABLEDROUTES", "increase") * 0.30
-                + self._z_max(window, "FORWARD_ERR_COUNT", "increase") * 0.25
+                self._z_max(window, "ENABLEDROUTES", "increase") * 0.55
+                + self._z_max(window, "FORWARD_ERR_COUNT", "increase") * 0.45
             )
         except Exception as error:
             logger.error("E-08 scoring failed: %s", error)
@@ -320,7 +324,9 @@ class EvidenceRules:
             imu_max = float(self.abs_thr.get("IMU_WBN_VARIANCE_MAX", 0.001))
             mag_max = float(self.abs_thr.get("RAW_MAG_VARIANCE_MAX", 0.001))
             for snapshot in window:
-                if self._numeric(snapshot, "IMU_WBN_VARIANCE", 1.0) >= imu_max:
+                # Low IMU variance = frozen / ghost telemetry; high variance = normal motion.
+                imu_variance = self._numeric(snapshot, "IMU_WBN_VARIANCE", 1.0)
+                if imu_variance >= imu_max:
                     scores.append(0.0)
                     continue
                 mag_frozen = self._numeric(snapshot, "RAW_MAG_VARIANCE", 1.0) < mag_max

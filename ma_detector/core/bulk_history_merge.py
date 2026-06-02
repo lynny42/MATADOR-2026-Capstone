@@ -1,4 +1,4 @@
-﻿"""Merge SAT_BULK_TELEMETRY sections by SNAPSHOT_ID or HISTORY_ID without fuzzy time buckets."""
+"""Merge SAT_BULK_TELEMETRY sections by SNAPSHOT_ID or HISTORY_ID without fuzzy time buckets."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ma_detector.core.packet_protocol import (
     record_time_key,
     scrub_record,
     time_key_from_value,
-    time_key_to_epoch,
+    timestamp_to_epoch,
 )
 from ma_detector.core.event_queue_columns import (
     ONBOARD_EVENT_WIRE_FIELDS,
@@ -107,14 +107,14 @@ def _nearest_event_for_row(
         if len(events) == 1:
             return events[0]
 
-        anchor = time_key_to_epoch(row.get("SNAPSHOT_AT") or row.get("UPDATED_AT"))
+        anchor = timestamp_to_epoch(row.get("SNAPSHOT_AT") or row.get("UPDATED_AT"))
         if anchor is None:
             return _pick_best_event(events)
 
         best_event: dict[str, Any] | None = None
         best_delta = float("inf")
         for event in events:
-            event_epoch = time_key_to_epoch(
+            event_epoch = timestamp_to_epoch(
                 event.get("DETECTED_AT") or event.get("TIMESTAMP"),
             )
             if event_epoch is None:
@@ -227,6 +227,54 @@ def _index_records_by_snapshot_id(
     except Exception as error:
         logger.error("snapshot index build failed: %s", error)
         return {}
+
+
+def _index_records_by_time_key(
+    records: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Index section rows by normalized UPDATED_AT/TIMESTAMP (wire bulk often omits SNAPSHOT_ID on PWR)."""
+    try:
+        indexed: dict[str, dict[str, Any]] = {}
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            key = record_time_key(record)
+            if key:
+                indexed[key] = record
+        return indexed
+    except Exception as error:
+        logger.error("time key index build failed: %s", error)
+        return {}
+
+
+def _resolve_section_record(
+    by_snapshot_id: dict[int, dict[str, Any]],
+    by_time_key: dict[str, dict[str, Any]],
+    sorted_records: list[dict[str, Any]],
+    snapshot_id: int,
+    align_record: dict[str, Any] | None,
+    snapshot_at: Any,
+    sample_index: int,
+) -> dict[str, Any] | None:
+    """Pick ADCS/PWR row for one SNAPSHOT_ID using id, then time, then positional fallback."""
+    try:
+        matched = by_snapshot_id.get(snapshot_id)
+        if matched is not None:
+            return matched
+
+        for hint in (align_record, {"UPDATED_AT": snapshot_at} if snapshot_at is not None else None):
+            if not isinstance(hint, dict):
+                continue
+            key = record_time_key(hint)
+            if key and key in by_time_key:
+                return by_time_key[key]
+
+        if 0 <= sample_index < len(sorted_records):
+            return sorted_records[sample_index]
+        return None
+    except Exception as error:
+        logger.error("section record resolve failed: %s", error)
+        return None
 
 
 def _ordered_snapshot_ids(
@@ -475,17 +523,39 @@ def _merge_by_snapshot_id(
         tlm_by_id = _index_records_by_snapshot_id(tlm_records)
         adcs_by_id = _index_records_by_snapshot_id(adcs_records)
         pwr_by_id = _index_records_by_snapshot_id(pwr_records)
+        adcs_by_time = _index_records_by_time_key(adcs_records)
+        pwr_by_time = _index_records_by_time_key(pwr_records)
+        adcs_sorted = _sorted_records(adcs_records)
+        pwr_sorted = _sorted_records(pwr_records)
         snapshot_at_by_id = _snapshot_at_lookup(snapshot_records)
 
         merged_rows: list[dict[str, Any]] = []
         for index, snapshot_id in enumerate(ordered_ids):
+            tlm_record = tlm_by_id.get(snapshot_id)
+            snapshot_at = snapshot_at_by_id.get(snapshot_id)
             row = merge_sample_records(
-                tlm_by_id.get(snapshot_id),
-                adcs_by_id.get(snapshot_id),
-                pwr_by_id.get(snapshot_id),
+                tlm_record,
+                _resolve_section_record(
+                    adcs_by_id,
+                    adcs_by_time,
+                    adcs_sorted,
+                    snapshot_id,
+                    tlm_record,
+                    snapshot_at,
+                    index,
+                ),
+                _resolve_section_record(
+                    pwr_by_id,
+                    pwr_by_time,
+                    pwr_sorted,
+                    snapshot_id,
+                    tlm_record,
+                    snapshot_at,
+                    index,
+                ),
                 sample_index=index,
                 snapshot_id=snapshot_id,
-                snapshot_at=snapshot_at_by_id.get(snapshot_id),
+                snapshot_at=snapshot_at,
             )
             if row is not None:
                 merged_rows.append(row)
@@ -685,6 +755,46 @@ def extract_bulk_event_records(bulk: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
+def select_pre_attack_baseline_rows(
+    merged_rows: list[dict[str, Any]],
+    events: list[dict[str, Any]] | None = None,
+    *,
+    min_rows: int = 2,
+) -> list[dict[str, Any]]:
+    """Pick normal-operation rows for MA baseline (before the first attack event time)."""
+    try:
+        if not merged_rows:
+            return []
+        event_list = events if events is not None else []
+        attack_epochs = [
+            epoch
+            for event in event_list
+            if event_is_attack_anomaly(event) and (epoch := _event_epoch(event)) is not None
+        ]
+        sorted_rows = sorted(
+            merged_rows,
+            key=lambda row: _history_row_epoch(row) or 0.0,
+        )
+        if not attack_epochs:
+            return sorted_rows[: max(min_rows, 1)]
+        first_attack = min(attack_epochs)
+        pre_attack = [
+            row
+            for row in sorted_rows
+            if (epoch := _history_row_epoch(row)) is not None and epoch < first_attack - 0.5
+        ]
+        if len(pre_attack) >= min_rows:
+            return pre_attack
+        by_snapshot = sorted(
+            sorted_rows,
+            key=lambda row: int(row.get("SNAPSHOT_ID") or row.get("SAMPLE_INDEX") or 0),
+        )
+        return by_snapshot[: max(min_rows, 1)]
+    except Exception as error:
+        logger.error("pre-attack baseline selection failed: %s", error)
+        return merged_rows[: max(min_rows, 1)]
+
+
 def build_event_queue_row(
     event: dict[str, Any],
     *,
@@ -706,7 +816,7 @@ def build_event_queue_row(
 
 def _history_row_epoch(row: dict[str, Any]) -> float | None:
     try:
-        return time_key_to_epoch(
+        return timestamp_to_epoch(
             row.get("SNAPSHOT_AT") or row.get("UPDATED_AT") or row.get("DETECTED_AT"),
         )
     except Exception as error:
@@ -716,7 +826,7 @@ def _history_row_epoch(row: dict[str, Any]) -> float | None:
 
 def _event_epoch(event: dict[str, Any]) -> float | None:
     try:
-        return time_key_to_epoch(event.get("DETECTED_AT") or event.get("TIMESTAMP"))
+        return timestamp_to_epoch(event.get("DETECTED_AT") or event.get("TIMESTAMP"))
     except Exception as error:
         logger.error("event epoch failed: %s", error)
         return None

@@ -1,4 +1,4 @@
-﻿"""Tests for SAT_BULK_TELEMETRY history merge by HISTORY_ID index."""
+"""Tests for SAT_BULK_TELEMETRY history merge by HISTORY_ID index."""
 
 from __future__ import annotations
 
@@ -188,6 +188,51 @@ class BulkHistoryMergeTest(unittest.TestCase):
         self.assertEqual(rows[0]["TLM_ERLOGENTRIES"], 5)
         self.assertEqual(rows[0]["ADCS_ERLOGENTRIES"], 5)
         self.assertEqual(rows[0]["MAG_BVB_X"], 40043.0)
+
+    def test_pwr_without_snapshot_id_aligns_by_updated_at(self) -> None:
+        bulk = {
+            "packet_type": "SAT_BULK_TELEMETRY",
+            "sent_at": "2026-06-02T02:27:13",
+            "SAT_SNAPSHOT": {
+                "records": [
+                    {"SNAPSHOT_ID": 282, "SNAPSHOT_AT": "2026-06-02 02:22:55"},
+                    {"SNAPSHOT_ID": 283, "SNAPSHOT_AT": "2026-06-02 02:23:04"},
+                ]
+            },
+            "SAT_TLM_HISTORY": {
+                "records": [
+                    {
+                        "SNAPSHOT_ID": 282,
+                        "UPDATED_AT": "2026-06-02 02:22:55",
+                        "MISSION_MODE": 2,
+                    },
+                    {
+                        "SNAPSHOT_ID": 283,
+                        "UPDATED_AT": "2026-06-02 02:23:04",
+                        "MISSION_MODE": 2,
+                    },
+                ]
+            },
+            "SAT_PWR_HISTORY": {
+                "records": [
+                    {
+                        "HISTORY_ID": 11808,
+                        "UPDATED_AT": "2026-06-02 02:22:55",
+                        "channels": [{"SW_ID": 0, "VOLTAGE": 4.413, "CURRENT_A": 0.0004}],
+                    },
+                    {
+                        "HISTORY_ID": 11809,
+                        "UPDATED_AT": "2026-06-02 02:23:04",
+                        "channels": [{"SW_ID": 2, "VOLTAGE": 3.755, "CURRENT_A": 0.0451}],
+                    },
+                ]
+            },
+            "SAT_ADCS_FILTER": {"records": []},
+        }
+        rows = merge_bulk_telemetry_packet(bulk)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["SW_0_VOLTAGE"], 4.413)
+        self.assertEqual(rows[1]["SW_2_VOLTAGE"], 3.755)
 
     def test_attack_bulk_with_events_array_merges_and_flags_anomaly(self) -> None:
         bulk = {
@@ -452,6 +497,27 @@ class BulkHistoryMergeTest(unittest.TestCase):
         self.assertEqual(packet["ONBOARD_EVENT"]["EVENT_ID"], 11)
         self.assertEqual(packet["PIPEOVERFLOWRRCNT"], 7)
         self.assertNotIn("event", packet.get("SOURCE_RECORDS", {}))
+
+    def test_find_nearest_history_accepts_mysql_datetime(self) -> None:
+        from datetime import datetime
+
+        event = {"DETECTED_AT": datetime(2026, 6, 2, 2, 22, 52), "SNAPSHOT_ID": 282}
+        history_rows = [
+            {
+                "SNAPSHOT_ID": 282,
+                "UPDATED_AT": datetime(2026, 6, 2, 2, 22, 52),
+                "HISTORY_ID": 1,
+            },
+            {
+                "SNAPSHOT_ID": 283,
+                "UPDATED_AT": datetime(2026, 6, 2, 2, 23, 0),
+                "HISTORY_ID": 2,
+            },
+        ]
+        linked_row, delta = find_nearest_history_for_event(event, history_rows, tolerance_sec=30.0)
+        self.assertIsNotNone(linked_row)
+        self.assertEqual(linked_row["SNAPSHOT_ID"], 282)
+        self.assertIsNotNone(delta)
 
 
 if __name__ == "__main__":

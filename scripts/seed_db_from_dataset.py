@@ -1,8 +1,8 @@
 """Optional one-off loader for backend/test_data into MySQL (not used at runtime).
 
 Usage (from repo root):
-    python scripts/seed_db_from_dataset.py --clear
-    python scripts/seed_db_from_dataset.py
+    python scripts/seed_db_from_dataset.py --clear --baseline-only
+    python scripts/seed_db_from_dataset.py --clear   # also runs MA on dataset packets (dashboard rows)
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ _CLEAR_ORDER = (
     db_config.TABLE_ANOMALY_DETAIL,
     db_config.TABLE_ANOMALY_DASHBOARD,
     db_config.TABLE_ANOMALY_DISCARD_LOG,
+    db_config.TABLE_EVENT_QUEUE,
     db_config.TABLE_PWR_META,
     db_config.TABLE_TLM_HISTORY,
 )
@@ -131,6 +132,11 @@ def main() -> int:
         "--clear",
         action="store_true",
         help="delete existing gs_* rows before seeding",
+    )
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="load only baseline_history into gs_tlm_history/gs_pwr_meta (no MA on packets)",
     )
     args = parser.parse_args()
 

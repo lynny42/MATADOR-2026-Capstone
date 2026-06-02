@@ -1,4 +1,4 @@
-﻿"""Tests for TLM/ADCS split DB column mapping."""
+"""Tests for TLM/ADCS split DB column mapping."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from ma_detector.core.tlm_adcs_columns import (
     all_split_column_ddls,
     tlm_column,
 )
+from ma_detector.core.baseline import BaselineManager
+from ma_detector.core.evidence_rules import EvidenceRules
 from ma_detector.db.gs_repository import (
     build_tlm_history_insert_row,
     enrich_packet_from_db,
     prepare_packet_for_db,
+    sanitize_rule_engine_fields,
 )
 
 
@@ -69,6 +72,36 @@ class TlmAdcsSplitColumnsTest(unittest.TestCase):
         )
         self.assertEqual(enriched.get("EXPECTED_CRC"), "0xAAA")
         self.assertIsNone(enriched.get("OBC_P_HASH"))
+
+    def test_sanitize_negative_combined_packets_sent(self) -> None:
+        packet = sanitize_rule_engine_fields({"COMBINEDPACKETSSENT": -2})
+        self.assertIsNone(packet.get("COMBINEDPACKETSSENT"))
+
+    def test_sanitize_device_err_rw_from_enabled_flags(self) -> None:
+        packet = sanitize_rule_engine_fields(
+            {
+                "DEVICE_ENABLED_RW0": 1,
+                "DEVICE_ENABLED_RW1": 0,
+                "DEVICE_ENABLED_RW2": 0,
+            },
+        )
+        self.assertEqual(packet.get("DEVICE_ERR_RW0"), 0)
+        self.assertEqual(packet.get("DEVICE_ERR_RW1"), 1)
+        self.assertEqual(packet.get("DEVICE_ERR_RW2"), 1)
+
+    def test_e11_low_imu_variance_indicates_ghost_telemetry(self) -> None:
+        rules = EvidenceRules(
+            BaselineManager(),
+            {"z_score": {"SOFT": 2.0, "HARD": 3.0, "SEVERE": 4.0}, "absolute": {}},
+        )
+        frozen_score = rules._e11(
+            [{"IMU_WBN_VARIANCE": 0.0, "RAW_MAG_VARIANCE": 0.0, "ST_VALID": 0}],
+        )
+        normal_score = rules._e11(
+            [{"IMU_WBN_VARIANCE": 0.01, "RAW_MAG_VARIANCE": 0.01, "ST_VALID": 1}],
+        )
+        self.assertGreaterEqual(frozen_score, 0.6)
+        self.assertEqual(normal_score, 0.0)
 
 
 if __name__ == "__main__":
