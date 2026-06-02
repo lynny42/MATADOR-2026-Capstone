@@ -77,6 +77,12 @@ export const ui = {
   columnCard: "grid gap-1 rounded-xl bg-[var(--soft-card-bg)] p-2.5",
   actionMapGrid: "my-2.5 grid gap-2",
   ruleDetail: "border-t border-[var(--line)] py-3.5",
+  activationSummary:
+    "mt-2 mb-1 rounded-xl border border-[var(--line)] bg-[var(--soft-card-bg)] p-2.5 text-sm leading-relaxed",
+  clauseList: "mt-2 mb-2 list-none space-y-2 p-0",
+  clausePassed: "rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-2.5",
+  clauseFailed: "rounded-xl border border-[var(--line)] bg-[var(--soft-card-bg)] p-2.5 opacity-80",
+  clauseLabel: "block font-semibold text-sm",
   replayLayout: "grid w-full gap-4",
   replayStatus:
     "mb-2.5 rounded-xl border border-cyan-400/30 bg-cyan-400/10 p-3 text-[var(--accent)]",

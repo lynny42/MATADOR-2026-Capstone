@@ -119,9 +119,16 @@ export default function DashboardPage() {
       }
 
       const targetId = options.clearCode ? null : options.detectId ?? selectedIdRef.current;
+      selectedIdRef.current = targetId;
       setSelectedId(targetId);
       if (targetId) {
-        await loadDetail(targetId, { syncCommunicationAt: false });
+        const occurrenceIndex = options.preserveSnapshot
+          ? snapshotIndexRef.current
+          : options.occurrenceIndex ?? null;
+        await loadDetail(targetId, {
+          syncCommunicationAt: false,
+          occurrenceIndex,
+        });
       } else {
         setSelectedDetail(null);
         setSnapshotIndex(null);
@@ -133,14 +140,25 @@ export default function DashboardPage() {
   }
 
   async function loadDetail(detectId, options = {}) {
-    const { syncCommunicationAt = true, occurrenceIndex = null } = options;
+    const { syncCommunicationAt = true, occurrenceIndex = null, resetOccurrence = false } = options;
     try {
+      let resolvedIndex = occurrenceIndex;
+      if (
+        !resetOccurrence &&
+        (resolvedIndex === null || resolvedIndex === undefined) &&
+        String(detectId) === String(selectedIdRef.current) &&
+        snapshotIndexRef.current !== null &&
+        snapshotIndexRef.current !== undefined
+      ) {
+        resolvedIndex = snapshotIndexRef.current;
+      }
       const query =
-        occurrenceIndex !== null && occurrenceIndex !== undefined
-          ? `?snapshot_index=${occurrenceIndex}`
+        resolvedIndex !== null && resolvedIndex !== undefined
+          ? `?snapshot_index=${resolvedIndex}`
           : "";
       const detail = await apiGet(`/api/detections/${detectId}${query}`);
       setSelectedDetail(detail);
+      selectedIdRef.current = detectId;
       setSelectedId(detectId);
       const frameIndex = detail.occurrence_frame?.index ?? 0;
       setSnapshotIndex(frameIndex);
@@ -610,7 +628,7 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
               type="button"
               key={`${subsystem.name}-${detection.detect_id}`}
               className={ui.codeChip}
-              onClick={() => onSelect(detection.detect_id)}
+              onClick={() => onSelect(detection.detect_id, { resetOccurrence: true })}
             >
               <span className="text-s font-mono">{detection.ma_code}</span>
               <b className="text-[var(--accent)] not-italic">P{detection.phase}</b>
@@ -636,7 +654,7 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
                 type="button"
                 key={threat.detect_id}
                 className={cn(ui.threatRow, severityCardClass(threat.severity))}
-                onClick={() => onSelect(threat.detect_id)}
+                onClick={() => onSelect(threat.detect_id, { resetOccurrence: true })}
               >
                 <span className="text-s font-mono"><strong>{threat.ma_code}</strong></span>
                 {threat.action_mapping_status === "undefined" ? (
@@ -703,7 +721,7 @@ function RightPanel({
             value={selectedId || ""}
             onChange={(event) => {
               if (event.target.value) {
-                onSelect(event.target.value);
+                onSelect(event.target.value, { resetOccurrence: true });
               } else {
                 onCodeClear();
               }
@@ -764,7 +782,7 @@ function CommunicationSummary({ communication, onSelect }) {
               type="button"
               key={detection.detect_id}
               className={cn(ui.codeButton, severityCardClass(detection.severity))}
-              onClick={() => onSelect(detection.detect_id)}
+              onClick={() => onSelect(detection.detect_id, { resetOccurrence: true })}
             >
               <span className={ui.muted}>{index + 1}번째 발생</span>
               <strong>{detection.ma_code}</strong>
@@ -812,7 +830,6 @@ function DetailPanel({ selectedDetail, selectedId, onOccurrenceChange }) {
       ) : null}
       <div className={ui.detailHeading}>
         <div>
-          <p className={ui.eyebrow}>선택 코드 상세</p>
           <h3 className="m-0">{selectedDetail.ma_code}</h3>
           {isUndefinedAction ? (
             <span className={statusPillClass("undefined")}>Action 미매핑</span>
@@ -852,13 +869,11 @@ function DetailPanel({ selectedDetail, selectedId, onOccurrenceChange }) {
         <span className={ui.filterCell}>대상: {selectedDetail.satellite_filter?.target_subsystem || "-"}</span>
         <span className={ui.filterCell}>이벤트: {selectedDetail.satellite_filter?.event_id || "-"}</span>
       </div>
-      {frame?.current_at ? (
-        <p className={ui.muted}>
-          직전 스냅샷: {frame.previous_at || "-"} → 현재: {frame.current_at}
-        </p>
-      ) : null}
 
       <div>
+        {!(selectedDetail.rule_details || []).length ? (
+          <p className={ui.muted}>이 탐지 시각에 활성화된 Rule이 없습니다.</p>
+        ) : null}
         {(selectedDetail.rule_details || []).map((rule) => (
           <article key={rule.rule_id} className={ui.ruleDetail}>
             <div>
@@ -866,11 +881,32 @@ function DetailPanel({ selectedDetail, selectedId, onOccurrenceChange }) {
                 {rule.rule_id} · {rule.name}
               </strong>
               <span className={cn(ui.muted, "block")}>
-                최초 활성화: {rule.first_triggered_at}
+                탐지 시각: {rule.first_triggered_at}
                 {rule.rule_score !== undefined && rule.rule_score !== null
                   ? ` · Rule 점수 ${rule.rule_score}`
                   : ""}
               </span>
+              {(rule.activation_clauses || []).length ? (
+                <ul className={ui.clauseList}>
+                  {rule.activation_clauses.map((clause) => (
+                    <li
+                      key={`${rule.rule_id}-${clause.index ?? clause.label}`}
+                      className={clause.passed ? ui.clausePassed : ui.clauseFailed}
+                    >
+                      <span className={ui.clauseLabel}>
+                        {clause.passed ? "✓" : "○"} {clause.label || clause.op}
+                      </span>
+                      {clause.contribution !== undefined ? (
+                        <span className={ui.muted}>
+                          룰 합산 기여 {clause.contribution} (조건점수 {clause.clause_score} × 가중치{" "}
+                          {clause.weight})
+                        </span>
+                      ) : null}
+                      <span className={ui.muted}>{clause.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
             {(rule.unmapped_actions || []).length ? (
               <div className={ui.actionMapGrid}>
@@ -900,26 +936,6 @@ function DetailPanel({ selectedDetail, selectedId, onOccurrenceChange }) {
                       module: {action.module} · P{action.phase}
                     </span>
                     <span className={ui.muted}>가중치: {action.weight}</span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {Object.entries(rule.columns || {}).length ? (
-              <div className={ui.columnGrid}>
-                {(isUndefinedAction
-                  ? Object.entries(rule.columns)
-                  : getVisibleRuleColumns(rule.columns)
-                ).map(([column, value]) => (
-                  <div key={column} className={ui.columnCard}>
-                    <b>{column}</b>
-                    <span className={ui.muted}>관측: {String(value.observed ?? "-")}</span>
-                    <span className={ui.muted}>
-                      직전 스냅샷: {String(value.previous_observed ?? "-")}
-                    </span>
-                    <span className={ui.muted}>비교 기준: {String(value.normal ?? "-")}</span>
-                    <em className="text-[var(--accent)] not-italic">
-                      직전 1초 대비 변화율: {formatStepMetricLabel(value.abnormal_percent)}
-                    </em>
                   </div>
                 ))}
               </div>

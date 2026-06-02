@@ -1,4 +1,4 @@
-"""JSON-driven rule activation evaluation for MA integrated detection."""
+﻿"""JSON-driven rule activation evaluation for MA integrated detection."""
 
 from __future__ import annotations
 
@@ -31,6 +31,17 @@ def default_activation_for_rule(rule_id: str) -> dict[str, Any] | None:
     return presets.get(rule_id)
 
 
+def _activation_eval_window(activation: dict[str, Any], window: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    try:
+        window_mode = str(activation.get("window_mode", "snapshot_series")).strip()
+        if window_mode == "step" and len(window) >= 2:
+            return window[-2:]
+        return window
+    except Exception as error:
+        logger.error("activation eval window failed: %s", error)
+        return window
+
+
 def evaluate_rule_activation(
     activation: dict[str, Any],
     window: list[dict[str, Any]],
@@ -42,26 +53,73 @@ def evaluate_rule_activation(
 ) -> float:
     """Evaluate one rule activation spec and return a score in [0, 1]."""
     try:
+        explained = explain_rule_activation(
+            activation,
+            window,
+            baseline_manager,
+            z_thresholds,
+            absolute_thresholds,
+            legacy_evaluator=legacy_evaluator,
+            rule_id=rule_id,
+        )
+        return float(explained.get("rule_score", 0.0) or 0.0)
+    except Exception as error:
+        logger.error("rule activation evaluation failed: %s", error)
+        return 0.0
+
+
+def explain_rule_activation(
+    activation: dict[str, Any],
+    window: list[dict[str, Any]],
+    baseline_manager: BaselineManager,
+    z_thresholds: dict[str, float],
+    absolute_thresholds: dict[str, Any],
+    *,
+    legacy_evaluator: Any | None = None,
+    rule_id: str = "",
+    rule_name: str = "",
+) -> dict[str, Any]:
+    """Return rule score plus per-clause activation reasons for the UI."""
+    try:
         if activation.get("op") == "legacy_builtin":
-            if legacy_evaluator is None or not rule_id:
-                return 0.0
-            return float(legacy_evaluator(rule_id, window))
+            score = 0.0
+            if legacy_evaluator is not None and rule_id:
+                score = float(legacy_evaluator(rule_id, window))
+            hint = _legacy_rule_hint(rule_id, rule_name)
+            return {
+                "rule_score": round(score, 4),
+                "triggered": score > 0.0,
+                "clauses": [
+                    {
+                        "index": 0,
+                        "op": "legacy_builtin",
+                        "label": "내장 Evidence 룰",
+                        "passed": score > 0.0,
+                        "clause_score": round(score, 4),
+                        "weight": 1.0,
+                        "contribution": round(score, 4),
+                        "reason": hint,
+                    }
+                ],
+                "summary": hint if score > 0.0 else "이 시점 윈도우에서 내장 룰 임계치 미달",
+            }
 
-        window_mode = str(activation.get("window_mode", "snapshot_series")).strip()
-        if window_mode == "step" and len(window) >= 2:
-            eval_window = window[-2:]
-        else:
-            eval_window = window
-
+        eval_window = _activation_eval_window(activation, window)
         clauses = activation.get("clauses", [])
         if not clauses:
-            return 0.0
+            return {
+                "rule_score": 0.0,
+                "triggered": False,
+                "clauses": [],
+                "summary": "activation 정의에 clause가 없습니다",
+            }
 
-        scores: list[float] = []
-        for clause in clauses:
+        explained_clauses: list[dict[str, Any]] = []
+        total = 0.0
+        for index, clause in enumerate(clauses):
             if not isinstance(clause, dict):
                 continue
-            clause_score = _evaluate_clause(
+            item = _explain_clause(
                 clause,
                 eval_window,
                 baseline_manager,
@@ -69,12 +127,215 @@ def evaluate_rule_activation(
                 absolute_thresholds,
             )
             weight = float(clause.get("weight", 0.0) or 0.0)
-            scores.append(clause_score * weight)
-        total = sum(scores)
-        return max(0.0, min(total, 1.0))
+            contribution = float(item.get("clause_score", 0.0) or 0.0) * weight
+            total += contribution
+            explained_clauses.append(
+                {
+                    "index": index,
+                    "op": str(clause.get("op", "")),
+                    "label": str(item.get("label", clause.get("op", "clause"))),
+                    "passed": contribution > 0.01,
+                    "clause_score": round(float(item.get("clause_score", 0.0) or 0.0), 4),
+                    "weight": round(weight, 4),
+                    "contribution": round(contribution, 4),
+                    "delta_percent": item.get("delta_percent"),
+                    "delta_display": item.get("delta_display"),
+                    "reason": str(item.get("reason", "")),
+                }
+            )
+
+        rule_score = max(0.0, min(total, 1.0))
+        passed_reasons = [item["reason"] for item in explained_clauses if item.get("passed") and item.get("reason")]
+        summary = " · ".join(passed_reasons) if passed_reasons else "조건 미충족"
+        return {
+            "rule_score": round(rule_score, 4),
+            "triggered": rule_score > 0.0,
+            "clauses": explained_clauses,
+            "summary": summary,
+        }
     except Exception as error:
-        logger.error("rule activation evaluation failed: %s", error)
-        return 0.0
+        logger.error("rule activation explain failed: %s", error)
+        return {
+            "rule_score": 0.0,
+            "triggered": False,
+            "clauses": [],
+            "summary": str(error),
+        }
+
+
+def _legacy_rule_hint(rule_id: str, rule_name: str) -> str:
+    hints = {
+        "E-05": "리셋 없이 무결성 오류·해시 불일치가 동시에 지속",
+        "E-11": "IMU 분산 급감·전력 상승 등 센서 재생(고스트 텔레메트리) 패턴",
+        "E-12": "이벤트 로그·CRC·큐 카운터 동시 이상",
+        "E-X3": "SEU 위장형: 해시 불일치·리셋·힙/CPU 복합 징후",
+        "P1-X01": "Phase1 복합: CRC·큐·전력·로그 동시 급증",
+        "P3-X01": "QERR·TCMD·토커 동시 이상 (자세 제어 변조 의심)",
+        "S2-X01": "WBN 고착 + QERR 급증 (센서-자세 불일치)",
+    }
+    if rule_id in hints:
+        return hints[rule_id]
+    if rule_name:
+        return f"{rule_name} 내장 조건 충족"
+    return "내장 Evidence 룰 점수 기준 충족"
+
+
+def _explain_clause(
+    clause: dict[str, Any],
+    window: list[dict[str, Any]],
+    baseline_manager: BaselineManager,
+    z_thresholds: dict[str, float],
+    absolute_thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        op = str(clause.get("op", "")).strip()
+        latest = window[-1] if window else {}
+        if op == "nonzero":
+            column = str(clause.get("column", ""))
+            values = [_numeric(snapshot, column) for snapshot in window]
+            hit = any(value > 0 for value in values)
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"{column} > 0",
+                "reason": f"{column} 비영(0 초과) 스냅샷 존재 (최신={values[-1] if values else 0})"
+                if hit
+                else f"{column}가 0인 상태만 관측됨",
+            }
+        if op == "mismatch":
+            left = str(clause.get("left", ""))
+            right = str(clause.get("right", ""))
+            pairs = [(snapshot.get(left), snapshot.get(right)) for snapshot in window]
+            hit = any(left_value != right_value for left_value, right_value in pairs)
+            latest_left, latest_right = pairs[-1] if pairs else (None, None)
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"{left} ≠ {right}",
+                "reason": f"불일치: {left}={latest_left}, {right}={latest_right}"
+                if hit
+                else f"{left}와 {right}가 일치함",
+            }
+        if op == "equals_baseline":
+            column = str(clause.get("column", ""))
+            stats = baseline_manager.get_stats(latest, column)
+            value = latest.get(column)
+            hit = value == stats.mean
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"{column} = baseline",
+                "reason": f"{column}={value}, baseline={stats.mean}"
+                if hit
+                else f"{column}={value}, baseline={stats.mean} (불일치)",
+            }
+        if op == "changed_from_baseline":
+            column = str(clause.get("column", ""))
+            stats = baseline_manager.get_stats(latest, column)
+            value = latest.get(column)
+            hit = column in latest and value != stats.mean
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"{column} baseline 이탈",
+                "reason": f"{column}={value}, baseline={stats.mean}"
+                if hit
+                else f"{column}가 baseline과 동일",
+            }
+        if op == "absolute_gt":
+            column = str(clause.get("column", ""))
+            threshold = clause.get("threshold")
+            if threshold is None:
+                key = str(clause.get("threshold_key", ""))
+                threshold = absolute_thresholds.get(key, 0)
+            threshold_value = float(threshold)
+            observed = _numeric(latest, column)
+            hit = observed > threshold_value
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"{column} > {threshold_value}",
+                "reason": f"{column}={observed} (임계 {threshold_value})",
+            }
+        if op == "z_max":
+            column = str(clause.get("column", ""))
+            direction = str(clause.get("direction", "increase"))
+            score = _z_max(window, column, direction, baseline_manager, z_thresholds)
+            stats = baseline_manager.get_stats(latest, column)
+            z_value = baseline_manager.compute_z(_numeric(latest, column), stats)
+            return {
+                "clause_score": score,
+                "label": f"{column} z-score σ ({direction})",
+                "reason": (
+                    f"baseline 대비 z={z_value:.2f}σ → 정규화 점수 {score:.2f} "
+                    f"(SOFT={z_thresholds.get('SOFT')}σ, % 아님)"
+                ),
+            }
+        if op == "step_delta":
+            column = str(clause.get("column", ""))
+            direction = str(clause.get("direction", "increase"))
+            min_percent = float(clause.get("min_delta_percent", 0.0) or 0.0)
+            score, best_previous, best_current = _step_delta_best_pair(
+                window,
+                column,
+                direction,
+                min_percent,
+            )
+            delta_percent = None
+            delta_display = None
+            if best_previous is not None and best_current is not None:
+                reason = format_step_change_reason(
+                    column,
+                    best_current,
+                    best_previous,
+                    direction=direction,
+                    min_percent=min_percent,
+                )
+                delta_percent, delta_display = _step_delta_display(
+                    column,
+                    best_current,
+                    best_previous,
+                )
+                if delta_display:
+                    label = f"{column} 직전1초 {delta_display} ({direction})"
+                else:
+                    label = f"{column} 직전1초 변화 ({direction})"
+            else:
+                reason = "윈도우 내 유의미한 연속 변화 없음"
+                label = f"{column} 직전1초 변화 없음"
+            return {
+                "clause_score": score,
+                "label": label,
+                "delta_percent": delta_percent,
+                "delta_display": delta_display,
+                "reason": reason,
+            }
+        if op == "qerr_spike":
+            threshold = float(clause.get("threshold", 0.3) or 0.3)
+            max_qerr = max(
+                abs(_numeric(snapshot, f"QERR_{index}"))
+                for snapshot in window
+                for index in range(4)
+            )
+            hit = max_qerr > threshold
+            return {
+                "clause_score": 1.0 if hit else 0.0,
+                "label": f"QERR spike > {threshold}",
+                "reason": f"max|QERR|={max_qerr:.3f} (임계 {threshold})",
+            }
+        if op == "repeat_ratio":
+            column = str(clause.get("column", ""))
+            min_ratio = float(clause.get("min_ratio", 0.1) or 0.1)
+            score = repeat_ratio_score(window, column, min_ratio)
+            hits = sum(1 for snapshot in window if _numeric(snapshot, column) > 0.0)
+            ratio = hits / len(window) if window else 0.0
+            return {
+                "clause_score": score,
+                "label": f"{column} repeat_ratio",
+                "reason": (
+                    f"윈도우 {hits}/{len(window)}샘플 비영 "
+                    f"({ratio * 100.0:.1f}%, 최소 {min_ratio * 100.0:.1f}%)"
+                ),
+            }
+        return {"clause_score": 0.0, "label": op or "unknown", "reason": "지원하지 않는 op"}
+    except Exception as error:
+        logger.error("clause explain failed: %s", error)
+        return {"clause_score": 0.0, "label": "error", "reason": str(error)}
 
 
 def _evaluate_clause(
@@ -85,56 +346,14 @@ def _evaluate_clause(
     absolute_thresholds: dict[str, Any],
 ) -> float:
     try:
-        op = str(clause.get("op", "")).strip()
-        if op == "nonzero":
-            column = str(clause.get("column", ""))
-            return 1.0 if any(_numeric(snapshot, column) > 0 for snapshot in window) else 0.0
-        if op == "mismatch":
-            left = str(clause.get("left", ""))
-            right = str(clause.get("right", ""))
-            return 1.0 if any(snapshot.get(left) != snapshot.get(right) for snapshot in window) else 0.0
-        if op == "equals_baseline":
-            column = str(clause.get("column", ""))
-            for snapshot in window:
-                stats = baseline_manager.get_stats(snapshot, column)
-                if snapshot.get(column) == stats.mean:
-                    return 1.0
-            return 0.0
-        if op == "changed_from_baseline":
-            column = str(clause.get("column", ""))
-            for snapshot in window:
-                stats = baseline_manager.get_stats(snapshot, column)
-                if column in snapshot and snapshot.get(column) != stats.mean:
-                    return 1.0
-            return 0.0
-        if op == "absolute_gt":
-            column = str(clause.get("column", ""))
-            threshold = clause.get("threshold")
-            if threshold is None:
-                key = str(clause.get("threshold_key", ""))
-                threshold = absolute_thresholds.get(key, 0)
-            threshold_value = float(threshold)
-            return 1.0 if any(_numeric(snapshot, column) > threshold_value for snapshot in window) else 0.0
-        if op == "z_max":
-            column = str(clause.get("column", ""))
-            direction = str(clause.get("direction", "increase"))
-            return _z_max(window, column, direction, baseline_manager, z_thresholds)
-        if op == "step_delta":
-            column = str(clause.get("column", ""))
-            direction = str(clause.get("direction", "increase"))
-            min_percent = float(clause.get("min_delta_percent", 0.0) or 0.0)
-            return _step_delta_score(window, column, direction, min_percent)
-        if op == "qerr_spike":
-            threshold = float(clause.get("threshold", 0.3) or 0.3)
-            return 1.0 if any(
-                any(abs(_numeric(snapshot, f"QERR_{index}")) > threshold for index in range(4))
-                for snapshot in window
-            ) else 0.0
-        if op == "repeat_ratio":
-            column = str(clause.get("column", ""))
-            min_ratio = float(clause.get("min_ratio", 0.1) or 0.1)
-            return repeat_ratio_score(window, column, min_ratio)
-        return 0.0
+        explained = _explain_clause(
+            clause,
+            window,
+            baseline_manager,
+            z_thresholds,
+            absolute_thresholds,
+        )
+        return float(explained.get("clause_score", 0.0) or 0.0)
     except Exception as error:
         logger.error("clause evaluation failed: %s", error)
         return 0.0
@@ -168,12 +387,12 @@ def compute_step_change_percent(
     try:
         if previous is None:
             return None
-        current_value = current.get(column)
-        previous_value = previous.get(column)
-        if not isinstance(current_value, (int, float)) or not isinstance(previous_value, (int, float)):
-            return None
+        current_value = _numeric(current, column)
+        previous_value = _numeric(previous, column)
         if float(previous_value) == 0.0:
-            return 0.0 if float(current_value) == 0.0 else 100.0
+            if float(current_value) == 0.0:
+                return 0.0
+            return None
         change = ((float(current_value) - float(previous_value)) / abs(float(previous_value))) * 100.0
         return round(change, 2)
     except Exception as error:
@@ -181,22 +400,96 @@ def compute_step_change_percent(
         return None
 
 
-def _step_delta_score(
+def _step_delta_display(
+    column: str,
+    current: dict[str, Any],
+    previous: dict[str, Any],
+) -> tuple[float | None, str | None]:
+    """Return (raw_percent, display_text) for the best step pair."""
+    try:
+        previous_value = _numeric(previous, column)
+        current_value = _numeric(current, column)
+        if float(previous_value) == 0.0:
+            if float(current_value) == 0.0:
+                return 0.0, "0%"
+            return None, f"{previous_value:g}→{current_value:g}"
+        change = compute_step_change_percent(column, current, previous)
+        if change is None:
+            return None, None
+        return float(change), f"{change:+.1f}%"
+    except Exception as error:
+        logger.error("step delta display failed for %s: %s", column, error)
+        return None, None
+
+
+def format_step_change_reason(
+    column: str,
+    current: dict[str, Any],
+    previous: dict[str, Any],
+    *,
+    direction: str = "increase",
+    min_percent: float = 0.0,
+) -> str:
+    """Human-readable delta text; avoids misleading 100% when the previous value was zero."""
+    try:
+        current_value = _numeric(current, column)
+        previous_value = _numeric(previous, column)
+        previous_at = previous.get("UPDATED_AT", "?")
+        current_at = current.get("UPDATED_AT", "?")
+        if float(previous_value) == 0.0:
+            if float(current_value) == 0.0:
+                return f"{previous_at}→{current_at}: {column} 0→0 (변화 없음)"
+            return (
+                f"{previous_at}→{current_at}: {column} "
+                f"{previous_value:g}→{current_value:g} (이전값 0, % 대신 절대 증가)"
+            )
+        change = compute_step_change_percent(column, current, previous)
+        if change is None:
+            return f"{previous_at}→{current_at}: {column} 변화 없음"
+        signed = float(change)
+        if direction == "decrease":
+            signed = -signed
+        if signed <= 0:
+            return (
+                f"{previous_at}→{current_at}: {column} "
+                f"{previous_value:g}→{current_value:g} ({change:+.1f}%, {direction} 방향 미충족)"
+            )
+        threshold_note = f", 임계 {min_percent:g}%" if min_percent > 0 else ""
+        return (
+            f"{previous_at}→{current_at}: {column} "
+            f"{previous_value:g}→{current_value:g} ({change:+.1f}%{threshold_note})"
+        )
+    except Exception as error:
+        logger.error("step change reason format failed for %s: %s", column, error)
+        return f"{column} 변화 설명 생성 실패"
+
+
+def _step_delta_best_pair(
     window: list[dict[str, Any]],
     column: str,
     direction: str,
     min_percent: float,
-) -> float:
-    """Score the strongest consecutive-snapshot delta inside the analysis series."""
+) -> tuple[float, dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (score, previous_snapshot, current_snapshot) for the strongest qualifying step."""
     try:
         if len(window) < 2:
-            return 0.0
+            return 0.0, None, None
         best_score = 0.0
+        best_previous: dict[str, Any] | None = None
+        best_current: dict[str, Any] | None = None
         for index in range(1, len(window)):
             previous = window[index - 1]
             current = window[index]
             change = compute_step_change_percent(column, current, previous)
             if change is None:
+                previous_value = _numeric(previous, column)
+                current_value = _numeric(current, column)
+                if float(previous_value) == 0.0 and float(current_value) > 0.0:
+                    pair_score = min(1.0, float(current_value) / max(min_percent, 1.0))
+                    if direction != "decrease" and pair_score > best_score:
+                        best_score = pair_score
+                        best_previous = previous
+                        best_current = current
                 continue
             signed = float(change)
             if direction == "decrease":
@@ -207,8 +500,26 @@ def _step_delta_score(
                 pair_score = min(0.3, signed / max(min_percent, 1.0))
             else:
                 pair_score = min(1.0, signed / 100.0)
-            best_score = max(best_score, pair_score)
-        return best_score
+            if pair_score > best_score:
+                best_score = pair_score
+                best_previous = previous
+                best_current = current
+        return best_score, best_previous, best_current
+    except Exception as error:
+        logger.error("step delta best pair failed for %s: %s", column, error)
+        return 0.0, None, None
+
+
+def _step_delta_score(
+    window: list[dict[str, Any]],
+    column: str,
+    direction: str,
+    min_percent: float,
+) -> float:
+    """Score the strongest consecutive-snapshot delta inside the analysis series."""
+    try:
+        score, _, _ = _step_delta_best_pair(window, column, direction, min_percent)
+        return score
     except Exception as error:
         logger.error("step delta score failed for %s: %s", column, error)
         return 0.0

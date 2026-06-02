@@ -1,4 +1,4 @@
-"""Evidence rule scoring functions for MA integrated detection."""
+﻿"""Evidence rule scoring functions for MA integrated detection."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import statistics
 from typing import Any, Callable
 
 from ma_detector.core.baseline import BaselineManager
-from ma_detector.core.rule_activation import evaluate_rule_activation, repeat_ratio_score
+from ma_detector.core.rule_activation import (
+    evaluate_rule_activation,
+    explain_rule_activation,
+    repeat_ratio_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,61 @@ class EvidenceRules:
         except Exception as error:
             logger.error("legacy rule evaluation failed for %s: %s", rule_id, error)
             return 0.0
+
+    def explain(
+        self,
+        rule_id: str,
+        window: list[dict[str, Any]],
+        rule_def: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return activation score and per-clause reasons for one rule at this window."""
+        try:
+            from ma_detector.db.gs_repository import sanitize_rule_engine_fields
+
+            for snapshot in window:
+                sanitize_rule_engine_fields(snapshot)
+
+            rule_def = rule_def or {}
+            activation = rule_def.get("activation")
+            if activation:
+                explained = explain_rule_activation(
+                    activation,
+                    window,
+                    self.bm,
+                    self.z_thr,
+                    self.abs_thr,
+                    legacy_evaluator=self._evaluate_legacy,
+                    rule_id=rule_id,
+                    rule_name=str(rule_def.get("name", "")),
+                )
+            elif rule_id in self._func_map:
+                explained = explain_rule_activation(
+                    {"op": "legacy_builtin"},
+                    window,
+                    self.bm,
+                    self.z_thr,
+                    self.abs_thr,
+                    legacy_evaluator=self._evaluate_legacy,
+                    rule_id=rule_id,
+                    rule_name=str(rule_def.get("name", "")),
+                )
+            else:
+                return {
+                    "rule_score": 0.0,
+                    "triggered": False,
+                    "clauses": [],
+                    "summary": f"알 수 없는 룰 ID: {rule_id}",
+                }
+
+            return explained
+        except Exception as error:
+            logger.error("rule explain failed for %s: %s", rule_id, error)
+            return {
+                "rule_score": 0.0,
+                "triggered": False,
+                "clauses": [],
+                "summary": str(error),
+            }
 
     @staticmethod
     def _clamp(value: float) -> float:

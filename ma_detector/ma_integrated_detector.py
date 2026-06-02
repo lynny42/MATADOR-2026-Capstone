@@ -974,6 +974,44 @@ class MAIntegratedDetector:
             logger.error("step snapshot lookup failed: %s", error)
             return None, None
 
+    def explain_rules_at_time(
+        self,
+        reference_time: str,
+        rule_ids: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Re-evaluate rules on the DB snapshot series ending at reference_time; return activation reasons."""
+        try:
+            if not reference_time:
+                return {}
+            series = self.get_snapshot_series(reference_time)
+            series = self._compute_imu_variance(series)
+            if not series:
+                return {}
+
+            target_ids = rule_ids or list(self._rule_registry.keys())
+            explanations: dict[str, dict[str, Any]] = {}
+            integrity_cfg = self._threshold_config.get("integrity_rules", {})
+            integrity_floor = float(integrity_cfg.get("IS_VIOLATED_SCORE_FLOOR", 0.65))
+            latest = series[-1] if series else {}
+
+            for rule_id in target_ids:
+                rule_def = self._rule_registry.get(rule_id, {})
+                if not rule_def.get("enabled", True):
+                    continue
+                explained = self._evidence_rules.explain(rule_id, series, rule_def)
+                rule_score = float(explained.get("rule_score", 0.0) or 0.0)
+                if int(latest.get("IS_VIOLATED", 0) or 0) == 1 and rule_id in ("E-03", "E-X3", "E-05"):
+                    rule_score = max(rule_score, integrity_floor)
+                    explained["rule_score"] = round(rule_score, 4)
+                    explained["triggered"] = rule_score > 0.0
+                score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
+                explained["meets_threshold"] = rule_score >= score_threshold and rule_score > 0.0
+                explanations[rule_id] = explained
+            return explanations
+        except Exception as error:
+            logger.error("explain rules at time failed: %s", error)
+            return {}
+
     def _build_evaluation_window(self) -> list[dict[str, Any]]:
         """Build rule evaluation window as a 10-minute 1 Hz snapshot series (up to 600 points)."""
         try:

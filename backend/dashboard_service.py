@@ -284,6 +284,7 @@ class DashboardService:
                 snapshot,
                 detection,
                 previous_snapshot,
+                detect_time=detect_time,
             )
             payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
             payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
@@ -1069,6 +1070,7 @@ class DashboardService:
         snapshot: dict[str, Any],
         detection: dict[str, Any],
         previous_snapshot: dict[str, Any] | None = None,
+        detect_time: str | None = None,
     ) -> list[dict[str, Any]]:
         rules = self.detector.get_rule_registry()
         actions = self.detector.get_action_registry()
@@ -1078,6 +1080,8 @@ class DashboardService:
             if item.get("rule_id")
         }
         rule_ids = detection.get("triggered_rule_ids") or list(evidence_keys.keys())
+        reference_time = detect_time or str(detection.get("detect_time") or "")
+        live_explanations = self.detector.explain_rules_at_time(reference_time, list(rule_ids))
         details = []
         for rule_id in rule_ids:
             rule_name = evidence_keys.get(rule_id) or rules.get(rule_id, {}).get("name", rule_id)
@@ -1105,13 +1109,25 @@ class DashboardService:
                 else:
                     mapped_actions.append(entry)
             result = triggered_results.get(rule_id, {})
+            activation = live_explanations.get(rule_id, {})
+            rule_score = activation.get("rule_score", result.get("score"))
+            triggered = activation.get("triggered", result.get("triggered", rule_id in evidence_keys))
+            meets_threshold = activation.get(
+                "meets_threshold",
+                self._rule_active_at_occurrence(activation, result, rule),
+            )
+            if not meets_threshold:
+                continue
             details.append(
                 {
                     "rule_id": rule_id,
                     "name": rule_name,
-                    "rule_score": result.get("score"),
-                    "triggered": result.get("triggered", rule_id in evidence_keys),
-                    "first_triggered_at": detection.get("detect_time"),
+                    "rule_score": rule_score,
+                    "triggered": triggered,
+                    "activation_summary": activation.get("summary", ""),
+                    "activation_clauses": activation.get("clauses", []),
+                    "meets_threshold": meets_threshold,
+                    "first_triggered_at": reference_time or detection.get("detect_time"),
                     "subsystems": rule.get("subsystems", []),
                     "columns": column_values,
                     "contributes_to": contributes,
@@ -1123,6 +1139,29 @@ class DashboardService:
                 }
             )
         return details
+
+    @staticmethod
+    def _rule_active_at_occurrence(
+        activation: dict[str, Any],
+        stored_result: dict[str, Any],
+        rule_def: dict[str, Any],
+    ) -> bool:
+        """True when the rule score exceeds score_threshold at this detect_time."""
+        try:
+            if activation:
+                if activation.get("meets_threshold") is True:
+                    return True
+                rule_score = float(activation.get("rule_score", 0.0) or 0.0)
+                score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
+                return rule_score > 0.0 and rule_score >= score_threshold
+            if stored_result.get("triggered"):
+                rule_score = float(stored_result.get("score", 0.0) or 0.0)
+                score_threshold = float(rule_def.get("score_threshold", 0.0) or 0.0)
+                return rule_score > 0.0 and rule_score >= score_threshold
+            return False
+        except Exception as error:
+            logger.error("rule active check failed: %s", error)
+            return False
 
     def _build_column_detail(
         self,

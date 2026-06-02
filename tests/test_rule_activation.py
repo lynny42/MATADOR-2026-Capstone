@@ -5,7 +5,12 @@ from __future__ import annotations
 import unittest
 
 from ma_detector.core.baseline import BaselineManager
-from ma_detector.core.rule_activation import evaluate_rule_activation, merge_default_activations, repeat_ratio_score
+from ma_detector.core.rule_activation import (
+    evaluate_rule_activation,
+    explain_rule_activation,
+    merge_default_activations,
+    repeat_ratio_score,
+)
 
 
 class RuleActivationTest(unittest.TestCase):
@@ -119,6 +124,39 @@ class RuleActivationTest(unittest.TestCase):
         self.assertGreater(step_score, 0.0)
         self.assertEqual(step_score, short_score)
         self.assertEqual(flat_score, 0.0)
+
+    def test_explain_returns_clause_reasons(self) -> None:
+        baseline = BaselineManager()
+        activation = {
+            "window_mode": "step",
+            "clauses": [
+                {
+                    "op": "step_delta",
+                    "column": "CMDREJECTEDCOUNTER",
+                    "direction": "increase",
+                    "weight": 1.0,
+                }
+            ],
+        }
+        window = [
+            {"UPDATED_AT": "t1", "CMDREJECTEDCOUNTER": 1},
+            {"UPDATED_AT": "t2", "CMDREJECTEDCOUNTER": 5},
+        ]
+        explained = explain_rule_activation(
+            activation,
+            window,
+            baseline,
+            {"SOFT": 2, "HARD": 3, "SEVERE": 4},
+            {},
+        )
+        self.assertTrue(explained["triggered"])
+        self.assertEqual(len(explained["clauses"]), 1)
+        clause = explained["clauses"][0]
+        self.assertIn("직전1초", clause["label"])
+        self.assertIn("%", clause["label"])
+        self.assertIsNotNone(clause.get("delta_display"))
+        self.assertTrue(clause["reason"])
+        self.assertTrue(explained["summary"])
 
     def test_step_delta_uses_max_pair_in_series(self) -> None:
         baseline = BaselineManager()
