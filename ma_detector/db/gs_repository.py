@@ -1,4 +1,4 @@
-"""MySQL read/write helpers for ground-station tables."""
+﻿"""MySQL read/write helpers for ground-station tables."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ _JSON_COLUMNS = frozenset(
         "RAW_PAYLOAD",
         "PAYLOAD",
         "EVIDENCE_KEYS",
+        "DETECT_TIMES",
         "TRIGGERED_RULE_IDS",
         "UNREGISTERED_ACTION_IDS",
         "TRIGGERED_RULE_RESULTS",
@@ -38,6 +39,10 @@ _JSON_COLUMNS = frozenset(
         "SOURCE_RECORDS",
     }
 )
+
+_GRADE_RANK = {"CONFIRMED": 3, "SUSPECTED": 2, "PENDING": 1, "DISCARDED": 0}
+DETECT_TIMES_EVIDENCE_KEY = "__detect_times__"
+_DETECT_TIMES_EVIDENCE_KEY = DETECT_TIMES_EVIDENCE_KEY
 
 # HISTORY_ID is not global-auto: gs_tlm_history uses AUTO_INCREMENT (omitted from INSERT row),
 # but gs_pwr_meta must store the parent HISTORY_ID FK explicitly.
@@ -533,6 +538,246 @@ def insert_pwr_meta_rows(packet: dict[str, Any], history_id: int | None = None) 
         return False
 
 
+def _normalize_detect_time(value: Any) -> str:
+    """Normalize one detect instant for DETECT_TIMES storage."""
+    try:
+        from ma_detector.core.packet_protocol import time_key_from_value
+
+        key = time_key_from_value(value)
+        if key:
+            return key.replace("T", " ")
+        text = str(value or "").strip()
+        return text
+    except Exception as error:
+        logger.error("detect time normalize failed: %s", error)
+        return str(value or "")
+
+
+def _parse_detect_times(row: dict[str, Any]) -> list[str]:
+    """Read all stored detect instants from DETECT_TIMES or legacy DETECT_TIME."""
+    try:
+        parsed = _parse_json_value(row.get("DETECT_TIMES"))
+        if isinstance(parsed, list):
+            return [_normalize_detect_time(item) for item in parsed if item]
+        evidence = _parse_json_value(row.get("EVIDENCE_KEYS"))
+        if isinstance(evidence, dict):
+            embedded = evidence.get(_DETECT_TIMES_EVIDENCE_KEY)
+            if isinstance(embedded, list):
+                return [_normalize_detect_time(item) for item in embedded if item]
+        if row.get("DETECT_TIME"):
+            return [_normalize_detect_time(row.get("DETECT_TIME"))]
+        return []
+    except Exception as error:
+        logger.error("detect times parse failed: %s", error)
+        return []
+
+
+def _write_detect_times(payload: dict[str, Any], times: list[str]) -> None:
+    """Persist detect instants on a dashboard row (column or evidence fallback)."""
+    try:
+        cleaned = [_normalize_detect_time(item) for item in times if item]
+        if "DETECT_TIMES" in _table_columns(TABLE_ANOMALY_DASHBOARD):
+            payload["DETECT_TIMES"] = cleaned
+            return
+        evidence = _parse_json_value(payload.get("EVIDENCE_KEYS"))
+        if not isinstance(evidence, dict):
+            evidence = {}
+        evidence = dict(evidence)
+        evidence[_DETECT_TIMES_EVIDENCE_KEY] = cleaned
+        payload["EVIDENCE_KEYS"] = evidence
+    except Exception as error:
+        logger.error("detect times write failed: %s", error)
+
+
+def _pick_higher_grade(current: Any, candidate: Any) -> str:
+    try:
+        current_grade = str(current or "")
+        candidate_grade = str(candidate or "")
+        if _GRADE_RANK.get(candidate_grade, 0) >= _GRADE_RANK.get(current_grade, 0):
+            return candidate_grade
+        return current_grade
+    except Exception as error:
+        logger.error("grade merge failed: %s", error)
+        return str(current or candidate or "")
+
+
+def _merge_triggered_rule_ids(existing: Any, incoming: Any) -> list[str]:
+    try:
+        merged: list[str] = []
+        for source in (existing, incoming):
+            if isinstance(source, list):
+                for rule_id in source:
+                    text = str(rule_id)
+                    if text and text not in merged:
+                        merged.append(text)
+            elif isinstance(source, dict):
+                for rule_id in source:
+                    text = str(rule_id)
+                    if text and text not in merged:
+                        merged.append(text)
+        return merged
+    except Exception as error:
+        logger.error("triggered rule merge failed: %s", error)
+        return []
+
+
+def ensure_dashboard_detect_times_column() -> bool:
+    """Add DETECT_TIMES JSON column when missing (idempotent)."""
+    try:
+        if not is_db_available():
+            return False
+        refresh_column_cache()
+        if "DETECT_TIMES" in _table_columns(TABLE_ANOMALY_DASHBOARD):
+            return True
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                ALTER TABLE `{TABLE_ANOMALY_DASHBOARD}`
+                ADD COLUMN `DETECT_TIMES` JSON NULL
+                COMMENT 'All detect instants for this MA_CODE'
+                AFTER `DETECT_TIME`
+                """
+            )
+            cursor.close()
+        refresh_column_cache()
+        logger.info("added %s.DETECT_TIMES column", TABLE_ANOMALY_DASHBOARD)
+        return True
+    except Exception as error:
+        logger.warning("DETECT_TIMES column ensure failed: %s", error)
+        return False
+
+
+def query_dashboard_by_ma_code(ma_code: str) -> dict[str, Any] | None:
+    """Return the latest dashboard row for one MA_CODE."""
+    try:
+        if not is_db_available() or not ma_code:
+            return None
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"""
+                SELECT * FROM `{TABLE_ANOMALY_DASHBOARD}`
+                WHERE MA_CODE = %s
+                ORDER BY DETECT_ID DESC
+                LIMIT 1
+                """,
+                (str(ma_code),),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        if not row:
+            return None
+        item = dict(row)
+        for col in _JSON_COLUMNS:
+            if col in item:
+                item[col] = _parse_json_value(item[col])
+        return item
+    except Exception as error:
+        logger.error("dashboard lookup by ma_code failed: %s", error)
+        return None
+
+
+def _update_dashboard_row(detect_id: int, updates: dict[str, Any]) -> bool:
+    try:
+        if not is_db_available():
+            return False
+        assignments: list[str] = []
+        params: list[Any] = []
+        allowed = set(_table_columns(TABLE_ANOMALY_DASHBOARD))
+        for column, value in updates.items():
+            if column not in allowed or column in _AUTO_COLUMNS:
+                continue
+            if value is None:
+                continue
+            assignments.append(f"`{column}` = %s")
+            params.append(_serialize_value(column, value))
+        if not assignments:
+            return False
+        params.append(int(detect_id))
+        sql = f"UPDATE `{TABLE_ANOMALY_DASHBOARD}` SET {', '.join(assignments)} WHERE DETECT_ID = %s"
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            cursor.close()
+        return True
+    except Exception as error:
+        logger.error("dashboard update failed: %s", error)
+        return False
+
+
+parse_dashboard_detect_times = _parse_detect_times
+write_dashboard_detect_times = _write_detect_times
+pick_higher_ma_grade = _pick_higher_grade
+merge_dashboard_triggered_rule_ids = _merge_triggered_rule_ids
+normalize_dashboard_detect_time = _normalize_detect_time
+
+
+def append_dashboard_occurrence(row: dict[str, Any]) -> int | None:
+    """Insert one MA_CODE row, or append DETECT_TIME when the same MA_CODE already exists."""
+    try:
+        if not is_db_available():
+            return None
+        ensure_dashboard_detect_times_column()
+        ma_code = str(row.get("MA_CODE") or "").strip()
+        if not ma_code:
+            return insert_dashboard_row(row)
+
+        detect_time = _normalize_detect_time(row.get("DETECT_TIME"))
+        existing = query_dashboard_by_ma_code(ma_code)
+        if existing is None:
+            payload = dict(row)
+            times = [detect_time] if detect_time else []
+            if times:
+                payload["DETECT_TIME"] = times[-1]
+                _write_detect_times(payload, times)
+            return insert_dashboard_row(payload)
+
+        detect_id = int(existing["DETECT_ID"])
+        times = _parse_detect_times(existing)
+        if detect_time and detect_time not in times:
+            times.append(detect_time)
+        times.sort()
+
+        merged_rules = _merge_triggered_rule_ids(
+            existing.get("TRIGGERED_RULE_IDS"),
+            row.get("TRIGGERED_RULE_IDS"),
+        )
+        updates: dict[str, Any] = {
+            "DETECT_TIME": times[-1] if times else row.get("DETECT_TIME"),
+            "CONFIDENCE_SCORE": max(
+                float(existing.get("CONFIDENCE_SCORE") or 0.0),
+                float(row.get("CONFIDENCE_SCORE") or 0.0),
+            ),
+            "GRADE": _pick_higher_grade(existing.get("GRADE"), row.get("GRADE")),
+            "CORROBORATION_COUNT": max(
+                int(existing.get("CORROBORATION_COUNT") or 0),
+                int(row.get("CORROBORATION_COUNT") or 0),
+            ),
+            "TRIGGERED_RULE_IDS": merged_rules,
+            "EVIDENCE_KEYS": row.get("EVIDENCE_KEYS") or existing.get("EVIDENCE_KEYS"),
+            "TRIGGERED_RULE_RESULTS": row.get("TRIGGERED_RULE_RESULTS")
+            or existing.get("TRIGGERED_RULE_RESULTS"),
+            "MATCHES_SATELLITE_TARGET": int(
+                bool(existing.get("MATCHES_SATELLITE_TARGET"))
+                or bool(row.get("MATCHES_SATELLITE_TARGET"))
+            ),
+        }
+        _write_detect_times(updates, times)
+        if not _update_dashboard_row(detect_id, updates):
+            return detect_id
+        logger.info(
+            "dashboard occurrence appended: ma_code=%s detect_id=%s times=%s",
+            ma_code,
+            detect_id,
+            len(times),
+        )
+        return detect_id
+    except Exception as error:
+        logger.error("dashboard occurrence append failed: %s", error)
+        return None
+
+
 def insert_dashboard_row(row: dict[str, Any]) -> int | None:
     """Insert dashboard row and return DETECT_ID."""
     try:
@@ -548,6 +793,8 @@ def insert_dashboard_row(row: dict[str, Any]) -> int | None:
         detect_id = fetch_next_detect_id()
         payload["DETECT_ID"] = detect_id
         payload["DASHBOARD_ID"] = detect_id
+        if payload.get("DETECT_TIME") and not payload.get("DETECT_TIMES"):
+            _write_detect_times(payload, [_normalize_detect_time(payload.get("DETECT_TIME"))])
         sql, params = _build_insert(TABLE_ANOMALY_DASHBOARD, payload)
         if not params:
             return None
@@ -672,7 +919,11 @@ def query_detail_rows(dashboard_id: int) -> list[dict[str, Any]]:
         with get_connection() as conn:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
-                f"SELECT * FROM `{TABLE_ANOMALY_DETAIL}` WHERE DASHBOARD_ID = %s",
+                f"""
+                SELECT * FROM `{TABLE_ANOMALY_DETAIL}`
+                WHERE DASHBOARD_ID = %s
+                ORDER BY DETAIL_ID ASC
+                """,
                 (dashboard_id,),
             )
             rows = cursor.fetchall()

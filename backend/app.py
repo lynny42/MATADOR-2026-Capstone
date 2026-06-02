@@ -115,7 +115,7 @@ def get_detection(
     detect_id: int,
     snapshot_index: int | None = Query(default=None, ge=0),
 ) -> dict[str, Any]:
-    """Return detail for a selected MA code at an optional 1-second snapshot index."""
+    """Return detail for one MA code; snapshot_index selects which stored detect_time occurrence."""
     payload = _service().get_detection_detail(detect_id, snapshot_index)
     if "error" in payload:
         raise HTTPException(status_code=404, detail=payload["error"])

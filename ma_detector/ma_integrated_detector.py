@@ -855,8 +855,11 @@ class MAIntegratedDetector:
             dashboard_id = int(dashboard_row.get("DASHBOARD_ID", detect_id))
             detail_rows = self._db_query_detail(dashboard_id)
             history_rows = self._db_query_history(str(dashboard_row.get("DETECT_TIME", "")))
+            detect_times = gs_repository.parse_dashboard_detect_times(dashboard_row)
             result = {
-                "detect_time": dashboard_row.get("DETECT_TIME"),
+                "detect_time": detect_times[-1] if detect_times else dashboard_row.get("DETECT_TIME"),
+                "detect_times": detect_times,
+                "occurrence_count": len(detect_times) if detect_times else 1,
                 "module": dashboard_row.get("MODULE"),
                 "action": dashboard_row.get("ACTION"),
                 "scenario_phase": dashboard_row.get("SCENARIO_PHASE"),
@@ -1786,6 +1789,41 @@ class MAIntegratedDetector:
         except Exception as error:
             logger.error("normal UI notification failed: %s", error)
 
+    def _upsert_memory_dashboard_row(self, row: dict[str, Any]) -> None:
+        """Keep one in-memory dashboard row per MA_CODE with merged detect times."""
+        try:
+            ma_code = str(row.get("MA_CODE") or "")
+            for index, existing in enumerate(self._dashboard_rows):
+                if str(existing.get("MA_CODE") or "") != ma_code:
+                    continue
+                times = gs_repository.parse_dashboard_detect_times(existing)
+                for item in gs_repository.parse_dashboard_detect_times(row):
+                    if item not in times:
+                        times.append(item)
+                times.sort()
+                row["DETECT_TIME"] = times[-1] if times else row.get("DETECT_TIME")
+                gs_repository.write_dashboard_detect_times(row, times)
+                row["DETECT_ID"] = existing.get("DETECT_ID", row.get("DETECT_ID"))
+                row["DASHBOARD_ID"] = row.get("DETECT_ID")
+                row["CONFIDENCE_SCORE"] = max(
+                    float(existing.get("CONFIDENCE_SCORE") or 0.0),
+                    float(row.get("CONFIDENCE_SCORE") or 0.0),
+                )
+                row["GRADE"] = gs_repository.pick_higher_ma_grade(
+                    existing.get("GRADE"),
+                    row.get("GRADE"),
+                )
+                row["TRIGGERED_RULE_IDS"] = gs_repository.merge_dashboard_triggered_rule_ids(
+                    existing.get("TRIGGERED_RULE_IDS"),
+                    row.get("TRIGGERED_RULE_IDS"),
+                )
+                self._dashboard_rows[index] = row
+                return
+            self._dashboard_rows.append(row)
+        except Exception as error:
+            logger.error("memory dashboard upsert failed: %s", error)
+            self._dashboard_rows.append(row)
+
     def _memory_insert_dashboard(self, report: dict[str, Any]) -> None:
         """Append one dashboard row to in-memory tables without DB writes (replay preview)."""
         try:
@@ -1812,11 +1850,16 @@ class MAIntegratedDetector:
                 "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
                 **filter_fields,
             }
-            detect_id = self._next_detect_id
-            self._next_detect_id += 1
-            row["DETECT_ID"] = detect_id
-            row["DASHBOARD_ID"] = detect_id
-            self._dashboard_rows.append(row)
+            gs_repository.write_dashboard_detect_times(
+                row,
+                [gs_repository.normalize_dashboard_detect_time(row.get("DETECT_TIME"))],
+            )
+            if not any(str(item.get("MA_CODE") or "") == str(row.get("MA_CODE") or "") for item in self._dashboard_rows):
+                detect_id = self._next_detect_id
+                self._next_detect_id += 1
+                row["DETECT_ID"] = detect_id
+                row["DASHBOARD_ID"] = detect_id
+            self._upsert_memory_dashboard_row(row)
 
             detail = dict(latest)
             detail["DASHBOARD_ID"] = detect_id
@@ -1854,7 +1897,7 @@ class MAIntegratedDetector:
                 "MATCHES_SATELLITE_TARGET": report_matches_target(report, target, self._rule_registry),
                 **filter_fields,
             }
-            detect_id = gs_repository.insert_dashboard_row(row)
+            detect_id = gs_repository.append_dashboard_occurrence(row)
             if detect_id is None:
                 detect_id = self._next_detect_id
                 self._next_detect_id += 1
@@ -1862,7 +1905,10 @@ class MAIntegratedDetector:
                 self._next_detect_id = max(self._next_detect_id, detect_id + 1)
             row["DETECT_ID"] = detect_id
             row["DASHBOARD_ID"] = detect_id
-            self._dashboard_rows.append(row)
+            stored = gs_repository.query_dashboard_by_ma_code(str(row.get("MA_CODE") or ""))
+            if stored:
+                row.update(stored)
+            self._upsert_memory_dashboard_row(row)
 
             detail = dict(latest)
             detail["DASHBOARD_ID"] = detect_id

@@ -1,4 +1,4 @@
-"""Service layer that builds dashboard API responses from MySQL."""
+﻿"""Service layer that builds dashboard API responses from MySQL."""
 
 from __future__ import annotations
 
@@ -206,46 +206,95 @@ class DashboardService:
         }
 
     def get_detection_detail(self, detect_id: int, snapshot_index: int | None = None) -> dict[str, Any]:
-        """Return UI-ready detail for one dashboard detection at its detect_time snapshot."""
-        _ = snapshot_index
-        payload = json.loads(self.detector.get_ui_data(detect_id))
-        if "error" in payload:
-            return payload
+        """Return UI detail for one MA code; snapshot_index selects which detect_time occurrence."""
+        try:
+            detection = self._dashboard_detection_by_id(detect_id)
+            if not detection:
+                return {"error": f"detect_id {detect_id} not found"}
 
-        detail_history = payload.get("detail", {}).get("history", [])
-        detection = self._dashboard_detection_by_id(detect_id)
-        detect_time = str(detection.get("detect_time") or "")
-        history_rows = gs_repository.query_detection_history_rows(detect_time)
-        if not history_rows:
-            history_rows = list(detail_history)
-        previous_snapshot, current_snapshot = detection_snapshots_from_history(history_rows, detect_time)
-        if current_snapshot is None and detail_history:
+            detect_times = list(detection.get("detect_times") or [])
+            if not detect_times and detection.get("detect_time"):
+                detect_times = [str(detection.get("detect_time"))]
+            total_occurrences = len(detect_times)
+            occurrence_index = max(0, total_occurrences - 1) if total_occurrences else 0
+            if snapshot_index is not None and total_occurrences > 0:
+                occurrence_index = max(0, min(int(snapshot_index), total_occurrences - 1))
+            detect_time = (
+                str(detect_times[occurrence_index])
+                if detect_times
+                else str(detection.get("detect_time") or "")
+            )
+
+            payload = json.loads(self.detector.get_ui_data(detect_id))
+            if "error" in payload:
+                return payload
+
+            detail_rows = gs_repository.query_detail_rows(int(detect_id))
+            detail_history = payload.get("detail", {}).get("history", [])
+            history_rows = gs_repository.query_detection_history_rows(detect_time)
+            if not history_rows:
+                history_rows = list(detail_history)
+
             previous_snapshot, current_snapshot = detection_snapshots_from_history(
-                detail_history,
+                history_rows,
                 detect_time,
             )
-        snapshot = dict(current_snapshot or {})
-        previous_snapshot = dict(previous_snapshot) if previous_snapshot else None
-        payload["snapshot_frame"] = {
-            "mode": "detection_snapshot",
-            "index": 0,
-            "total": 1 if current_snapshot else 0,
-            "previous_at": (previous_snapshot or {}).get("UPDATED_AT"),
-            "current_at": snapshot.get("UPDATED_AT"),
-        }
-        payload["rule_details"] = self._build_rule_details(
-            payload.get("evidence_keys", {}),
-            snapshot,
-            detection,
-            previous_snapshot,
-        )
-        payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
-        payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
-        payload["action_mapping_status"] = detection.get("action_mapping_status", "mapped")
-        payload["unregistered_action_ids"] = detection.get("unregistered_action_ids", [])
-        payload["triggered_rule_results"] = detection.get("triggered_rule_results", [])
-        payload["novel_attack_advisory"] = self._novel_advisory_for_detection(detection)
-        return payload
+            if current_snapshot is None and detail_rows and occurrence_index < len(detail_rows):
+                current_snapshot = dict(detail_rows[occurrence_index])
+            if current_snapshot is None and detail_history:
+                previous_snapshot, current_snapshot = detection_snapshots_from_history(
+                    detail_history,
+                    detect_time,
+                )
+
+            snapshot = dict(current_snapshot or {})
+            previous_snapshot = dict(previous_snapshot) if previous_snapshot else None
+            payload.update(
+                {
+                    "detect_id": detect_id,
+                    "detect_time": detect_time,
+                    "detect_times": detect_times,
+                    "occurrence_count": total_occurrences or 1,
+                    "ma_code": detection.get("ma_code"),
+                    "confidence_score": detection.get("confidence"),
+                    "grade": detection.get("grade"),
+                    "module": detection.get("module"),
+                    "action": detection.get("action"),
+                    "scenario_phase": detection.get("phase"),
+                    "satellite_filter": detection.get("satellite_filter", {}),
+                    "evidence_keys": detection.get("evidence_keys", {}),
+                }
+            )
+            payload["occurrence_frame"] = {
+                "mode": "ma_occurrence",
+                "index": occurrence_index,
+                "total": total_occurrences or 1,
+                "detect_times": detect_times,
+                "current_at": detect_time,
+            }
+            payload["snapshot_frame"] = {
+                "mode": "detection_snapshot",
+                "index": occurrence_index,
+                "total": total_occurrences or 1,
+                "previous_at": (previous_snapshot or {}).get("UPDATED_AT"),
+                "current_at": snapshot.get("UPDATED_AT") or detect_time,
+            }
+            payload["rule_details"] = self._build_rule_details(
+                detection.get("evidence_keys", {}),
+                snapshot,
+                detection,
+                previous_snapshot,
+            )
+            payload["matches_satellite_target"] = bool(detection.get("matches_satellite_target"))
+            payload["is_new_pattern"] = bool(detection.get("is_new_pattern"))
+            payload["action_mapping_status"] = detection.get("action_mapping_status", "mapped")
+            payload["unregistered_action_ids"] = detection.get("unregistered_action_ids", [])
+            payload["triggered_rule_results"] = detection.get("triggered_rule_results", [])
+            payload["novel_attack_advisory"] = self._novel_advisory_for_detection(detection)
+            return payload
+        except Exception as error:
+            logger.error("get detection detail failed: %s", error)
+            return {"error": str(error)}
 
     def _novel_advisory_for_detection(self, detection: dict[str, Any]) -> dict[str, Any] | None:
         """Return B-3 advisory when attack(Y) has no mapped Action or is_new_pattern."""
@@ -534,10 +583,20 @@ class DashboardService:
                 target,
                 self.detector.get_rule_registry(),
             )
+        detect_times = gs_repository.parse_dashboard_detect_times(row)
+        evidence_keys = row.get("EVIDENCE_KEYS", {})
+        if isinstance(evidence_keys, dict):
+            evidence_keys = {
+                key: value
+                for key, value in evidence_keys.items()
+                if key != gs_repository.DETECT_TIMES_EVIDENCE_KEY
+            }
         return {
             "detect_id": row.get("DETECT_ID"),
             "dashboard_id": row.get("DASHBOARD_ID"),
-            "detect_time": row.get("DETECT_TIME"),
+            "detect_time": detect_times[-1] if detect_times else row.get("DETECT_TIME"),
+            "detect_times": detect_times,
+            "occurrence_count": len(detect_times),
             "module": module,
             "subsystems": self._module_to_subsystems(module),
             "action": row.get("ACTION"),
@@ -546,7 +605,7 @@ class DashboardService:
             "confidence": confidence,
             "grade": row.get("GRADE"),
             "corroboration_count": row.get("CORROBORATION_COUNT"),
-            "evidence_keys": row.get("EVIDENCE_KEYS", {}),
+            "evidence_keys": evidence_keys,
             "matches_satellite_target": matches_target,
             "is_new_pattern": bool(row.get("IS_NEW_PATTERN")),
             "action_mapping_status": str(row.get("ACTION_MAPPING_STATUS", "mapped")),

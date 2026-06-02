@@ -133,13 +133,18 @@ export default function DashboardPage() {
   }
 
   async function loadDetail(detectId, options = {}) {
-    const { syncCommunicationAt = true } = options;
+    const { syncCommunicationAt = true, occurrenceIndex = null } = options;
     try {
-      const detail = await apiGet(`/api/detections/${detectId}`);
+      const query =
+        occurrenceIndex !== null && occurrenceIndex !== undefined
+          ? `?snapshot_index=${occurrenceIndex}`
+          : "";
+      const detail = await apiGet(`/api/detections/${detectId}${query}`);
       setSelectedDetail(detail);
       setSelectedId(detectId);
-      setSnapshotIndex(null);
-      snapshotIndexRef.current = null;
+      const frameIndex = detail.occurrence_frame?.index ?? 0;
+      setSnapshotIndex(frameIndex);
+      snapshotIndexRef.current = frameIndex;
       if (syncCommunicationAt && detail.detect_time) {
         setSelectedCommunicationAt(detail.detect_time);
         selectedCommunicationAtRef.current = detail.detect_time;
@@ -641,7 +646,11 @@ function BlueprintPanel({ blueprint, recentThreats, latestCommunication, onSelec
                 <em className="text-[var(--accent)] not-italic">
                   P{threat.phase} · {threat.confidence}% · {threat.grade}
                 </em>
-                <span className={ui.muted}>{threat.detect_time}</span>
+                <span className={ui.muted}>
+                  {threat.occurrence_count > 1 && Array.isArray(threat.detect_times)
+                    ? `${threat.detect_times[0]} ~ ${threat.detect_times[threat.detect_times.length - 1]} (${threat.occurrence_count}회)`
+                    : threat.detect_time}
+                </span>
               </button>
             ))}
           </div>
@@ -704,6 +713,7 @@ function RightPanel({
             {dashboard.detections.map((detection) => (
               <option key={detection.detect_id} value={detection.detect_id}>
                 {detection.ma_code}
+                {detection.occurrence_count > 1 ? ` (${detection.occurrence_count}회)` : ""}
               </option>
             ))}
           </select>
@@ -714,7 +724,13 @@ function RightPanel({
       </div>
 
       {selectedDetail ? (
-        <DetailPanel selectedDetail={selectedDetail} />
+        <DetailPanel
+          selectedDetail={selectedDetail}
+          selectedId={selectedId}
+          onOccurrenceChange={(index) =>
+            onSelect(selectedId, { occurrenceIndex: index, syncCommunicationAt: false })
+          }
+        />
       ) : (
         <CommunicationSummary communication={selectedCommunication} onSelect={onSelect} />
       )}
@@ -765,12 +781,16 @@ function CommunicationSummary({ communication, onSelect }) {
   );
 }
 
-function DetailPanel({ selectedDetail }) {
+function DetailPanel({ selectedDetail, selectedId, onOccurrenceChange }) {
   if (!selectedDetail) {
     return <div className={cn(ui.detailCard, ui.muted)}>코드를 선택하면 Rule 근거가 표시됩니다.</div>;
   }
 
   const frame = selectedDetail.snapshot_frame;
+  const occurrence = selectedDetail.occurrence_frame;
+  const canBrowseOccurrences = Boolean(
+    occurrence && occurrence.total > 1 && selectedId && onOccurrenceChange
+  );
   const isUndefinedAction = selectedDetail.action_mapping_status === "undefined";
 
   return (
@@ -803,6 +823,29 @@ function DetailPanel({ selectedDetail }) {
         </div>
         <strong className={ui.detailAccent}>{selectedDetail.confidence_score}%</strong>
       </div>
+      {canBrowseOccurrences ? (
+        <div className={ui.snapshotNav}>
+          <button
+            type="button"
+            className={ui.btnPill}
+            disabled={occurrence.index <= 0}
+            onClick={() => onOccurrenceChange(occurrence.index - 1)}
+          >
+            ← 이전 탐지
+          </button>
+          <span className={ui.muted}>
+            {occurrence.index + 1} / {occurrence.total} · {occurrence.current_at}
+          </span>
+          <button
+            type="button"
+            className={ui.btnPill}
+            disabled={occurrence.index >= occurrence.total - 1}
+            onClick={() => onOccurrenceChange(occurrence.index + 1)}
+          >
+            다음 탐지 →
+          </button>
+        </div>
+      ) : null}
       <div className={ui.filterGrid}>
         <span className={ui.filterCell}>위성체 판정: {selectedDetail.satellite_filter?.result || "-"}</span>
         <span className={ui.filterCell}>가중치: {selectedDetail.satellite_filter?.weight || "-"}</span>
