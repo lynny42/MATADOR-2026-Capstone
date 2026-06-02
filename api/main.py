@@ -130,11 +130,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(telemetry.router)
     app.include_router(command.router)
     app.include_router(dashboard.router)
-    app.include_router(rule_manager.router)
     app.include_router(replay.router)
+    app.include_router(rule_manager.router)
 
     @app.websocket("/ws/status")
     async def websocket_status(websocket: WebSocket) -> None:

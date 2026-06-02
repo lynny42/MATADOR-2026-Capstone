@@ -340,6 +340,19 @@ class DashboardServiceTest(unittest.TestCase):
         with patch(
             "backend.dashboard_service.gs_repository.query_detection_history_rows",
             lambda detect_time: [prior_row, partial_row, anomaly_row],
+        ), patch.object(
+            self.service.detector,
+            "explain_rules_at_time",
+            lambda reference_time, rule_ids=None: {
+                rule_id: {
+                    "rule_score": 0.9,
+                    "triggered": True,
+                    "meets_threshold": True,
+                    "summary": "test",
+                    "clauses": [],
+                }
+                for rule_id in (rule_ids or ["E-03"])
+            },
         ):
             detail = self.service.get_detection_detail(1)
 
@@ -391,6 +404,19 @@ class DashboardServiceTest(unittest.TestCase):
         ), patch(
             "backend.dashboard_service.gs_repository.query_dashboard",
             lambda detect_id: dict(adcs_dashboard) if detect_id == 1 else None,
+        ), patch.object(
+            self.service.detector,
+            "explain_rules_at_time",
+            lambda reference_time, rule_ids=None: {
+                rule_id: {
+                    "rule_score": 0.9,
+                    "triggered": True,
+                    "meets_threshold": True,
+                    "summary": "test",
+                    "clauses": [],
+                }
+                for rule_id in (rule_ids or ["S2-X01"])
+            },
         ):
             detail = self.service.get_detection_detail(1)
 
