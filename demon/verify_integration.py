@@ -80,6 +80,15 @@ def test_db_manager_api(tmp_db: Path) -> None:
     if multi_ev is None or multi_ev.get("SW_ID_LIST") != "[0,1,2]":
         _fail(f"insert_event SW_ID_LIST multi-channel expected [0,1,2] got {multi_ev}")
     _ok("insert_event SW_ID_LIST multi-channel JSON")
+    eid_empty = db.insert_event(
+        {"EVENT_TYPE": "INTEGRITY_test", "PRIORITY": 1, "SW_ID_LIST": "[]"},
+    )
+    if eid_empty < 1:
+        _fail("insert_event SW_ID_LIST empty string")
+    empty_ev = db.get_event(eid_empty)
+    if empty_ev is None or empty_ev.get("SW_ID_LIST") != "[]":
+        _fail(f"insert_event SW_ID_LIST [] expected got {empty_ev}")
+    _ok("insert_event SW_ID_LIST empty [] string")
 
     db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
     tlm_sun = db.get_tlm_current()

@@ -1088,11 +1088,10 @@ class DBManager:
                     parsed = json.loads(stripped)
                     if isinstance(parsed, list):
                         ids = sorted({int(item) for item in parsed})
-                        if ids:
-                            return json.dumps(ids, separators=(",", ":"))
+                        return json.dumps(ids, separators=(",", ":"))
                 if stripped.lstrip("-").isdigit():
                     return json.dumps([int(stripped)], separators=(",", ":"))
-            if value is not None:
+            if value is not None and not isinstance(value, str):
                 return json.dumps([int(value)], separators=(",", ":"))
             return "[]"
         except (TypeError, ValueError, json.JSONDecodeError) as e:
