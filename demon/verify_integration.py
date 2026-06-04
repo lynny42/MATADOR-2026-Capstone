@@ -73,6 +73,14 @@ def test_db_manager_api(tmp_db: Path) -> None:
     db.delete_event(eid)
     _ok("event queue lifecycle")
 
+    multi_eid = db.insert_event(
+        {"EVENT_TYPE": "MULTI_PWR", "PRIORITY": 1, "SW_ID_LIST": [2, 0, 1]},
+    )
+    multi_ev = db.get_event(multi_eid)
+    if multi_ev is None or multi_ev.get("SW_ID_LIST") != "[0,1,2]":
+        _fail(f"insert_event SW_ID_LIST multi-channel expected [0,1,2] got {multi_ev}")
+    _ok("insert_event SW_ID_LIST multi-channel JSON")
+
     db.upsert_tlm_current({"ADCS_MODE": 2, "SUN_VALID": 1, "WBN_X": -0.001})
     tlm_sun = db.get_tlm_current()
     if tlm_sun is None or int(tlm_sun.get("SUN_VALID", 0)) != 1:
@@ -316,8 +324,88 @@ def test_fpf_pipeline_wiring(db_path: Path) -> None:
     if int(ks.get("event_id", 0)) < 1:
         _fail("FPF wiring: event_id not updated after insert_event")
 
+    ev = db.get_event(int(ks.get("event_id", 0)))
+    if ev is None or ev.get("SW_ID_LIST") != "[0]":
+        _fail(f"FPF→GScomms SW_ID_LIST single channel expected [0] got {ev}")
+
+    multi_result = {
+        "is_attack": "Y",
+        "weight": 80,
+        "exception_code": 4,
+        "key_set": {
+            "sw_id": 1,
+            "sw_id_list": [2, 0, 1],
+            "channel1": 1,
+            "detected_at": "2026-05-12T12:01:00Z",
+        },
+    }
+    multi_eid = gs_comms.insert_event(multi_result)
+    multi_ev = db.get_event(multi_eid)
+    if multi_ev is None or multi_ev.get("SW_ID_LIST") != "[0,1,2]":
+        _fail(f"GScomms insert_event multi sw_id_list expected [0,1,2] got {multi_ev}")
+    _ok("GScomms insert_event SW_ID_LIST from key_set.sw_id_list")
+
+    conn = sqlite3.connect(db_path)
+    event_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(SAT_EVENT_QUEUE)").fetchall()
+    }
+    conn.close()
+    if "SW_ID_LIST" not in event_cols:
+        _fail("SAT_EVENT_QUEUE schema missing SW_ID_LIST column")
+
     db.close()
     _ok("FPF pipeline wiring (AnomalyDetector → FPF → GScomms)")
+
+
+def test_event_sw_id_list_migration(db_path: Path) -> None:
+    """구 SW_ID INTEGER 컬럼 DB → SW_ID_LIST JSON 마이그레이션."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE SAT_EVENT_QUEUE (
+              EVENT_ID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              DETECTED_AT TEXT NOT NULL,
+              PIPEOVERFLOWRRCNT INTEGER NOT NULL DEFAULT 0,
+              CHILDQUEUECOUNT INTEGER NOT NULL DEFAULT 0,
+              FILEWRITEERRCOUNTER INTEGER NOT NULL DEFAULT 0,
+              CMDREJECTEDCOUNTER INTEGER NOT NULL DEFAULT 0,
+              CH1_CH2_FAULT_CRC INTEGER NOT NULL DEFAULT 0,
+              CH1_FAULT_FILE_SIZE_MISMATCH INTEGER NOT NULL DEFAULT 0,
+              PROCESSOR_RESET_COUNT INTEGER NOT NULL DEFAULT 0,
+              IS_SENT INTEGER NOT NULL DEFAULT 0,
+              TIMESTAMP TEXT NOT NULL,
+              PRIORITY INTEGER NOT NULL DEFAULT 0,
+              EVENT_TYPE TEXT NOT NULL,
+              SW_ID INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO SAT_EVENT_QUEUE (
+              DETECTED_AT, PIPEOVERFLOWRRCNT, CHILDQUEUECOUNT,
+              FILEWRITEERRCOUNTER, CMDREJECTEDCOUNTER, CH1_CH2_FAULT_CRC,
+              CH1_FAULT_FILE_SIZE_MISMATCH, PROCESSOR_RESET_COUNT,
+              IS_SENT, TIMESTAMP, PRIORITY, EVENT_TYPE, SW_ID
+            ) VALUES (
+              '2026-05-01T00:00:00Z', 0, 0, 0, 0, 0, 0, 0, 0,
+              '2026-05-01T00:00:00Z', 1, 'LEGACY', 2
+            )
+            """,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = DBManager(db_path)
+    if not db.init_db():
+        _fail("SW_ID_LIST migration: init_db")
+    row = db.get_event(1)
+    if row is None or row.get("SW_ID_LIST") != "[2]":
+        _fail(f"SW_ID_LIST migration expected [2] got {row}")
+    db.close()
+    _ok("SAT_EVENT_QUEUE SW_ID → SW_ID_LIST migration")
 
 
 def test_flush_trigger_mid_config() -> None:
@@ -425,6 +513,7 @@ def main() -> int:
         test_serial_reader_parsing(Path(tempfile.mkdtemp()) / "verify_serial.db")
         test_do_flush_pending(Path(tempfile.mkdtemp()) / "verify2.db")
         test_fpf_pipeline_wiring(Path(tempfile.mkdtemp()) / "verify_fpf.db")
+        test_event_sw_id_list_migration(Path(tempfile.mkdtemp()) / "verify_swid.db")
         test_gs_bulk_transmit(Path(tempfile.mkdtemp()) / "verify_gs.db")
         logger.info("=== All local integration checks passed ===")
         return 0

@@ -10,13 +10,14 @@ from typing import Any, Callable, Protocol
 from .. import config as demon_config
 from ..core.context import RuntimeContext
 from ..core.time_utils import normalize_record_timestamps, normalize_timestamp_iso, now_iso
+from ..db.db_manager import DBManager
 
 logger = logging.getLogger(__name__)
 
 # db_manager.insert_event 확장 전까지 SAT_EVENT_QUEUE 선택 컬럼 (추가 시 자동 반영)
 _OPTIONAL_EVENT_COLS: tuple[str, ...] = (
     "EXCEPTION_CODE",
-    "SW_ID",
+    "SW_ID_LIST",
     "WEIGHT",
     "CHENNEL1",
     "MODULE_SCORES",
@@ -95,7 +96,7 @@ def format_fpf_gs_event(ev: dict[str, Any]) -> str:
         base = (
             f"type={event_type} decision={decision} "
             f"WEIGHT={ev.get('WEIGHT')} EXCEPTION_CODE={exc}({exc_txt}) "
-            f"SW_ID={ev.get('SW_ID')} CHENNEL1={ev.get('CHENNEL1')} "
+            f"SW_ID_LIST={ev.get('SW_ID_LIST', ev.get('SW_ID'))} CHENNEL1={ev.get('CHENNEL1')} "
             f"PRIORITY={ev.get('PRIORITY')}"
         )
         if ms:
@@ -241,7 +242,16 @@ class GScomms:
             if not isinstance(key_set, dict):
                 key_set = {}
 
-            sw_id = int(key_set.get("sw_id", 0))
+            raw_sw_id_list = key_set.get("sw_id_list")
+            sw_id_list_arg = (
+                list(raw_sw_id_list)
+                if isinstance(raw_sw_id_list, list)
+                else None
+            )
+            sw_id_list_text = DBManager.format_event_sw_id_list(
+                key_set.get("sw_id", 0),
+                sw_id_list=sw_id_list_arg,
+            )
             chennel1 = int(
                 key_set.get(
                     "channel1",
@@ -278,7 +288,7 @@ class GScomms:
                 "PRIORITY": priority,
                 "IS_SENT": 0,
                 "EXCEPTION_CODE": int(result.get("exception_code", 0)),
-                "SW_ID": sw_id,
+                "SW_ID_LIST": sw_id_list_text,
                 "WEIGHT": weight,
                 "CHENNEL1": chennel1,
                 "MODULE_SCORES": module_scores_text,
@@ -292,20 +302,22 @@ class GScomms:
             if is_attack == "Y":
                 logger.info(
                     ">>> [지상국 대기] 공격 확정 이벤트 등록 event_id=%s type=%s "
-                    "weight=%s sw_id=%s (조도 dark→light 시 bulk 송신)",
+                    "weight=%s sw_id_list=%s chennel1=%s (조도 dark→light 시 bulk 송신)",
                     event_id,
                     event_type,
                     weight,
-                    sw_id,
+                    sw_id_list_text,
+                    chennel1,
                 )
             else:
                 logger.info(
                     ">>> [지상국 대기] SEU(오탐) 이벤트 등록 event_id=%s type=%s "
-                    "weight=%s sw_id=%s (조도 dark→light 시 bulk 송신)",
+                    "weight=%s sw_id_list=%s chennel1=%s (조도 dark→light 시 bulk 송신)",
                     event_id,
                     event_type,
                     weight,
-                    sw_id,
+                    sw_id_list_text,
+                    chennel1,
                 )
             return event_id
         except (ValueError, TypeError) as e:

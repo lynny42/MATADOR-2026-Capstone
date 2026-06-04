@@ -246,7 +246,7 @@ def _print_event(ev: dict[str, Any]) -> None:
         print(f"    EVENT_TYPE    = {event_type}")
         print(f"    PRIORITY      = {ev.get('PRIORITY')}")
         print(f"    DETECTED_AT   = {ev.get('DETECTED_AT')}")
-        print(f"    SW_ID         = {ev.get('SW_ID')}")
+        print(f"    SW_ID_LIST    = {ev.get('SW_ID_LIST', ev.get('SW_ID'))}")
         print(f"    WEIGHT        = {ev.get('WEIGHT')}")
         print(f"    CHENNEL1      = {ev.get('CHENNEL1')}")
         print(f"    EXCEPTION_CODE= {ev.get('EXCEPTION_CODE')}")

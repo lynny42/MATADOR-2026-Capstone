@@ -214,7 +214,7 @@ def _print_check_summary(
         for ev in events[:3]:
             print(
                 f"    #{ev.get('EVENT_ID')} {ev.get('EVENT_TYPE')}  "
-                f"priority={ev.get('PRIORITY')}  sw={ev.get('SW_ID')}",
+                f"priority={ev.get('PRIORITY')}  sw_id_list={ev.get('SW_ID_LIST')}",
             )
 
     print(c.wrap(f"  SAT_PWR_HISTORY snapshots={hist}", c.DIM))

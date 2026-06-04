@@ -218,7 +218,7 @@ DDL_STATEMENTS: list[str] = [
       TIMESTAMP TEXT NOT NULL,
       PRIORITY INTEGER NOT NULL,
       EVENT_TYPE TEXT NOT NULL,
-      SW_ID INTEGER NOT NULL DEFAULT 0,
+      SW_ID_LIST TEXT NOT NULL DEFAULT '[]',
       WEIGHT INTEGER NOT NULL DEFAULT 0,
       EXCEPTION_CODE INTEGER NOT NULL DEFAULT 0,
       MODULE_SCORES TEXT NOT NULL DEFAULT '',
@@ -401,7 +401,7 @@ def _migrate_event_queue_columns(conn: sqlite3.Connection) -> None:
     """SAT_EVENT_QUEUE 확장 컬럼 — 기존 DB 호환."""
     try:
         additions: list[tuple[str, str]] = [
-            ("SW_ID", "INTEGER NOT NULL DEFAULT 0"),
+            ("SW_ID_LIST", "TEXT NOT NULL DEFAULT '[]'"),
             ("WEIGHT", "INTEGER NOT NULL DEFAULT 0"),
             ("EXCEPTION_CODE", "INTEGER NOT NULL DEFAULT 0"),
             ("MODULE_SCORES", "TEXT NOT NULL DEFAULT ''"),
@@ -412,11 +412,87 @@ def _migrate_event_queue_columns(conn: sqlite3.Connection) -> None:
                 continue
             conn.execute(f"ALTER TABLE SAT_EVENT_QUEUE ADD COLUMN {col} {col_def}")
             logger.info("SAT_EVENT_QUEUE: %s 컬럼 추가", col)
+        _migrate_event_sw_id_rename(conn)
     except sqlite3.Error as e:
         logger.error("SAT_EVENT_QUEUE 컬럼 마이그레이션 실패(SQLite): %s", e)
         raise
     except Exception as e:
         logger.error("SAT_EVENT_QUEUE 컬럼 마이그레이션 실패: %s", e)
+        raise
+
+
+def _normalize_event_sw_id_list_cell(raw: Any) -> str:
+    """구 SW_ID(정수/문자열) 또는 SW_ID_LIST 셀 → JSON 배열 문자열."""
+    import json
+
+    try:
+        if isinstance(raw, str) and raw.strip().startswith("["):
+            parsed = json.loads(raw.strip())
+            if isinstance(parsed, list):
+                ids = sorted({int(item) for item in parsed})
+                return json.dumps(ids, separators=(",", ":"))
+        if raw is None:
+            return "[]"
+        if isinstance(raw, int):
+            return json.dumps([int(raw)], separators=(",", ":"))
+        if isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+            return json.dumps([int(raw.strip())], separators=(",", ":"))
+        return "[]"
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        logger.error("_normalize_event_sw_id_list_cell 변환 오류: %s", e)
+        return "[]"
+    except Exception as e:
+        logger.error("_normalize_event_sw_id_list_cell 실패: %s", e)
+        return "[]"
+
+
+def _migrate_event_sw_id_rename(conn: sqlite3.Connection) -> None:
+    """구 SAT_EVENT_QUEUE.SW_ID → SW_ID_LIST 컬럼명·값 정규화."""
+    try:
+        has_old = _table_has_column(conn, "SAT_EVENT_QUEUE", "SW_ID")
+        has_new = _table_has_column(conn, "SAT_EVENT_QUEUE", "SW_ID_LIST")
+        if not has_old and not has_new:
+            return
+
+        if has_old and has_new:
+            cur = conn.execute(
+                "SELECT EVENT_ID, SW_ID, SW_ID_LIST FROM SAT_EVENT_QUEUE",
+            )
+            for event_id, old_val, new_val in cur.fetchall():
+                new_stripped = str(new_val).strip() if new_val is not None else ""
+                if new_stripped and new_stripped != "[]":
+                    continue
+                normalized = _normalize_event_sw_id_list_cell(old_val)
+                conn.execute(
+                    "UPDATE SAT_EVENT_QUEUE SET SW_ID_LIST = ? WHERE EVENT_ID = ?",
+                    (normalized, int(event_id)),
+                )
+            logger.info("SAT_EVENT_QUEUE: SW_ID 값을 SW_ID_LIST 로 이관")
+            return
+
+        if has_old and not has_new:
+            conn.execute(
+                "ALTER TABLE SAT_EVENT_QUEUE RENAME COLUMN SW_ID TO SW_ID_LIST",
+            )
+            logger.info("SAT_EVENT_QUEUE: SW_ID → SW_ID_LIST 컬럼명 변경")
+
+        if not _table_has_column(conn, "SAT_EVENT_QUEUE", "SW_ID_LIST"):
+            return
+
+        cur = conn.execute("SELECT EVENT_ID, SW_ID_LIST FROM SAT_EVENT_QUEUE")
+        for event_id, raw in cur.fetchall():
+            if isinstance(raw, str) and raw.strip().startswith("["):
+                continue
+            normalized = _normalize_event_sw_id_list_cell(raw)
+            conn.execute(
+                "UPDATE SAT_EVENT_QUEUE SET SW_ID_LIST = ? WHERE EVENT_ID = ?",
+                (normalized, int(event_id)),
+            )
+    except sqlite3.Error as e:
+        logger.error("SAT_EVENT_QUEUE SW_ID_LIST rename 실패(SQLite): %s", e)
+        raise
+    except Exception as e:
+        logger.error("SAT_EVENT_QUEUE SW_ID_LIST rename 실패: %s", e)
         raise
 
 

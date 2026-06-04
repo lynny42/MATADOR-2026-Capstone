@@ -6,6 +6,7 @@ SQLite 런타임 접근 — 위성체 안티탬퍼링 앱 DBManager.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -47,7 +48,6 @@ _EVENT_INT_DEFAULTS: dict[str, int] = {
     "PROCESSOR_RESET_COUNT": 0,
     "IS_SENT": 0,
     "PRIORITY": 0,
-    "SW_ID": 0,
     "WEIGHT": 0,
     "EXCEPTION_CODE": 0,
     "CHENNEL1": 0,
@@ -1062,6 +1062,46 @@ class DBManager:
             logger.error("_telemetry_event_counters 실패: %s", e)
             return {col: int(_EVENT_INT_DEFAULTS.get(col, 0)) for col in _EVENT_COUNTER_COLS}
 
+    @staticmethod
+    def format_event_sw_id_list(
+        value: Any = None,
+        *,
+        sw_id_list: list[int] | None = None,
+    ) -> str:
+        """
+        SAT_EVENT_QUEUE.SW_ID_LIST — 다채널 이상 시 전체 채널을 JSON 배열 문자열로 저장.
+
+        예: '[0,1,2]'. 단일 채널은 '[1]'.
+        """
+        try:
+            if sw_id_list:
+                ids = sorted({int(item) for item in sw_id_list})
+                if ids:
+                    return json.dumps(ids, separators=(",", ":"))
+            if isinstance(value, list):
+                ids = sorted({int(item) for item in value})
+                if ids:
+                    return json.dumps(ids, separators=(",", ":"))
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.startswith("["):
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        ids = sorted({int(item) for item in parsed})
+                        if ids:
+                            return json.dumps(ids, separators=(",", ":"))
+                if stripped.lstrip("-").isdigit():
+                    return json.dumps([int(stripped)], separators=(",", ":"))
+            if value is not None:
+                return json.dumps([int(value)], separators=(",", ":"))
+            return "[]"
+        except (TypeError, ValueError, json.JSONDecodeError) as e:
+            logger.error("format_event_sw_id_list 변환 오류: %s", e)
+            return "[]"
+        except Exception as e:
+            logger.error("format_event_sw_id_list 실패: %s", e)
+            return "[]"
+
     def insert_event(self, event: dict[str, Any]) -> int:
         """SAT_EVENT_QUEUE INSERT. 성공 시 event_id, 실패 시 -1."""
         try:
@@ -1071,7 +1111,17 @@ class DBManager:
             event_type = str(event.get("EVENT_TYPE", "UNKNOWN"))
             priority = int(event.get("PRIORITY", 0))
             is_sent = int(event.get("IS_SENT", 0))
-            sw_id = int(event.get("SW_ID", _EVENT_INT_DEFAULTS["SW_ID"]))
+            raw_sw_id_list = event.get("SW_ID_LIST")
+            sw_id_list_arg: list[int] | None = None
+            value: Any = event.get("SW_ID")
+            if isinstance(raw_sw_id_list, list):
+                sw_id_list_arg = [int(item) for item in raw_sw_id_list]
+            elif isinstance(raw_sw_id_list, str):
+                value = raw_sw_id_list
+            sw_id_list_text = self.format_event_sw_id_list(
+                value,
+                sw_id_list=sw_id_list_arg,
+            )
             weight = int(event.get("WEIGHT", _EVENT_INT_DEFAULTS["WEIGHT"]))
             exception_code = int(event.get("EXCEPTION_CODE", _EVENT_INT_DEFAULTS["EXCEPTION_CODE"]))
             module_scores = str(event.get("MODULE_SCORES", ""))
@@ -1092,7 +1142,7 @@ class DBManager:
                 "TIMESTAMP",
                 "PRIORITY",
                 "EVENT_TYPE",
-                "SW_ID",
+                "SW_ID_LIST",
                 "WEIGHT",
                 "EXCEPTION_CODE",
                 "MODULE_SCORES",
@@ -1105,7 +1155,7 @@ class DBManager:
                 timestamp,
                 priority,
                 event_type,
-                sw_id,
+                sw_id_list_text,
                 weight,
                 exception_code,
                 module_scores,

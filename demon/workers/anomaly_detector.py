@@ -694,7 +694,7 @@ class AnomalyDetector:
                 "EVENT_TYPE": f"INTEGRITY_{reason}",
                 "PRIORITY": 1,
                 "IS_SENT": 0,
-                "SW_ID": 0,
+                "SW_ID_LIST": "[]",
                 "WEIGHT": 100,
                 "EXCEPTION_CODE": int(exception_code),
                 "CHENNEL1": 0,
