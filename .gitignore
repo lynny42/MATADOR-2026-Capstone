@@ -14,3 +14,4 @@ demon/database.sqlite-*
 # 로컬 로그 (config.LOG_FILE_PATH 지정 시)
 *.log
 demon/*.log
+adcs_filter_log.txt
